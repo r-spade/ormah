@@ -1,0 +1,63 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# SQLite index (rebuildable from markdown files)
+memory/index.db
+memory/index.db-wal
+memory/index.db-shm
+
+# Memory node data (user data, not source code)
+memory/nodes/*.md
+memory/logs/*.txt
+memory/logs/.processed
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+ui/node_modules/
+src/ormah/ui_dist/
+
+# uv
+uv.lock
+
+# Claude Code
+.claude/
+
+# Ormah runtime database
+ormah.db
+
+# Deleted memories
+memory/deleted/
+
+# Eval scripts and snapshots (local dev only)
+scripts/eval_*.py
+scripts/eval_snapshots/
+
+# Generated docs and plans (local dev artifacts)
+ARCHITECTURE.md
+GRAPH_IMPROVEMENTS.md
+REVIEW_FINDINGS.md
+docs/plans/
+.mcp.json
