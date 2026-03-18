@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ormah — one-liner installer
-# Usage: bash <(curl -fsSL https://ormah.me/install.sh)
-#        bash <(curl -fsSL https://ormah.me/install.sh) --no-setup
+# Usage: bash <(curl -fsSL https://www.ormah.me/install.sh)
+#        bash <(curl -fsSL https://www.ormah.me/install.sh) --no-setup
 set -euo pipefail
 
 # ── Output helpers ──────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ fi
 step "Installing ormah"
 
 INSTALL_SOURCE="${ORMAH_INSTALL_SOURCE:-ormah[litellm]}"
-UV_FLAGS=()
+UV_FLAGS=(--python 3.11)
 
 if uv tool list 2>/dev/null | grep -q '^ormah '; then
     info "Existing install found — upgrading"
@@ -106,14 +106,14 @@ fi
 _install_ok=false
 
 info "Installing from: $INSTALL_SOURCE"
-if uv tool install "$INSTALL_SOURCE" ${UV_FLAGS[@]+"${UV_FLAGS[@]}"} 2>/dev/null; then
+if uv tool install "$INSTALL_SOURCE" "${UV_FLAGS[@]}" 2>/dev/null; then
     _install_ok=true
 else
     # Fallback to git if PyPI failed and user didn't override source
     if [[ -z "${ORMAH_INSTALL_SOURCE:-}" ]]; then
         warn "PyPI install failed — trying git source"
         GIT_SOURCE='ormah[litellm] @ git+https://github.com/r-spade/ormah.git'
-        if uv tool install "$GIT_SOURCE" ${UV_FLAGS[@]+"${UV_FLAGS[@]}"}; then
+        if uv tool install "$GIT_SOURCE" "${UV_FLAGS[@]}"; then
             _install_ok=true
         fi
     fi

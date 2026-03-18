@@ -19,7 +19,7 @@ You can see it all in a live visualization at `localhost:8787`, a live constella
 ## Install
 
 ```bash
-curl -fsSL https://ormah.me/install.sh | sh
+bash <(curl -fsSL https://ormah.me/install.sh)
 ```
 
 `ormah setup` handles everything:
