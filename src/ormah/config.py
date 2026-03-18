@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     log_format: str = "text"  # "text" or "json"
 
     # Paths
-    memory_dir: Path = Path("memory")
+    memory_dir: Path = Path.home() / ".local" / "share" / "ormah" / "memory"
 
     # Embeddings
     embedding_provider: str = "local"  # "local", "ollama", "litellm"
