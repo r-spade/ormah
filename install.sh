@@ -130,6 +130,37 @@ command -v ormah >/dev/null 2>&1 || fail "ormah installed but not found on PATH"
 
 ok "ormah installed ($(ormah --version 2>/dev/null || echo 'unknown version'))"
 
+# ── Ensure ~/.local/bin is on PATH persistently ───────────────────────────
+
+step "Checking PATH"
+
+_local_bin="$HOME/.local/bin"
+_shell_name="$(basename "${SHELL:-/bin/bash}")"
+
+case "$_shell_name" in
+    zsh)  _profile="$HOME/.zshrc" ;;
+    bash) _profile="$HOME/.bashrc" ;;
+    fish) _profile="$HOME/.config/fish/config.fish" ;;
+    *)    _profile="$HOME/.profile" ;;
+esac
+
+if echo "$PATH" | tr ':' '\n' | grep -qx "$_local_bin"; then
+    ok "$_local_bin already on PATH"
+else
+    if [ -f "$_profile" ] && grep -q "$_local_bin" "$_profile" 2>/dev/null; then
+        ok "$_local_bin already in $_profile (not active in this session)"
+    else
+        if [ "$_shell_name" = "fish" ]; then
+            _path_line="fish_add_path $_local_bin"
+        else
+            _path_line="export PATH=\"\$HOME/.local/bin:\$PATH\""
+        fi
+        printf '\n# Added by ormah installer\n%s\n' "$_path_line" >> "$_profile"
+        ok "Added $_local_bin to $_profile"
+        warn "Run 'source $_profile' or open a new terminal for it to take effect"
+    fi
+fi
+
 # ── Post-install note ───────────────────────────────────────────────────────
 
 warn "First server start will download the embedding model (~500 MB one-time download)"
