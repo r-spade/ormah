@@ -22,6 +22,7 @@ from ormah.setup import (
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
     ENV_PATH,
+    WRAPPER_PATH,
     _merge_json_file,
     _read_env_file,
     _write_env_file,
@@ -30,6 +31,7 @@ from ormah.setup import (
     configure_claude_desktop,
     configure_identity,
     configure_llm,
+    generate_server_wrapper,
     install_claude_md,
     seed_identity,
 )
@@ -89,12 +91,12 @@ class TestPlistTemplate:
     def test_template_renders(self):
         rendered = PLIST_TEMPLATE.format(
             label=LAUNCHD_LABEL,
-            ormah_bin="/usr/local/bin/ormah",
+            wrapper_path="/home/user/.config/ormah/start-server.sh",
             bin_dir="/usr/local/bin",
             log_dir="/tmp/logs",
         )
         assert "<string>com.ormah.server</string>" in rendered
-        assert "<string>/usr/local/bin/ormah</string>" in rendered
+        assert "<string>/home/user/.config/ormah/start-server.sh</string>" in rendered
         assert "<string>/tmp/logs/ormah.out.log</string>" in rendered
         assert "<key>RunAtLoad</key><true/>" in rendered
         assert "<key>KeepAlive</key><true/>" in rendered
@@ -102,7 +104,7 @@ class TestPlistTemplate:
     def test_template_includes_path(self):
         rendered = PLIST_TEMPLATE.format(
             label=LAUNCHD_LABEL,
-            ormah_bin="/home/user/.local/bin/ormah",
+            wrapper_path="/home/user/.config/ormah/start-server.sh",
             bin_dir="/home/user/.local/bin",
             log_dir="/tmp/logs",
         )
@@ -112,28 +114,26 @@ class TestPlistTemplate:
 class TestSystemdTemplate:
     def test_template_renders(self):
         rendered = SYSTEMD_TEMPLATE.format(
-            ormah_bin="/usr/local/bin/ormah",
+            wrapper_path="/home/user/.config/ormah/start-server.sh",
             bin_dir="/usr/local/bin",
-            env_file="/home/user/.config/ormah/.env",
             log_dir="/tmp/logs",
         )
-        assert "ExecStart=/usr/local/bin/ormah server start" in rendered
+        assert "ExecStart=/home/user/.config/ormah/start-server.sh" in rendered
         assert "Restart=on-failure" in rendered
         assert "WantedBy=default.target" in rendered
         assert "After=network.target" in rendered
         assert 'Environment="PATH=/usr/local/bin:' in rendered
-        assert "EnvironmentFile=-/home/user/.config/ormah/.env" in rendered
+        assert "EnvironmentFile" not in rendered
         assert "StandardOutput=append:/tmp/logs/ormah.out.log" in rendered
         assert "StandardError=append:/tmp/logs/ormah.err.log" in rendered
 
     def test_template_renders_with_spaces_in_path(self):
         rendered = SYSTEMD_TEMPLATE.format(
-            ormah_bin='"/home/user/my apps/ormah"',
+            wrapper_path="/home/user/.config/ormah/start-server.sh",
             bin_dir="/home/user/my apps",
-            env_file="/home/user/.config/ormah/.env",
             log_dir="/tmp/logs",
         )
-        assert 'ExecStart="/home/user/my apps/ormah" server start' in rendered
+        assert "ExecStart=/home/user/.config/ormah/start-server.sh" in rendered
 
 
 # --- setup tests ---
@@ -333,6 +333,66 @@ class TestEnvFile:
         assert file_mode == 0o600
 
 
+# --- Server wrapper tests ---
+
+
+class TestGenerateServerWrapper:
+    def test_creates_wrapper_file(self, tmp_path):
+        wrapper = tmp_path / "start-server.sh"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
+            result = generate_server_wrapper("/usr/local/bin/ormah")
+        assert result == wrapper
+        assert wrapper.exists()
+
+    def test_wrapper_has_700_permissions(self, tmp_path):
+        wrapper = tmp_path / "start-server.sh"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
+            generate_server_wrapper("/usr/local/bin/ormah")
+        file_mode = stat.S_IMODE(wrapper.stat().st_mode)
+        assert file_mode == 0o700
+
+    def test_wrapper_contains_ormah_bin(self, tmp_path):
+        wrapper = tmp_path / "start-server.sh"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
+            generate_server_wrapper("/usr/local/bin/ormah")
+        content = wrapper.read_text()
+        assert "exec /usr/local/bin/ormah server start" in content
+
+    def test_wrapper_contains_api_key_grep(self, tmp_path):
+        wrapper = tmp_path / "start-server.sh"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
+            generate_server_wrapper("/usr/local/bin/ormah")
+        content = wrapper.read_text()
+        assert "ANTHROPIC_API_KEY" in content
+        assert "OPENAI_API_KEY" in content
+        assert "GEMINI_API_KEY" in content
+
+    def test_wrapper_no_hardcoded_secrets(self, tmp_path):
+        wrapper = tmp_path / "start-server.sh"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
+            generate_server_wrapper("/usr/local/bin/ormah")
+        content = wrapper.read_text()
+        assert "sk-ant-" not in content
+        assert "sk-" not in content.replace("#!/", "")  # ignore shebang
+
+    def test_idempotent(self, tmp_path):
+        wrapper = tmp_path / "start-server.sh"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
+            generate_server_wrapper("/usr/local/bin/ormah")
+            first_content = wrapper.read_text()
+            generate_server_wrapper("/usr/local/bin/ormah")
+            second_content = wrapper.read_text()
+        assert first_content == second_content
+
+    def test_sources_env_file(self, tmp_path):
+        wrapper = tmp_path / "start-server.sh"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
+            generate_server_wrapper("/usr/local/bin/ormah")
+        content = wrapper.read_text()
+        assert '.config/ormah/.env' in content
+        assert "set -a" in content
+
+
 # --- Identity tests ---
 
 
@@ -405,12 +465,21 @@ class TestSeedIdentity:
 
 
 class TestConfigureLlm:
-    def test_anthropic_with_key(self, tmp_path, monkeypatch):
+    def _clear_all_api_keys(self, monkeypatch):
+        """Remove all known API keys from env so auto-detect doesn't fire."""
+        for key in (
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+            "GROQ_API_KEY", "MISTRAL_API_KEY", "COHERE_API_KEY",
+            "AZURE_API_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_anthropic_no_key_in_env(self, tmp_path, monkeypatch):
+        """Manual selection of Anthropic without key in env stores only provider/model."""
         env_path = tmp_path / ".env"
+        self._clear_all_api_keys(monkeypatch)
         inputs = iter(["1"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-        monkeypatch.setattr("ormah.setup.getpass.getpass", lambda _: "sk-ant-test-key")
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
         with (
             patch("ormah.setup.ENV_PATH", env_path),
@@ -420,15 +489,15 @@ class TestConfigureLlm:
             result = _read_env_file()
 
         assert result["ORMAH_LLM_PROVIDER"] == "litellm"
-        assert result["ORMAH_LLM_MODEL"] == "claude-sonnet-4-20250514"
-        assert result["ANTHROPIC_API_KEY"] == "sk-ant-test-key"
+        assert result["ORMAH_LLM_MODEL"] == "claude-haiku-4-5-20251001"
+        assert "ANTHROPIC_API_KEY" not in result
 
-    def test_openai_with_key(self, tmp_path, monkeypatch):
+    def test_openai_no_key_in_env(self, tmp_path, monkeypatch):
+        """Manual selection of OpenAI without key in env stores only provider/model."""
         env_path = tmp_path / ".env"
+        self._clear_all_api_keys(monkeypatch)
         inputs = iter(["2"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-        monkeypatch.setattr("ormah.setup.getpass.getpass", lambda _: "sk-test-openai")
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
         with (
             patch("ormah.setup.ENV_PATH", env_path),
@@ -438,11 +507,12 @@ class TestConfigureLlm:
             result = _read_env_file()
 
         assert result["ORMAH_LLM_PROVIDER"] == "litellm"
-        assert result["ORMAH_LLM_MODEL"] == "gpt-4o-mini"
-        assert result["OPENAI_API_KEY"] == "sk-test-openai"
+        assert result["ORMAH_LLM_MODEL"] == "gpt-4.1-mini"
+        assert "OPENAI_API_KEY" not in result
 
     def test_ollama_no_key_needed(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
+        self._clear_all_api_keys(monkeypatch)
         monkeypatch.setattr("builtins.input", lambda _: "4")
 
         with (
@@ -458,6 +528,7 @@ class TestConfigureLlm:
 
     def test_none_sets_provider_none(self, tmp_path, monkeypatch, capsys):
         env_path = tmp_path / ".env"
+        self._clear_all_api_keys(monkeypatch)
         monkeypatch.setattr("builtins.input", lambda _: "5")
 
         with (
@@ -474,9 +545,10 @@ class TestConfigureLlm:
         assert "No LLM configured" in captured.out
         assert "store, recall, and whisper all work" in captured.out
 
-    def test_picks_up_existing_env_key(self, tmp_path, monkeypatch):
+    def test_auto_detect_does_not_store_key(self, tmp_path, monkeypatch):
+        """Auto-detect path stores provider/model but NOT the API key."""
         env_path = tmp_path / ".env"
-        monkeypatch.setattr("builtins.input", lambda _: "1")
+        monkeypatch.setattr("builtins.input", lambda _: "")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-env")
 
         with (
@@ -486,11 +558,14 @@ class TestConfigureLlm:
             configure_llm()
             result = _read_env_file()
 
-        assert result["ANTHROPIC_API_KEY"] == "sk-ant-from-env"
+        assert result["ORMAH_LLM_PROVIDER"] == "litellm"
+        assert result["ORMAH_LLM_MODEL"] == "claude-haiku-4-5-20251001"
+        assert "ANTHROPIC_API_KEY" not in result
 
     def test_preserves_existing_env_values(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
         env_path.write_text("ORMAH_PORT=9999\n")
+        self._clear_all_api_keys(monkeypatch)
         monkeypatch.setattr("builtins.input", lambda _: "5")
 
         with (

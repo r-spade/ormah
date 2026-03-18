@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import shutil
@@ -24,6 +23,7 @@ from ormah.server_manager import (
 
 ENV_DIR = Path.home() / ".config" / "ormah"
 ENV_PATH = ENV_DIR / ".env"
+WRAPPER_PATH = ENV_DIR / "start-server.sh"
 
 CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
@@ -151,14 +151,22 @@ def configure_claude_code_mcp(ormah_bin: str) -> None:
     print("  Registered as an MCP tool \u2014 Claude can store and recall memories.")
 
 
-def configure_claude_desktop(ormah_bin: str) -> None:
-    """Register ormah MCP server in Claude Desktop config (if installed)."""
-    config_path = os.path.expanduser(
-        "~/Library/Application Support/Claude/claude_desktop_config.json"
-    )
+def configure_claude_desktop(ormah_bin: str) -> bool:
+    """Register ormah MCP server in Claude Desktop config (if installed).
 
-    if not os.path.exists(os.path.dirname(config_path)):
-        return
+    Returns True if Claude Desktop was detected and configured.
+    """
+    import platform as _platform
+
+    if _platform.system() != "Darwin":
+        # Claude Desktop config path is macOS-specific for now
+        return False
+
+    config_dir = os.path.expanduser("~/Library/Application Support/Claude")
+    config_path = os.path.join(config_dir, "claude_desktop_config.json")
+
+    if not os.path.exists(config_dir):
+        return False
 
     mcp_entry = {
         "ormah": {
@@ -168,7 +176,9 @@ def configure_claude_desktop(ormah_bin: str) -> None:
     }
 
     _merge_json_file(config_path, {"mcpServers": mcp_entry})
-    print("  Connected to Claude Desktop too.")
+    print("  Connected to Claude Desktop — MCP tools available.")
+    print("  (Whisper hooks require Claude Code; Desktop uses MCP tools directly.)")
+    return True
 
 
 def install_claude_md() -> None:
@@ -225,6 +235,37 @@ def _write_env_file(env: dict[str, str]) -> None:
     os.chmod(ENV_PATH, 0o600)
 
 
+def generate_server_wrapper(ormah_bin: str) -> Path:
+    """Generate daemon wrapper that inherits API keys from user's shell."""
+    ENV_DIR.mkdir(parents=True, exist_ok=True)
+
+    script = f"""\
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Capture API keys from user's login shell
+while IFS= read -r line; do
+    key="${{line%%=*}}"
+    value="${{line#*=}}"
+    export "$key=$value"
+done < <("${{SHELL:-/bin/bash}}" -lic 'env' 2>/dev/null \\
+    | grep -E '^(ANTHROPIC_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|GROQ_API_KEY|MISTRAL_API_KEY|COHERE_API_KEY|AZURE_API_KEY|AZURE_API_BASE|AZURE_API_VERSION|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_REGION_NAME)=' \\
+    || true)
+
+# Load ormah-specific config
+_env_file="$HOME/.config/ormah/.env"
+if [ -f "$_env_file" ]; then
+    set -a; . "$_env_file"; set +a
+fi
+
+exec {ormah_bin} server start
+"""
+
+    WRAPPER_PATH.write_text(script)
+    os.chmod(WRAPPER_PATH, 0o700)
+    return WRAPPER_PATH
+
+
 def _prompt_choice(prompt: str, options: list[str], allow_skip: bool = False) -> int | None:
     """Show a numbered menu and return the selected index (0-based), or None for skip."""
     print(prompt)
@@ -243,7 +284,9 @@ def _prompt_choice(prompt: str, options: list[str], allow_skip: bool = False) ->
                 return None
             if 1 <= choice <= len(options):
                 return choice - 1
-        except (ValueError, EOFError):
+        except EOFError:
+            return None
+        except ValueError:
             pass
         print("  Invalid choice, try again.")
 
@@ -330,8 +373,8 @@ def configure_llm() -> None:
             env = _read_env_file()
             env["ORMAH_LLM_PROVIDER"] = provider
             env["ORMAH_LLM_MODEL"] = default_model
-            env[api_key_var] = key
             _write_env_file(env)
+            print(f"  Found {api_key_var} in your environment. The server will inherit it at startup.")
             print(f"  Saved to {ENV_PATH}")
             return
 
@@ -367,19 +410,13 @@ def configure_llm() -> None:
         # Check if already set in environment
         existing_key = os.environ.get(api_key_var, "")
         if existing_key:
-            print(f"\n  Found {api_key_var} in environment, using that.")
-            env[api_key_var] = existing_key
+            print(f"\n  Found {api_key_var} in your environment. The server will inherit it at startup.")
         else:
-            print()
-            try:
-                key = getpass.getpass(f"  Enter your {display_name} API key: ")
-            except EOFError:
-                key = ""
-            if key:
-                env[api_key_var] = key
-            else:
-                print("  No key provided. Background analysis won't work until you add one.")
-                print(f"  You can add it later to {ENV_PATH}")
+            shell_profile = "~/.zshrc" if os.environ.get("SHELL", "").endswith("zsh") else "~/.bashrc"
+            print(f"\n  No {api_key_var} found in your environment.")
+            print(f"  Add it to your shell profile ({shell_profile}):")
+            print(f"    export {api_key_var}=your-key-here")
+            print("  Then restart your shell or run: source " + shell_profile)
     else:
         # Ollama — no key needed
         print(f"\n  Using {display_name} with model '{default_model}'.")
@@ -607,13 +644,16 @@ def run_setup() -> None:
     # 3. Configure LLM (writes to .env with 600 permissions)
     configure_llm()
 
+    # 3.5 Generate server wrapper
+    wrapper_path = generate_server_wrapper(ormah_bin)
+
     # 4. Start server + install auto-start
     if is_server_running():
         print("\n  Server already running.")
         server_ok = True
     else:
         print(f"\n  Starting ormah server on port {settings.port}...")
-        install_autostart(ormah_bin)
+        install_autostart(ormah_bin, wrapper_path=str(wrapper_path))
         print("  Installed auto-start so it launches on login.")
         print("  (First run may take a few minutes to download the embedding model ~420 MB)")
         if wait_for_server(timeout=300.0):
@@ -627,12 +667,25 @@ def run_setup() -> None:
     if user_name and server_ok:
         seed_identity(user_name)
 
-    # 6. Hook up Claude Code (hooks + MCP registration)
-    print("\n  Hooking up Claude Code...")
-    configure_claude_hooks(ormah_bin)
-    configure_claude_code_mcp(ormah_bin)
-    configure_claude_desktop(ormah_bin)
-    install_claude_md()
+    # 6. Hook up Claude integrations
+    has_claude_code = shutil.which("claude") is not None
+    has_claude_desktop = os.path.exists(
+        os.path.expanduser("~/Library/Application Support/Claude")
+    )
+
+    if has_claude_code:
+        print("\n  Hooking up Claude Code...")
+        configure_claude_hooks(ormah_bin)
+        configure_claude_code_mcp(ormah_bin)
+        install_claude_md()
+
+    desktop_configured = configure_claude_desktop(ormah_bin)
+
+    if not has_claude_code and not desktop_configured:
+        print("\n  No Claude client detected.")
+        print("  You can manually configure MCP in your AI client:")
+        print(f"    Command: {ormah_bin} mcp")
+        print("  Or run `ormah setup` again after installing Claude Code or Claude Desktop.")
 
     # 7. Cold start backfill (needs server + LLM)
     if server_ok:

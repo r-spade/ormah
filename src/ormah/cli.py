@@ -26,9 +26,12 @@ import sys
 def _cmd_server_start(args):
     if args.daemon:
         from ormah.server_manager import get_ormah_bin_path, install_autostart, wait_for_server
+        from ormah.setup import WRAPPER_PATH, generate_server_wrapper
 
         ormah_bin = get_ormah_bin_path()
-        install_autostart(ormah_bin)
+        if not WRAPPER_PATH.exists():
+            generate_server_wrapper(ormah_bin)
+        install_autostart(ormah_bin, wrapper_path=str(WRAPPER_PATH))
         print("Waiting for server to start...")
         if wait_for_server(timeout=10.0):
             print("Server is running.")
@@ -77,9 +80,15 @@ def _cmd_mcp(args):
 
 
 def main():
+    from importlib.metadata import version as pkg_version
+
     p = argparse.ArgumentParser(
         prog="ormah",
         description="Local-first memory system for AI agents.",
+    )
+    p.add_argument(
+        "--version", action="version",
+        version=f"ormah {pkg_version('ormah')}",
     )
     sub = p.add_subparsers(dest="cmd")
 

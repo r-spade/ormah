@@ -27,9 +27,8 @@ Description=Ormah memory server
 After=network.target
 
 [Service]
-ExecStart={ormah_bin} server start
+ExecStart={wrapper_path}
 Environment="PATH={bin_dir}:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=-{env_file}
 StandardOutput=append:{log_dir}/ormah.out.log
 StandardError=append:{log_dir}/ormah.err.log
 Restart=on-failure
@@ -48,9 +47,7 @@ PLIST_TEMPLATE = """\
   <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{ormah_bin}</string>
-    <string>server</string>
-    <string>start</string>
+    <string>{wrapper_path}</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -88,15 +85,16 @@ def is_server_running() -> bool:
         return False
 
 
-def install_launchd_agent(ormah_bin: str) -> None:
+def install_launchd_agent(ormah_bin: str, wrapper_path: str | None = None) -> None:
     """Install and load a launchd agent for auto-starting the server on macOS."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     PLIST_DIR.mkdir(parents=True, exist_ok=True)
 
     bin_dir = str(Path(ormah_bin).parent)
+    effective_wrapper = wrapper_path or ormah_bin
     plist_content = PLIST_TEMPLATE.format(
         label=LAUNCHD_LABEL,
-        ormah_bin=ormah_bin,
+        wrapper_path=effective_wrapper,
         bin_dir=bin_dir,
         log_dir=LOG_DIR,
     )
@@ -127,19 +125,16 @@ def uninstall_launchd_agent() -> None:
     print("Removed launchd agent.")
 
 
-def install_systemd_service(ormah_bin: str) -> None:
+def install_systemd_service(ormah_bin: str, wrapper_path: str | None = None) -> None:
     """Install and enable a user-space systemd service for auto-starting the server."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
 
     bin_dir = str(Path(ormah_bin).parent)
-    env_file = Path.home() / ".config" / "ormah" / ".env"
-    # Quote the binary path for systemd in case it contains spaces
-    quoted_bin = f'"{ormah_bin}"' if " " in ormah_bin else ormah_bin
+    effective_wrapper = wrapper_path or ormah_bin
     unit_content = SYSTEMD_TEMPLATE.format(
-        ormah_bin=quoted_bin,
+        wrapper_path=effective_wrapper,
         bin_dir=bin_dir,
-        env_file=env_file,
         log_dir=LOG_DIR,
     )
 
@@ -180,13 +175,13 @@ def uninstall_systemd_service() -> None:
     print("Removed systemd service.")
 
 
-def install_autostart(ormah_bin: str) -> None:
+def install_autostart(ormah_bin: str, wrapper_path: str | None = None) -> None:
     """Install auto-start using the platform-appropriate mechanism."""
     system = platform.system()
     if system == "Darwin":
-        install_launchd_agent(ormah_bin)
+        install_launchd_agent(ormah_bin, wrapper_path=wrapper_path)
     elif system == "Linux":
-        install_systemd_service(ormah_bin)
+        install_systemd_service(ormah_bin, wrapper_path=wrapper_path)
     else:
         print(
             f"Auto-start not supported on {system}. "
