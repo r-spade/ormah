@@ -1,4 +1,4 @@
-.PHONY: help dev server ui-dev ui-build install test restart clean logs
+.PHONY: help dev server ui-dev ui-build install test restart clean logs smoke
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -44,3 +44,9 @@ clean: ## Remove build artifacts
 
 logs: ## Tail the server logs (if running in background)
 	@echo "Server runs with stdout logging. Use 'make server' in foreground to see logs."
+
+smoke: ## Run fresh-install smoke test in Docker
+	docker build -f tests/smoke/Dockerfile -t ormah-smoke .
+	docker run --rm \
+		-v ormah-model-cache:/tmp/fastembed_cache \
+		ormah-smoke

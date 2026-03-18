@@ -14,6 +14,7 @@ import httpx
 from importlib import resources
 
 from ormah.config import settings
+from ormah.console import info, ok, play_finale, step, warn
 from ormah.server_manager import (
     get_ormah_bin_path,
     install_autostart,
@@ -102,8 +103,7 @@ def configure_claude_hooks(ormah_bin: str) -> None:
     ]
 
     _merge_json_file(settings_path, {"hooks": hooks})
-    print("  Ormah now whispers memories to Claude before every message.")
-    print("  Memories are auto-extracted on compaction and session end.")
+    ok("Whisper hooks installed \u2014 memories flow before every message")
 
 
 def configure_claude_code_mcp(ormah_bin: str) -> None:
@@ -121,7 +121,7 @@ def configure_claude_code_mcp(ormah_bin: str) -> None:
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
-                print("  Registered as an MCP tool \u2014 Claude can store and recall memories.")
+                ok("MCP tool registered \u2014 Claude can store and recall memories")
                 return
             # Already registered — remove and re-add to update the command path
             if "already exists" in result.stderr or "already exists" in result.stdout:
@@ -134,7 +134,7 @@ def configure_claude_code_mcp(ormah_bin: str) -> None:
                     capture_output=True, text=True, timeout=10,
                 )
                 if result2.returncode == 0:
-                    print("  Registered as an MCP tool \u2014 Claude can store and recall memories.")
+                    ok("MCP tool registered \u2014 Claude can store and recall memories")
                     return
         except Exception:
             pass
@@ -148,7 +148,7 @@ def configure_claude_code_mcp(ormah_bin: str) -> None:
         }
     }
     _merge_json_file(config_path, {"mcpServers": mcp_entry})
-    print("  Registered as an MCP tool \u2014 Claude can store and recall memories.")
+    ok("MCP tool registered \u2014 Claude can store and recall memories")
 
 
 def configure_claude_desktop(ormah_bin: str) -> bool:
@@ -176,8 +176,8 @@ def configure_claude_desktop(ormah_bin: str) -> bool:
     }
 
     _merge_json_file(config_path, {"mcpServers": mcp_entry})
-    print("  Connected to Claude Desktop — MCP tools available.")
-    print("  (Whisper hooks require Claude Code; Desktop uses MCP tools directly.)")
+    ok("Connected to Claude Desktop \u2014 MCP tools available")
+    info("Whisper hooks require Claude Code; Desktop uses MCP tools directly")
     return True
 
 
@@ -208,7 +208,7 @@ def install_claude_md() -> None:
         updated = block
 
     target.write_text(updated)
-    print("  Added ormah instructions to ~/.claude/CLAUDE.md")
+    ok("Instructions added to ~/.claude/CLAUDE.md")
 
 
 def _read_env_file() -> dict[str, str]:
@@ -299,14 +299,13 @@ def configure_identity() -> str | None:
         name = ""
 
     if not name:
-        print("  Skipped \u2014 ormah will learn your name naturally.")
+        info("Skipped \u2014 ormah will learn your name naturally")
         return None
     return name
 
 
 def seed_identity(name: str) -> None:
     """Store the user's name in ormah via the running server."""
-    print("\n  Seeding your first memory...")
     try:
         with httpx.Client(timeout=5.0) as client:
             client.post(
@@ -319,10 +318,10 @@ def seed_identity(name: str) -> None:
                     "title": "User's name",
                 },
             )
-        print("  Ormah now knows your name.")
+        ok("Ormah now knows your name")
     except Exception:
-        print("  Could not seed identity \u2014 server may not be ready yet.")
-        print("  No worries, ormah will learn your name naturally.")
+        warn("Could not seed identity \u2014 server may not be ready yet")
+        info("No worries, ormah will learn your name naturally")
 
 
 _MONTHLY_COST_HINT: dict[str, str] = {
@@ -361,10 +360,9 @@ def configure_llm() -> None:
         display_name, provider, api_key_var, default_model, key = detected
         hint = _cost_hint(default_model)
         print(f"\n  Found {api_key_var} in your environment.")
-        print(f"  ormah uses a small, cheap model for background analysis")
-        print(f"  (linking memories, detecting contradictions, deduplication).")
-        print(f"\n  Default: {default_model}")
-        print(f"  Estimated cost: {hint}")
+        print("  ormah uses a small, cheap model for background analysis")
+        print("  (linking memories, detecting contradictions, deduplication).")
+        print(f"  Default: {default_model} ({hint})")
         try:
             answer = input("\n  Use this key? (Y/n) ").strip().lower()
         except EOFError:
@@ -374,8 +372,7 @@ def configure_llm() -> None:
             env["ORMAH_LLM_PROVIDER"] = provider
             env["ORMAH_LLM_MODEL"] = default_model
             _write_env_file(env)
-            print(f"  Found {api_key_var} in your environment. The server will inherit it at startup.")
-            print(f"  Saved to {ENV_PATH}")
+            ok(f"Using {api_key_var} from environment with {default_model}")
             return
 
     # --- Manual selection: no key detected or user declined ---
@@ -396,10 +393,8 @@ def configure_llm() -> None:
         env["ORMAH_LLM_PROVIDER"] = "none"
         _write_env_file(env)
         print()
-        print("  No LLM configured. Core memory works fine without one:")
-        print("  store, recall, and whisper all work. Background features")
-        print("  (auto-linking, conflict detection, deduplication) are disabled.")
-        print("  Run `ormah setup` again to add an LLM later.")
+        info("No LLM configured \u2014 core memory works without one")
+        info("Run 'ormah setup' again to add an LLM later")
         return
 
     env = _read_env_file()
@@ -410,20 +405,19 @@ def configure_llm() -> None:
         # Check if already set in environment
         existing_key = os.environ.get(api_key_var, "")
         if existing_key:
-            print(f"\n  Found {api_key_var} in your environment. The server will inherit it at startup.")
+            ok(f"Using {api_key_var} from environment with {default_model}")
         else:
             shell_profile = "~/.zshrc" if os.environ.get("SHELL", "").endswith("zsh") else "~/.bashrc"
-            print(f"\n  No {api_key_var} found in your environment.")
+            warn(f"No {api_key_var} found in your environment")
             print(f"  Add it to your shell profile ({shell_profile}):")
             print(f"    export {api_key_var}=your-key-here")
             print("  Then restart your shell or run: source " + shell_profile)
     else:
         # Ollama — no key needed
-        print(f"\n  Using {display_name} with model '{default_model}'.")
-        print("  Make sure Ollama is running: https://ollama.com")
+        ok(f"Using {display_name} with model '{default_model}'")
+        info("Make sure Ollama is running: https://ollama.com")
 
     _write_env_file(env)
-    print(f"  Saved to {ENV_PATH}")
 
 
 _COST_PER_MTOK: dict[str, tuple[float, float]] = {
@@ -489,12 +483,12 @@ def backfill_transcripts() -> None:
 
     llm_model = env.get("ORMAH_LLM_MODEL", "")
 
-    print("\n  Checking for existing Claude Code transcripts...")
+    step("Backfilling transcripts")
 
     # Discover transcripts
     all_transcripts = _discover_transcripts()
     if not all_transcripts:
-        print("  No transcripts found in ~/.claude/projects/ — skipping backfill.")
+        info("No transcripts found \u2014 skipping backfill")
         return
 
     # Pre-filter: parse each and keep those with >= 5 user turns
@@ -508,7 +502,7 @@ def backfill_transcripts() -> None:
             eligible.append((path, space, result.user_turn_count, result.cleaned_chars))
 
     if not eligible:
-        print("  No transcripts with enough content found — skipping backfill.")
+        info("No transcripts with enough content \u2014 skipping backfill")
         return
 
     # Scope selection
@@ -518,7 +512,7 @@ def backfill_transcripts() -> None:
     if total > 20:
         pct_count = max(1, int(total * 0.15))
         options = [
-            f"Last 20 sessions",
+            "Last 20 sessions",
             f"Last 15% ({pct_count} sessions)",
             f"All {total} sessions",
             "Skip backfill",
@@ -532,7 +526,7 @@ def backfill_transcripts() -> None:
         elif choice == 2:
             selected = eligible
         else:
-            print("  Skipping backfill.")
+            info("Skipping backfill")
             return
     else:
         try:
@@ -540,7 +534,7 @@ def backfill_transcripts() -> None:
         except EOFError:
             answer = ""
         if answer not in ("y", "yes"):
-            print("  Skipping backfill.")
+            info("Skipping backfill")
             return
         selected = eligible
 
@@ -573,7 +567,7 @@ def backfill_transcripts() -> None:
     except EOFError:
         confirm = ""
     if confirm not in ("y", "yes"):
-        print("  Skipping backfill.")
+        info("Skipping backfill")
         return
 
     # Ingest
@@ -586,7 +580,7 @@ def backfill_transcripts() -> None:
         try:
             result = parse_transcript(path)
             if not result.conversation.strip():
-                print(f"  [{i}/{len(selected)}] {space_label} — {turns} turns — skipped (empty)")
+                info(f"[{i}/{len(selected)}] {space_label} \u2014 {turns} turns \u2014 skipped (empty)")
                 continue
 
             params: dict = {}
@@ -603,17 +597,17 @@ def backfill_transcripts() -> None:
                 data = r.json()
 
             if data.get("status") == "error":
-                print(f"  [{i}/{len(selected)}] {space_label} — {turns} turns — error: {data.get('result', 'unknown')}")
+                warn(f"[{i}/{len(selected)}] {space_label} \u2014 {turns} turns \u2014 error: {data.get('result', 'unknown')}")
                 continue
 
             count = data.get("extracted", 0)
             total_memories += count
-            print(f"  [{i}/{len(selected)}] {space_label} — {turns} turns — {count} memories")
+            info(f"[{i}/{len(selected)}] {space_label} \u2014 {turns} turns \u2014 {count} memories")
 
         except Exception as e:
-            print(f"  [{i}/{len(selected)}] {space_label} — {turns} turns — failed: {e}")
+            warn(f"[{i}/{len(selected)}] {space_label} \u2014 {turns} turns \u2014 failed: {e}")
 
-    print(f"\n  Backfill complete: {total_memories} memories extracted from {len(selected)} transcripts.")
+    ok(f"Backfill complete: {total_memories} memories from {len(selected)} transcripts")
 
 
 def _diagnose_server_failure() -> None:
@@ -623,41 +617,52 @@ def _diagnose_server_failure() -> None:
     try:
         result = sock.connect_ex(("localhost", port))
         if result == 0:
-            print(f"  Error: port {port} is already in use.")
-            print(f"  Set ORMAH_PORT in {ENV_PATH} to use a different port.")
+            warn(f"Port {port} is already in use")
+            info(f"Set ORMAH_PORT in {ENV_PATH} to use a different port")
         else:
-            print("  Server did not start. Check ~/.local/share/ormah/logs/ormah.err.log")
+            warn("Server did not start")
+            info("Check ~/.local/share/ormah/logs/ormah.err.log")
     finally:
         sock.close()
 
 
-def run_setup() -> None:
-    """Interactive first-time setup."""
+def run_setup(ci: bool = False) -> None:
+    """First-time setup. Pass ci=True (or set ORMAH_CI=1) for non-interactive mode."""
+    ci = ci or os.environ.get("ORMAH_CI") == "1"
+
     print("Setting up ormah...\n")
 
     # 1. Find absolute path to ormah binary
     ormah_bin = get_ormah_bin_path()
 
     # 2. Ask for name (store in variable, seed after server is up)
-    user_name = configure_identity()
+    if ci:
+        user_name = None
+    else:
+        user_name = configure_identity()
 
     # 3. Configure LLM (writes to .env with 600 permissions)
-    configure_llm()
+    if ci:
+        env = _read_env_file()
+        env["ORMAH_LLM_PROVIDER"] = "none"
+        _write_env_file(env)
+        info("CI mode — LLM set to none")
+    else:
+        configure_llm()
 
     # 3.5 Generate server wrapper
     wrapper_path = generate_server_wrapper(ormah_bin)
 
     # 4. Start server + install auto-start
     if is_server_running():
-        print("\n  Server already running.")
+        ok("Server already running")
         server_ok = True
     else:
-        print(f"\n  Starting ormah server on port {settings.port}...")
+        step("Starting server")
         install_autostart(ormah_bin, wrapper_path=str(wrapper_path))
-        print("  Installed auto-start so it launches on login.")
-        print("  (First run may take a few minutes to download the embedding model ~420 MB)")
-        if wait_for_server(timeout=300.0):
-            print("  Server is running.")
+        ok("Installed auto-start (launches on login)")
+
+        if wait_for_server(show_progress=True):
             server_ok = True
         else:
             _diagnose_server_failure()
@@ -674,7 +679,7 @@ def run_setup() -> None:
     )
 
     if has_claude_code:
-        print("\n  Hooking up Claude Code...")
+        step("Hooking up Claude Code")
         configure_claude_hooks(ormah_bin)
         configure_claude_code_mcp(ormah_bin)
         install_claude_md()
@@ -682,17 +687,18 @@ def run_setup() -> None:
     desktop_configured = configure_claude_desktop(ormah_bin)
 
     if not has_claude_code and not desktop_configured:
-        print("\n  No Claude client detected.")
-        print("  You can manually configure MCP in your AI client:")
+        warn("No Claude client detected")
+        info("You can manually configure MCP in your AI client:")
         print(f"    Command: {ormah_bin} mcp")
-        print("  Or run `ormah setup` again after installing Claude Code or Claude Desktop.")
+        info("Or run 'ormah setup' again after installing Claude Code or Claude Desktop")
 
     # 7. Cold start backfill (needs server + LLM)
-    if server_ok:
+    if server_ok and not ci:
         backfill_transcripts()
 
-    # 8. Final verification message
-    print(
-        '\nOrmah is ready! Try asking your AI: "What do you know about me?"\n'
-        '\nThe more you use it, the more it remembers.'
-    )
+    # 8. Finale animation + completion message
+    step("Setup complete")
+    if not ci:
+        play_finale()
+    ok('Ormah is ready! Try asking your AI: "What do you know about me?"')
+    info("The more you use it, the more it remembers.")

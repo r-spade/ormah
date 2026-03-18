@@ -6,6 +6,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -175,13 +177,33 @@ def uninstall_systemd_service() -> None:
     print("Removed systemd service.")
 
 
+def _start_server_background(wrapper_path: str) -> None:
+    """Start the server as a background process (fallback when no init system)."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    out_log = open(LOG_DIR / "ormah.out.log", "a")
+    err_log = open(LOG_DIR / "ormah.err.log", "a")
+    subprocess.Popen(
+        [wrapper_path],
+        stdout=out_log,
+        stderr=err_log,
+        start_new_session=True,
+    )
+
+
 def install_autostart(ormah_bin: str, wrapper_path: str | None = None) -> None:
     """Install auto-start using the platform-appropriate mechanism."""
     system = platform.system()
     if system == "Darwin":
         install_launchd_agent(ormah_bin, wrapper_path=wrapper_path)
     elif system == "Linux":
-        install_systemd_service(ormah_bin, wrapper_path=wrapper_path)
+        if shutil.which("systemctl"):
+            install_systemd_service(ormah_bin, wrapper_path=wrapper_path)
+        else:
+            # No systemd (e.g. Docker container) — start directly
+            if wrapper_path:
+                _start_server_background(wrapper_path)
+            else:
+                _start_server_background(ormah_bin)
     else:
         print(
             f"Auto-start not supported on {system}. "
@@ -200,11 +222,119 @@ def uninstall_autostart() -> None:
         print(f"Auto-start not supported on {system}.")
 
 
-def wait_for_server(timeout: float = 10.0) -> bool:
-    """Poll the health endpoint until server is up or timeout is reached."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if is_server_running():
-            return True
-        time.sleep(0.5)
-    return False
+def is_first_run() -> bool:
+    """Check if the fastembed model cache exists — if not, first download needed."""
+    cache_dir = Path(tempfile.gettempdir()) / "fastembed_cache"
+    if not cache_dir.exists():
+        return True
+    # Check if any model directories exist inside the cache
+    try:
+        return not any(cache_dir.iterdir())
+    except OSError:
+        return True
+
+
+# Phase markers: log substring -> human-friendly label
+_PHASE_MAP: list[tuple[str, str]] = [
+    ("Starting ormah server", "Starting server..."),
+    ("Initializing memory engine", "Initializing memory engine..."),
+    ("Initial index rebuild", "Building search index..."),
+    ("Loading embedding model", "Downloading embedding model (~420 MB)..."),
+    ("Embedding model ready", "Embedding model loaded"),
+    ("Memory engine ready", "Memory engine ready"),
+    ("Background scheduler", "Starting background jobs..."),
+]
+
+
+def _tail_server_log(
+    callback: callable,
+    stop_event: threading.Event,
+) -> None:
+    """Tail ormah.err.log for phase markers, calling callback on each new phase.
+
+    Runs on a background thread. Polls until the log file appears, then
+    reads new lines, matching against known phase markers.
+    """
+    log_path = LOG_DIR / "ormah.err.log"
+
+    # Wait for the log file to appear
+    while not stop_event.is_set():
+        if log_path.exists():
+            break
+        stop_event.wait(0.3)
+
+    if stop_event.is_set():
+        return
+
+    try:
+        with open(log_path, "r") as f:
+            # Seek to end — ignore old log lines
+            f.seek(0, 2)
+            while not stop_event.is_set():
+                line = f.readline()
+                if not line:
+                    stop_event.wait(0.2)
+                    continue
+                for marker, label in _PHASE_MAP:
+                    if marker in line:
+                        callback(label)
+                        break
+    except OSError:
+        pass
+
+
+def wait_for_server(
+    timeout: float = 10.0,
+    show_progress: bool = False,
+) -> bool:
+    """Poll the health endpoint until server is up or timeout is reached.
+
+    When *show_progress* is True, shows an animated spinner with phase
+    updates from the server log (for interactive CLI use).
+    """
+    if not show_progress:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if is_server_running():
+                return True
+            time.sleep(0.5)
+        return False
+
+    # --- Interactive mode with spinner + log tailing ---
+    from ormah.console import Spinner
+
+    first_run = is_first_run()
+    if first_run:
+        effective_timeout = max(timeout, 600.0)
+        initial_msg = "Starting server (first run — downloading embedding model)..."
+    else:
+        effective_timeout = max(timeout, 60.0)
+        initial_msg = "Starting server..."
+
+    stop_event = threading.Event()
+
+    with Spinner(initial_msg) as sp:
+        # Start log tailer thread
+        tail_thread = threading.Thread(
+            target=_tail_server_log,
+            args=(sp.update, stop_event),
+            daemon=True,
+        )
+        tail_thread.start()
+
+        try:
+            deadline = time.monotonic() + effective_timeout
+            while time.monotonic() < deadline:
+                if is_server_running():
+                    stop_event.set()
+                    sp.succeed("Server is running")
+                    return True
+                time.sleep(1.0)
+
+            stop_event.set()
+            sp.fail("Server did not start in time")
+            return False
+        except KeyboardInterrupt:
+            stop_event.set()
+            sp.fail("Interrupted")
+            return False

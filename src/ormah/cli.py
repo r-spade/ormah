@@ -25,6 +25,7 @@ import sys
 
 def _cmd_server_start(args):
     if args.daemon:
+        from ormah.console import info, warn
         from ormah.server_manager import get_ormah_bin_path, install_autostart, wait_for_server
         from ormah.setup import WRAPPER_PATH, generate_server_wrapper
 
@@ -32,12 +33,9 @@ def _cmd_server_start(args):
         if not WRAPPER_PATH.exists():
             generate_server_wrapper(ormah_bin)
         install_autostart(ormah_bin, wrapper_path=str(WRAPPER_PATH))
-        print("Waiting for server to start...")
-        if wait_for_server(timeout=10.0):
-            print("Server is running.")
-        else:
-            print("Warning: server did not start within 10s. Check logs at:")
-            print("  ~/.local/share/ormah/logs/ormah.err.log")
+        if not wait_for_server(show_progress=True):
+            warn("Server did not start in time")
+            info("Check ~/.local/share/ormah/logs/ormah.err.log")
     else:
         import uvicorn
         from ormah.config import settings
@@ -70,7 +68,7 @@ def _cmd_server_status(args):
 def _cmd_setup(args):
     from ormah.setup import run_setup
 
-    run_setup()
+    run_setup(ci=args.ci)
 
 
 def _cmd_mcp(args):
@@ -115,6 +113,7 @@ def main():
 
     # --- setup ---
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")
+    setup_p.add_argument("--ci", action="store_true", help="Non-interactive mode for CI/testing")
     setup_p.set_defaults(func=_cmd_setup)
 
     # --- mcp ---
