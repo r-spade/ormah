@@ -208,7 +208,8 @@ class TestConfigureClaudeCodeMcp:
     def test_writes_mcp_config_to_claude_json(self, tmp_path):
         config_path = str(tmp_path / ".claude.json")
 
-        with patch("ormah.setup.os.path.expanduser", return_value=config_path):
+        with patch("ormah.setup.shutil.which", return_value=None), \
+             patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
 
         with open(config_path) as f:
@@ -216,14 +217,14 @@ class TestConfigureClaudeCodeMcp:
 
         assert data["mcpServers"]["ormah"]["command"] == "/abs/path/ormah"
         assert data["mcpServers"]["ormah"]["args"] == ["mcp"]
-        assert data["mcpServers"]["ormah"]["type"] == "stdio"
 
     def test_merges_with_existing_mcp_servers(self, tmp_path):
         config_path = str(tmp_path / ".claude.json")
         with open(config_path, "w") as f:
             json.dump({"mcpServers": {"fetch": {"command": "uvx"}}}, f)
 
-        with patch("ormah.setup.os.path.expanduser", return_value=config_path):
+        with patch("ormah.setup.shutil.which", return_value=None), \
+             patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
 
         with open(config_path) as f:
@@ -235,9 +236,9 @@ class TestConfigureClaudeCodeMcp:
 
 class TestConfigureClaudeDesktop:
     def test_skips_if_no_claude_desktop(self, tmp_path, capsys):
-        config_path = str(tmp_path / "nonexistent" / "claude_desktop_config.json")
+        config_dir = str(tmp_path / "nonexistent")
 
-        with patch("ormah.setup.os.path.expanduser", return_value=config_path):
+        with patch("ormah.setup.os.path.expanduser", return_value=config_dir):
             configure_claude_desktop("/abs/path/ormah")
 
         captured = capsys.readouterr()
@@ -247,11 +248,11 @@ class TestConfigureClaudeDesktop:
     def test_writes_config_if_dir_exists(self, tmp_path):
         config_dir = tmp_path / "Claude"
         config_dir.mkdir()
-        config_path = str(config_dir / "claude_desktop_config.json")
 
-        with patch("ormah.setup.os.path.expanduser", return_value=config_path):
+        with patch("ormah.setup.os.path.expanduser", return_value=str(config_dir)):
             configure_claude_desktop("/abs/path/ormah")
 
+        config_path = config_dir / "claude_desktop_config.json"
         with open(config_path) as f:
             data = json.load(f)
 

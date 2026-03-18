@@ -463,6 +463,9 @@ def test_whisper_inject_empty_context(monkeypatch):
         "ormah.adapters.cli_adapter.detect_space_from_dir",
         lambda path: "proj",
     )
+    # Isolate from real cursor file to prevent flaky nudge triggers
+    monkeypatch.setattr("ormah.adapters.cli_adapter._load_cursors", lambda: {})
+    monkeypatch.setattr("ormah.adapters.cli_adapter._save_cursors", lambda c: None)
     hook_input = json.dumps({"prompt": "hello", "cwd": "/path", "session_id": "test"})
     code, out, err = _run_cli(["whisper", "inject"], monkeypatch, stdin_text=hook_input)
     assert code == 0

@@ -20,20 +20,20 @@ class TestLocalAdapter:
         from ormah.embeddings.local_adapter import LocalAdapter
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = np.ones(768, dtype=np.float32)
+        mock_model.embed.return_value = iter([np.ones(768, dtype=np.float32)])
 
         adapter = LocalAdapter(model_name="test-model")
         adapter._model = mock_model
 
         vec = adapter.encode("hello world")
         assert vec.shape == (768,)
-        mock_model.encode.assert_called_once_with("hello world", normalize_embeddings=True)
+        mock_model.embed.assert_called_once_with(["hello world"])
 
     def test_dim_auto_detected(self):
         from ormah.embeddings.local_adapter import LocalAdapter
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = np.ones(768, dtype=np.float32)
+        mock_model.embed.return_value = iter([np.ones(768, dtype=np.float32)])
 
         adapter = LocalAdapter(model_name="test-model")
         adapter._model = mock_model

@@ -442,8 +442,8 @@ class TestWhisperSetup:
         assert "PreCompact" in out
         assert "UserPromptSubmit" in out
 
-    def test_whisper_setup_no_precompact_when_disabled(self, monkeypatch, tmp_path):
-        """Setup omits PreCompact hook when whisper_out_enabled=False."""
+    def test_whisper_setup_always_registers_precompact(self, monkeypatch, tmp_path):
+        """Setup always registers PreCompact hook (runtime flag gates execution, not registration)."""
         monkeypatch.setattr(
             "ormah.adapters.cli_adapter.settings",
             MagicMock(port=8787, whisper_out_enabled=False, whisper_out_min_turns=5),
@@ -455,5 +455,5 @@ class TestWhisperSetup:
         )
 
         assert code == 0
-        assert "PreCompact" not in out
+        assert "PreCompact" in out
         assert "UserPromptSubmit" in out
