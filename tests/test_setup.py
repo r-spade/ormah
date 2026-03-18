@@ -209,8 +209,11 @@ class TestConfigureClaudeCodeMcp:
         config_path = str(tmp_path / ".claude.json")
 
         with patch("ormah.setup.shutil.which", return_value=None), \
+             patch("ormah.setup.subprocess.run") as mock_run, \
              patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
+
+        mock_run.assert_not_called()
 
         with open(config_path) as f:
             data = json.load(f)
@@ -224,14 +227,58 @@ class TestConfigureClaudeCodeMcp:
             json.dump({"mcpServers": {"fetch": {"command": "uvx"}}}, f)
 
         with patch("ormah.setup.shutil.which", return_value=None), \
+             patch("ormah.setup.subprocess.run") as mock_run, \
              patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
+
+        mock_run.assert_not_called()
 
         with open(config_path) as f:
             data = json.load(f)
 
         assert "fetch" in data["mcpServers"]
         assert "ormah" in data["mcpServers"]
+
+    def test_uses_claude_cli_when_available(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+
+        with patch("ormah.setup.shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("ormah.setup.subprocess.run", return_value=mock_result) as mock_run:
+            configure_claude_code_mcp("/usr/local/bin/ormah")
+
+        mock_run.assert_called_once_with(
+            ["/usr/local/bin/claude", "mcp", "add", "ormah", "--scope", "user",
+             "--", "/usr/local/bin/ormah", "mcp"],
+            capture_output=True, text=True, timeout=10,
+        )
+
+    def test_cli_already_exists_removes_and_readds(self):
+        first_result = MagicMock()
+        first_result.returncode = 1
+        first_result.stderr = "already exists"
+        first_result.stdout = ""
+
+        second_result = MagicMock()
+        second_result.returncode = 0
+
+        with patch("ormah.setup.shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("ormah.setup.subprocess.run", side_effect=[
+                 first_result, second_result, second_result,
+             ]) as mock_run:
+            configure_claude_code_mcp("/usr/local/bin/ormah")
+
+        assert mock_run.call_count == 3
+        # First: add attempt
+        # Second: remove
+        assert mock_run.call_args_list[1][0][0] == [
+            "/usr/local/bin/claude", "mcp", "remove", "ormah", "--scope", "user",
+        ]
+        # Third: re-add
+        assert mock_run.call_args_list[2][0][0] == [
+            "/usr/local/bin/claude", "mcp", "add", "ormah", "--scope", "user",
+            "--", "/usr/local/bin/ormah", "mcp",
+        ]
 
 
 class TestConfigureClaudeDesktop:
@@ -279,7 +326,17 @@ class TestCliEntryPoint:
             patch("ormah.setup.run_setup") as mock_setup,
         ):
             main()
-            mock_setup.assert_called_once()
+            mock_setup.assert_called_once_with(ci=False)
+
+    def test_setup_ci_flag(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "setup", "--ci"]),
+            patch("ormah.setup.run_setup") as mock_setup,
+        ):
+            main()
+            mock_setup.assert_called_once_with(ci=True)
 
     def test_server_status_when_not_running(self):
         from ormah.cli import main
@@ -544,7 +601,7 @@ class TestConfigureLlm:
 
         captured = capsys.readouterr()
         assert "No LLM configured" in captured.out
-        assert "store, recall, and whisper all work" in captured.out
+        assert "Run 'ormah setup' again to add an LLM later" in captured.out
 
     def test_auto_detect_does_not_store_key(self, tmp_path, monkeypatch):
         """Auto-detect path stores provider/model but NOT the API key."""
@@ -597,7 +654,7 @@ class TestInstallClaudeMd:
         assert "remember" in content
 
         captured = capsys.readouterr()
-        assert "Added ormah instructions to ~/.claude/CLAUDE.md" in captured.out
+        assert "Instructions added to ~/.claude/CLAUDE.md" in captured.out
 
     def test_appends_to_existing_content(self, tmp_path):
         claude_dir = tmp_path / ".claude"
