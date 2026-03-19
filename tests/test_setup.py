@@ -25,6 +25,11 @@ from ormah.setup import (
     WRAPPER_PATH,
     _merge_json_file,
     _read_env_file,
+    _remove_claude_hooks,
+    _remove_claude_md_block,
+    _remove_fastembed_cache,
+    _remove_mcp_from_json,
+    _remove_mcp_registration,
     _write_env_file,
     configure_claude_hooks,
     configure_claude_code_mcp,
@@ -33,6 +38,7 @@ from ormah.setup import (
     configure_llm,
     generate_server_wrapper,
     install_claude_md,
+    run_uninstall,
     seed_identity,
 )
 
@@ -702,3 +708,428 @@ class TestInstallClaudeMd:
         assert content.endswith("\n# After\n")
         assert "old content" not in content
         assert "# Ormah Memory System" in content
+
+
+# --- Uninstall tests ---
+
+
+class TestRemoveClaudeHooks:
+    def _make_settings(self, tmp_path: Path, data: dict) -> Path:
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+        return settings_path
+
+    def test_removes_inject_and_store_hooks(self, tmp_path):
+        data = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper inject", "timeout": 10}]}
+                ],
+                "SessionEnd": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper store", "timeout": 300}]}
+                ],
+            }
+        }
+        settings_path = self._make_settings(tmp_path, data)
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            (tmp_path / ".claude").mkdir()
+            (tmp_path / ".claude" / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
+            _remove_claude_hooks()
+            result = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+
+        assert "hooks" not in result
+
+    def test_preserves_non_ormah_hooks(self, tmp_path):
+        data = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "/usr/bin/ormah whisper inject"},
+                            {"type": "command", "command": "/usr/bin/other-tool run"},
+                        ]
+                    }
+                ],
+            }
+        }
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+            result = json.loads((claude_dir / "settings.json").read_text())
+
+        hooks = result["hooks"]["UserPromptSubmit"][0]["hooks"]
+        assert len(hooks) == 1
+        assert hooks[0]["command"] == "/usr/bin/other-tool run"
+
+    def test_no_settings_file_is_noop(self, tmp_path, capsys):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()  # must not raise
+
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+    def test_invalid_json_is_noop(self, tmp_path, capsys):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text("not json{{{")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+    def test_no_hooks_section_is_noop(self, tmp_path, capsys):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(json.dumps({"theme": "dark"}) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+
+        # File unchanged
+        result = json.loads((claude_dir / "settings.json").read_text())
+        assert result == {"theme": "dark"}
+
+    def test_removes_empty_event_key_after_cleanup(self, tmp_path):
+        data = {
+            "hooks": {
+                "PreCompact": [
+                    {"hooks": [{"type": "command", "command": "/bin/ormah whisper store"}]}
+                ],
+            }
+        }
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+            result = json.loads((claude_dir / "settings.json").read_text())
+
+        assert "hooks" not in result
+
+
+class TestRemoveMcpFromJson:
+    def test_removes_ormah_entry(self, tmp_path):
+        config = tmp_path / "claude.json"
+        config.write_text(json.dumps({
+            "mcpServers": {
+                "ormah": {"command": "/bin/ormah", "args": ["mcp"]},
+                "other": {"command": "/bin/other"},
+            }
+        }, indent=2) + "\n")
+
+        _remove_mcp_from_json(config)
+        result = json.loads(config.read_text())
+        assert "ormah" not in result["mcpServers"]
+        assert "other" in result["mcpServers"]
+
+    def test_removes_mcpservers_key_when_empty(self, tmp_path):
+        config = tmp_path / "claude.json"
+        config.write_text(json.dumps({
+            "mcpServers": {"ormah": {"command": "/bin/ormah", "args": ["mcp"]}}
+        }, indent=2) + "\n")
+
+        _remove_mcp_from_json(config)
+        result = json.loads(config.read_text())
+        assert "mcpServers" not in result
+
+    def test_noop_when_file_missing(self, tmp_path):
+        config = tmp_path / "nonexistent.json"
+        _remove_mcp_from_json(config)  # must not raise
+
+    def test_noop_when_ormah_not_present(self, tmp_path):
+        config = tmp_path / "claude.json"
+        original = {"mcpServers": {"other": {"command": "/bin/other"}}}
+        config.write_text(json.dumps(original, indent=2) + "\n")
+
+        _remove_mcp_from_json(config)
+        result = json.loads(config.read_text())
+        assert result == original
+
+
+class TestRemoveClaudeMdBlock:
+    def test_removes_sentinel_block(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_md = claude_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Before\n\n"
+            f"{CLAUDE_MD_SENTINEL_START}\normah instructions\n{CLAUDE_MD_SENTINEL_END}\n"
+            "\n# After\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_md_block()
+
+        content = claude_md.read_text()
+        assert CLAUDE_MD_SENTINEL_START not in content
+        assert CLAUDE_MD_SENTINEL_END not in content
+        assert "ormah instructions" not in content
+        assert "# Before" in content
+        assert "# After" in content
+
+    def test_no_triple_newlines_after_removal(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_md = claude_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Before\n\n"
+            f"{CLAUDE_MD_SENTINEL_START}\ncontent\n{CLAUDE_MD_SENTINEL_END}\n"
+            "\n# After\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_md_block()
+
+        content = claude_md.read_text()
+        assert "\n\n\n" not in content
+
+    def test_noop_when_file_missing(self, tmp_path, capsys):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_md_block()
+
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+    def test_noop_when_no_sentinels(self, tmp_path, capsys):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_md = claude_dir / "CLAUDE.md"
+        claude_md.write_text("# Just some content\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_md_block()
+
+        assert claude_md.read_text() == "# Just some content\n"
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+
+class TestRunUninstall:
+    def _patch_all(self, mock_uninstall_autostart, mock_hooks, mock_mcp, mock_md, mock_rmtree, mock_run):
+        """Shared patcher helper — not used directly, see individual tests."""
+
+    def test_cancels_on_first_no(self, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        with patch("ormah.server_manager.uninstall_autostart") as mock_daemon:
+            run_uninstall(yes=False)
+            mock_daemon.assert_not_called()
+
+        captured = capsys.readouterr()
+        assert "cancelled" in captured.out.lower()
+
+    def test_cancels_on_wrong_confirmation(self, monkeypatch, capsys):
+        inputs = iter(["y", "nope"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        with patch("ormah.server_manager.uninstall_autostart") as mock_daemon:
+            run_uninstall(yes=False)
+            mock_daemon.assert_not_called()
+
+        captured = capsys.readouterr()
+        assert "cancelled" in captured.out.lower()
+
+    def test_proceeds_with_yes_flag(self, tmp_path, capsys):
+        with (
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("shutil.rmtree"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        captured = capsys.readouterr()
+        assert "uninstalled" in captured.out.lower()
+
+    def test_deletes_data_directories(self, tmp_path, capsys):
+        share_dir = tmp_path / ".local" / "share" / "ormah"
+        cache_dir = tmp_path / ".cache" / "ormah"
+        config_dir = tmp_path / ".config" / "ormah"
+        for d in (share_dir, cache_dir, config_dir):
+            d.mkdir(parents=True)
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not share_dir.exists()
+        assert not cache_dir.exists()
+        assert not config_dir.exists()
+
+    def test_graceful_uv_failure(self, capsys):
+        with (
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("shutil.rmtree"),
+            patch("subprocess.run", side_effect=Exception("uv not found")),
+        ):
+            run_uninstall(yes=True)  # must not raise
+
+        captured = capsys.readouterr()
+        assert "uv tool uninstall ormah" in captured.out
+
+    def test_eof_on_first_prompt_cancels(self, monkeypatch, capsys):
+        def raise_eof(_):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", raise_eof)
+
+        with patch("ormah.server_manager.uninstall_autostart") as mock_daemon:
+            run_uninstall(yes=False)
+            mock_daemon.assert_not_called()
+
+
+class TestRemoveFastembedCache:
+    def test_deletes_known_model_dirs(self, tmp_path, monkeypatch, capsys):
+        # Simulate a fastembed cache with two model directories
+        model_a = tmp_path / "models--qdrant--bge-base-en-v1.5-onnx-q"
+        model_b = tmp_path / "models--Xenova--ms-marco-MiniLM-L-6-v2"
+        model_a.mkdir()
+        model_b.mkdir()
+
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+
+        fake_embed_models = [{"model": "BAAI/bge-base-en-v1.5", "sources": {"hf": "qdrant/bge-base-en-v1.5-onnx-q"}}]
+        fake_rerank_models = [{"model": "Xenova/ms-marco-MiniLM-L-6-v2", "sources": {"hf": "Xenova/ms-marco-MiniLM-L-6-v2"}}]
+
+        with (
+            patch("fastembed.TextEmbedding.list_supported_models", return_value=fake_embed_models),
+            patch("fastembed.rerank.cross_encoder.TextCrossEncoder.list_supported_models", return_value=fake_rerank_models),
+        ):
+            _remove_fastembed_cache()
+
+        assert not model_a.exists()
+        assert not model_b.exists()
+
+    def test_noop_when_cache_missing(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path / "nonexistent"))
+        _remove_fastembed_cache()  # must not raise
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+    def test_warns_when_registry_unavailable(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+        with (
+            patch("fastembed.TextEmbedding.list_supported_models", side_effect=Exception("no fastembed")),
+            patch("fastembed.rerank.cross_encoder.TextCrossEncoder.list_supported_models", side_effect=Exception("no fastembed")),
+        ):
+            _remove_fastembed_cache()  # must not raise
+        captured = capsys.readouterr()
+        assert "manually" in captured.out.lower()
+
+    def test_removes_cache_dir_when_empty_after_cleanup(self, tmp_path, monkeypatch):
+        model_dir = tmp_path / "models--qdrant--bge-base-en-v1.5-onnx-q"
+        model_dir.mkdir()
+
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+
+        fake_embed_models = [{"model": "BAAI/bge-base-en-v1.5", "sources": {"hf": "qdrant/bge-base-en-v1.5-onnx-q"}}]
+
+        with (
+            patch("fastembed.TextEmbedding.list_supported_models", return_value=fake_embed_models),
+            patch("fastembed.rerank.cross_encoder.TextCrossEncoder.list_supported_models", return_value=[]),
+        ):
+            _remove_fastembed_cache()
+
+        # cache_dir itself is removed when empty
+        assert not tmp_path.exists()
+
+
+class TestUninstallMemoryDirResolution:
+    """Verify that run_uninstall deletes the actual memory directory regardless of
+    whether it is a relative path (old default) or absolute (new default / custom)."""
+
+    def _run_uninstall_with_mem_dir(self, tmp_path, mem_dir: Path):
+        """Helper: run uninstall with a faked settings.memory_dir."""
+        fake_settings = MagicMock()
+        fake_settings.memory_dir = mem_dir
+        fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
+        fake_settings.whisper_reranker_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.config.settings", fake_settings),
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_fastembed_cache"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+    def test_relative_memory_dir_resolved_from_home(self, tmp_path):
+        """Old ormah used Path('memory') — server runs from ~, so data is at ~/memory."""
+        fake_mem = tmp_path / "memory"
+        fake_mem.mkdir()
+        (fake_mem / "index.db").touch()
+
+        self._run_uninstall_with_mem_dir(tmp_path, Path("memory"))
+
+        assert not fake_mem.exists()
+
+    def test_absolute_memory_dir_outside_xdg_is_deleted(self, tmp_path):
+        """Custom absolute path outside XDG dirs is also cleaned up."""
+        custom_mem = tmp_path / "custom_memories"
+        custom_mem.mkdir()
+
+        self._run_uninstall_with_mem_dir(tmp_path, custom_mem)
+
+        assert not custom_mem.exists()
+
+    def test_memory_dir_inside_xdg_not_double_deleted(self, tmp_path):
+        """memory_dir under ~/.local/share/ormah is already covered by XDG cleanup."""
+        xdg_share = tmp_path / ".local" / "share" / "ormah"
+        xdg_share.mkdir(parents=True)
+        mem_dir = xdg_share / "memory"
+        mem_dir.mkdir()
+
+        # Should not raise even though the parent dir covers the mem_dir
+        self._run_uninstall_with_mem_dir(tmp_path, mem_dir)
+
+        assert not xdg_share.exists()
+
+
+class TestUninstallCli:
+    def test_uninstall_calls_run_uninstall(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "uninstall", "--yes"]),
+            patch("ormah.setup.run_uninstall") as mock_uninstall,
+        ):
+            main()
+            mock_uninstall.assert_called_once_with(yes=True)
+
+    def test_uninstall_no_yes_flag(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "uninstall"]),
+            patch("ormah.setup.run_uninstall") as mock_uninstall,
+        ):
+            main()
+            mock_uninstall.assert_called_once_with(yes=False)

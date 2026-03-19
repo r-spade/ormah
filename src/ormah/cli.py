@@ -6,6 +6,7 @@ Usage:
     ormah server stop       Stop daemon
     ormah server status     Check if running
     ormah setup             One-shot setup (hooks, MCP, server)
+    ormah uninstall         Remove all ormah integrations and data
     ormah mcp               Run MCP stdio server
     ormah recall <query>    Search memories
     ormah remember <text>   Store a memory
@@ -71,6 +72,12 @@ def _cmd_setup(args):
     run_setup(ci=args.ci)
 
 
+def _cmd_uninstall(args):
+    from ormah.setup import run_uninstall
+
+    run_uninstall(yes=args.yes)
+
+
 def _cmd_mcp(args):
     from ormah.adapters.mcp_adapter import main as mcp_main
 
@@ -115,6 +122,11 @@ def main():
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")
     setup_p.add_argument("--ci", action="store_true", help="Non-interactive mode for CI/testing")
     setup_p.set_defaults(func=_cmd_setup)
+
+    # --- uninstall ---
+    uninstall_p = sub.add_parser("uninstall", help="Remove all ormah integrations and data")
+    uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
+    uninstall_p.set_defaults(func=_cmd_uninstall)
 
     # --- mcp ---
     mcp_p = sub.add_parser("mcp", help="Run MCP stdio server")

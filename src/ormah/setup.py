@@ -626,6 +626,371 @@ def _diagnose_server_failure() -> None:
         sock.close()
 
 
+def _remove_claude_hooks() -> None:
+    """Remove ormah whisper hooks from ~/.claude/settings.json."""
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if not settings_path.exists():
+        info("No ~/.claude/settings.json found — skipping")
+        return
+    try:
+        data = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        warn("Could not parse ~/.claude/settings.json — skipping")
+        return
+
+    hooks_top = data.get("hooks")
+    if not isinstance(hooks_top, dict):
+        info("No hooks section — nothing to remove")
+        return
+
+    def _is_ormah_hook(entry: dict) -> bool:
+        cmd = entry.get("command", "")
+        return "whisper inject" in cmd or "whisper store" in cmd
+
+    changed = False
+    to_delete = []
+    for event, matchers in hooks_top.items():
+        if not isinstance(matchers, list):
+            continue
+        new_matchers = []
+        for matcher in matchers:
+            if not isinstance(matcher, dict):
+                new_matchers.append(matcher)
+                continue
+            inner = matcher.get("hooks", [])
+            filtered = [h for h in inner if not _is_ormah_hook(h)]
+            if len(filtered) != len(inner):
+                changed = True
+            if filtered:
+                new_matchers.append({**matcher, "hooks": filtered})
+            else:
+                changed = True
+        if new_matchers:
+            hooks_top[event] = new_matchers
+        else:
+            to_delete.append(event)
+            changed = True
+
+    for k in to_delete:
+        del hooks_top[k]
+    if not hooks_top:
+        del data["hooks"]
+        changed = True
+
+    if changed:
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+        ok("Removed whisper hooks from ~/.claude/settings.json")
+    else:
+        info("No ormah hooks found in settings.json")
+
+
+def _remove_mcp_registration() -> None:
+    """Unregister ormah MCP server from Claude Code (and Claude Desktop on macOS)."""
+    import platform as _platform
+
+    # Try official CLI first
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        try:
+            result = subprocess.run(
+                [claude_bin, "mcp", "remove", "ormah", "--scope", "user"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                ok("Removed ormah MCP registration from Claude Code")
+            else:
+                # Fallback: edit ~/.claude.json directly
+                _remove_mcp_from_json(Path.home() / ".claude.json")
+        except Exception:
+            _remove_mcp_from_json(Path.home() / ".claude.json")
+    else:
+        _remove_mcp_from_json(Path.home() / ".claude.json")
+
+    # macOS: also check Claude Desktop
+    if _platform.system() == "Darwin":
+        desktop_config = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        if desktop_config.exists():
+            _remove_mcp_from_json(desktop_config)
+
+
+def _remove_mcp_from_json(config_path: Path) -> None:
+    """Remove ormah entry from mcpServers in a JSON config file."""
+    if not config_path.exists():
+        return
+    try:
+        data = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        warn(f"Could not parse {config_path} — skipping")
+        return
+
+    mcp_servers = data.get("mcpServers", {})
+    if "ormah" not in mcp_servers:
+        return
+
+    del mcp_servers["ormah"]
+    if not mcp_servers:
+        del data["mcpServers"]
+    else:
+        data["mcpServers"] = mcp_servers
+
+    config_path.write_text(json.dumps(data, indent=2) + "\n")
+    ok(f"Removed ormah from {config_path}")
+
+
+def _remove_claude_md_block() -> None:
+    """Remove the ormah instructions block from ~/.claude/CLAUDE.md."""
+    target = Path.home() / ".claude" / "CLAUDE.md"
+    if not target.exists():
+        info("No ~/.claude/CLAUDE.md found — skipping")
+        return
+
+    existing = target.read_text()
+    if CLAUDE_MD_SENTINEL_START not in existing or CLAUDE_MD_SENTINEL_END not in existing:
+        info("No ormah block found in CLAUDE.md — skipping")
+        return
+
+    start = existing.index(CLAUDE_MD_SENTINEL_START)
+    end = existing.index(CLAUDE_MD_SENTINEL_END) + len(CLAUDE_MD_SENTINEL_END)
+    # Consume trailing newline if present
+    if end < len(existing) and existing[end] == "\n":
+        end += 1
+
+    updated = existing[:start] + existing[end:]
+    # Collapse triple (or more) newlines to double
+    import re
+    updated = re.sub(r"\n{3,}", "\n\n", updated)
+
+    target.write_text(updated)
+    ok("Removed ormah block from ~/.claude/CLAUDE.md")
+
+
+def _get_running_server_data_dir() -> Path | None:
+    """Return the data directory of the running ormah server by inspecting its open files.
+
+    This works regardless of which version of ormah installed the server, because it reads
+    the actual open file descriptors of the live process rather than the current config.
+    Must be called BEFORE the server is stopped.
+    """
+    # Step 1: find the server PID via systemd, then pgrep as fallback
+    pid: str | None = None
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "show", "ormah.service",
+             "--property=MainPID", "--value"],
+            capture_output=True, text=True, timeout=5,
+        )
+        candidate = r.stdout.strip()
+        if candidate and candidate != "0":
+            pid = candidate
+    except Exception:
+        pass
+
+    if pid is None:
+        try:
+            r = subprocess.run(
+                ["pgrep", "-f", "ormah server start"],
+                capture_output=True, text=True, timeout=5,
+            )
+            lines = r.stdout.strip().splitlines()
+            if lines:
+                pid = lines[0].strip()
+        except Exception:
+            pass
+
+    if not pid:
+        return None
+
+    # Step 2: find an open index.db file in /proc (Linux) or via lsof (cross-platform)
+    # Linux: /proc/{pid}/fd symlinks are fast and require no extra tools
+    try:
+        fd_dir = Path(f"/proc/{pid}/fd")
+        if fd_dir.exists():
+            for fd_link in fd_dir.iterdir():
+                try:
+                    target = Path(os.readlink(fd_link))
+                    if target.name == "index.db" and target.exists():
+                        return target.parent
+                except OSError:
+                    continue
+    except Exception:
+        pass
+
+    # macOS / fallback: lsof
+    try:
+        r = subprocess.run(
+            ["lsof", "-p", pid, "-Fn"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in r.stdout.splitlines():
+            if line.startswith("n") and line.endswith("index.db"):
+                db_path = Path(line[1:])
+                if db_path.exists():
+                    return db_path.parent
+    except Exception:
+        pass
+
+    return None
+
+
+def _remove_fastembed_cache() -> None:
+    """Delete the fastembed model cache entries that ormah downloaded."""
+    import tempfile
+    from ormah.config import settings as _settings
+
+    cache_dir = Path(
+        os.environ.get("FASTEMBED_CACHE_PATH",
+                       os.path.join(tempfile.gettempdir(), "fastembed_cache"))
+    )
+    if not cache_dir.exists():
+        info("No fastembed model cache found — skipping")
+        return
+
+    # Build the set of cache subdirectory names to delete.
+    # fastembed stores models as  models--{hf_source_repo.replace('/', '--')}
+    # Use fastembed's own model registry to resolve model name → HF source repo.
+    model_dirs: set[str] = set()
+
+    try:
+        from fastembed import TextEmbedding
+        for m in TextEmbedding.list_supported_models():
+            if m.get("model") == _settings.embedding_model:
+                hf_repo = (m.get("sources") or {}).get("hf", "")
+                if hf_repo:
+                    model_dirs.add(f"models--{hf_repo.replace('/', '--')}")
+                break
+    except Exception:
+        pass
+
+    try:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        for m in TextCrossEncoder.list_supported_models():
+            if m.get("model") == _settings.whisper_reranker_model:
+                hf_repo = (m.get("sources") or {}).get("hf", "")
+                if hf_repo:
+                    model_dirs.add(f"models--{hf_repo.replace('/', '--')}")
+                break
+    except Exception:
+        pass
+
+    if not model_dirs:
+        warn(f"Could not identify model cache dirs — delete manually: {cache_dir}")
+        return
+
+    for dir_name in sorted(model_dirs):
+        model_path = cache_dir / dir_name
+        if model_path.exists():
+            shutil.rmtree(model_path)
+            ok(f"Deleted model cache: {model_path}")
+        else:
+            info(f"Model cache not found: {model_path} — skipping")
+
+    # Remove the cache dir itself if now empty
+    try:
+        if cache_dir.exists() and not any(cache_dir.iterdir()):
+            cache_dir.rmdir()
+    except OSError:
+        pass
+
+
+def run_uninstall(yes: bool = False) -> None:
+    """Remove all ormah integrations, data, and optionally the package itself."""
+    print("This will remove all ormah integrations and data.\n")
+
+    if not yes:
+        try:
+            answer = input("Are you sure? (y/N) ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            info("Uninstall cancelled")
+            return
+
+        try:
+            confirm = input('Type "yes" to confirm: ').strip()
+        except EOFError:
+            confirm = ""
+        if confirm != "yes":
+            info("Uninstall cancelled")
+            return
+
+    print()
+
+    # Snapshot the running server's data directory BEFORE stopping it.
+    # This is the only reliable way to find where data lives regardless of which
+    # version of ormah is installed (older releases used a relative Path("memory")
+    # that resolves differently depending on the invoking binary's config).
+    live_data_dir = _get_running_server_data_dir()
+
+    # a. Stop daemon
+    step("Stopping server")
+    from ormah.server_manager import uninstall_autostart
+    uninstall_autostart()
+
+    # b. Remove Claude Code hooks
+    step("Removing Claude Code hooks")
+    _remove_claude_hooks()
+
+    # c. Remove MCP registration
+    step("Removing MCP registration")
+    _remove_mcp_registration()
+
+    # d. Remove CLAUDE.md block
+    step("Removing CLAUDE.md instructions")
+    _remove_claude_md_block()
+
+    # e. Delete data directories
+    step("Deleting data directories")
+
+    xdg_dirs = [
+        Path.home() / ".local" / "share" / "ormah",
+        Path.home() / ".cache" / "ormah",
+        Path.home() / ".config" / "ormah",
+    ]
+    data_dirs: list[Path] = list(xdg_dirs)
+
+    # Add the live server's actual data dir if it falls outside the XDG tree.
+    # Also add the config-derived path as a safety net (handles custom ORMAH_MEMORY_DIR).
+    from ormah.config import settings as _settings
+    config_mem_dir = _settings.memory_dir
+    if not config_mem_dir.is_absolute():
+        config_mem_dir = Path.home() / config_mem_dir
+    config_mem_dir = config_mem_dir.resolve()
+
+    for candidate in filter(None, [live_data_dir, config_mem_dir]):
+        if not any(candidate == d or str(candidate).startswith(str(d) + "/")
+                   for d in xdg_dirs):
+            if candidate not in data_dirs:
+                data_dirs.append(candidate)
+
+    for d in data_dirs:
+        if d.exists():
+            shutil.rmtree(d)
+            ok(f"Deleted {d}")
+        else:
+            info(f"{d} not found — skipping")
+
+    # f. Delete fastembed model cache
+    step("Removing embedding model cache")
+    _remove_fastembed_cache()
+
+    # h. Uninstall the package
+    step("Uninstalling ormah package")
+    try:
+        result = subprocess.run(
+            ["uv", "tool", "uninstall", "ormah"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            ok("Package uninstalled via uv")
+        else:
+            warn("Could not uninstall via uv — remove manually with: uv tool uninstall ormah")
+    except Exception:
+        warn("Could not uninstall via uv — remove manually with: uv tool uninstall ormah")
+
+    print()
+    ok("Ormah has been uninstalled")
+
+
 def run_setup(ci: bool = False) -> None:
     """First-time setup. Pass ci=True (or set ORMAH_CI=1) for non-interactive mode."""
     ci = ci or os.environ.get("ORMAH_CI") == "1"
