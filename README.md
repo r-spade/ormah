@@ -249,6 +249,8 @@ You can also trigger a manual scan from the admin panel at `localhost:8787` with
 
 ```
 ormah setup                    # One-shot setup (hooks, MCP, server)
+ormah uninstall                # Remove all integrations, data, and the package
+ormah uninstall -y             # Same, skip confirmation prompts
 
 ormah server start             # Start server (foreground)
 ormah server start -d          # Start as daemon (launchd on macOS)
@@ -373,10 +375,9 @@ ormah/
   transcript/      # Conversation transcript parser
 
 ui/                # React + TypeScript + Cytoscape.js graph visualization
-memory/nodes/      # Markdown files (source of truth for all memories)
 ```
 
-Memories are stored as markdown files with YAML frontmatter, human-readable, git-friendly, and portable. The SQLite database is a derived index that can be rebuilt from the markdown files at any time.
+Memories are stored as markdown files with YAML frontmatter in `~/.local/share/ormah/memory/nodes/`, human-readable, git-friendly, and portable. The SQLite database is a derived index that can be rebuilt from the markdown files at any time.
 
 ## Development
 
