@@ -135,13 +135,13 @@ class TestApplyMaintenanceResults:
 
     def test_apply_merges(self, engine):
         ids = _seed_similar_nodes(engine, 2)
-        keep, discard = ids[0], ids[1]
+        a, b = ids[0], ids[1]
 
         counts = engine.apply_maintenance_results({
             "merges": [
                 {
-                    "keep_id": keep,
-                    "discard_id": discard,
+                    "keep_id": a,
+                    "discard_id": b,
                     "merged_content": "Merged content",
                     "merged_title": "Merged title",
                 },
@@ -149,11 +149,11 @@ class TestApplyMaintenanceResults:
         })
 
         assert counts["merges"] == 1
-        # Discard node should be gone
-        row = engine.db.conn.execute(
-            "SELECT 1 FROM nodes WHERE id = ?", (discard,)
-        ).fetchone()
-        assert row is None
+        # Exactly one of the two nodes should remain (_pick_keeper decides which)
+        remaining = engine.db.conn.execute(
+            "SELECT id FROM nodes WHERE id IN (?, ?)", (a, b)
+        ).fetchall()
+        assert len(remaining) == 1
 
     def test_apply_consolidations(self, engine):
         ids = _seed_similar_nodes(engine, 3)
