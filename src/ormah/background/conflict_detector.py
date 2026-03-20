@@ -98,8 +98,17 @@ def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
         return None
 
 
-def run_conflict_detection(engine) -> None:
-    """Find potentially contradicting nodes and create edges."""
+_BELIEF_TYPES = ('preference', 'fact', 'observation', 'goal')
+
+
+def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
+    """Find node pairs that might contradict each other.
+
+    Returns up to *limit* pairs as
+    ``[{"node_a": {...}, "node_b": {...}, "similarity": float}]``.
+    Node dicts include ``created`` so they can be passed directly to the
+    LLM conflict-check prompt.  Does NOT call the LLM.
+    """
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
@@ -107,13 +116,6 @@ def run_conflict_detection(engine) -> None:
         settings = engine.settings
         encoder = get_encoder(settings)
         vec_store = VectorStore(engine.db)
-
-        if not settings.llm_enabled:
-            logger.debug("Conflict detection skipped: LLM not enabled")
-            return
-
-        # Only check personal belief/preference nodes, not project docs.
-        _BELIEF_TYPES = ('preference', 'fact', 'observation', 'goal')
 
         if settings.conflict_check_all_spaces:
             nodes = engine.db.conn.execute(
@@ -128,11 +130,13 @@ def run_conflict_detection(engine) -> None:
                 _BELIEF_TYPES,
             ).fetchall()
 
-        checked = set()
-        edges_created = 0
-        dirty_nodes: dict[str, list[Connection]] = {}
+        checked: set[tuple[str, str]] = set()
+        candidates: list[dict] = []
 
         for node in nodes:
+            if len(candidates) >= limit:
+                break
+
             text = f"{node['title'] or ''} {node['content']}".strip()
             if not text:
                 continue
@@ -141,6 +145,8 @@ def run_conflict_detection(engine) -> None:
             similar = vec_store.search(query_vec, limit=15)
 
             for match in similar:
+                if len(candidates) >= limit:
+                    break
                 if match["id"] == node["id"]:
                     continue
 
@@ -150,77 +156,109 @@ def run_conflict_detection(engine) -> None:
                 checked.add(pair)
 
                 similarity = match["similarity"]
-                # Lower threshold than auto-linker: contradictions often share
-                # the same topic but express opposite views, which can have
-                # moderate (not high) embedding similarity.
                 if similarity < 0.4:
                     continue
 
-                # Skip if the matched node is not a belief type either
                 other = engine.db.conn.execute(
-                    "SELECT title, content, type, created, space FROM nodes WHERE id = ?", (match["id"],)
+                    "SELECT id, title, content, type, created, space FROM nodes WHERE id = ?",
+                    (match["id"],),
                 ).fetchone()
                 if other is None:
                     continue
                 if other["type"] not in _BELIEF_TYPES:
                     continue
 
-                # Check no existing conflict/evolution edge
                 has_edge = engine.db.conn.execute(
                     "SELECT 1 FROM edges WHERE edge_type IN ('contradicts', 'evolved_from') AND "
                     "((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))",
                     (node["id"], match["id"], match["id"], node["id"]),
                 ).fetchone()
-
                 if has_edge:
                     continue
 
-                # LLM-based contradiction detection
-                llm_result = _llm_check_conflict(settings, node, other)
-                if llm_result is None:
-                    continue
-                if not llm_result.get("conflict"):
-                    continue
-                if not llm_result.get("same_subject", True):
-                    continue
+                def _nd(row) -> dict:
+                    return {
+                        "id": row["id"],
+                        "title": row["title"] or "",
+                        "type": row["type"] or "",
+                        "space": row["space"] or "",
+                        "content": (row["content"] or "")[:400],
+                        "created": row["created"] or "",
+                    }
 
-                explanation = llm_result.get("explanation", "")
-                now = datetime.now(timezone.utc).isoformat()
-                conflict_type = llm_result.get("type", "tension")
+                candidates.append({
+                    "node_a": _nd(node),
+                    "node_b": _nd(other),
+                    "similarity": round(similarity, 3),
+                })
 
-                with engine.db.transaction() as db_conn:
-                    if conflict_type == "evolution":
-                        evolved = llm_result.get("evolved_node", "b")
-                        if evolved == "a":
-                            newer_id, older_id = node["id"], match["id"]
-                        else:
-                            newer_id, older_id = match["id"], node["id"]
+        return candidates
 
-                        db_conn.execute(
-                            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
-                            "VALUES (?, ?, 'evolved_from', 0.9, ?, ?)",
-                            (newer_id, older_id, now, explanation),
-                        )
-                        edge_type_str = "evolved_from"
-                        source_id, target_id = newer_id, older_id
+    except Exception as e:
+        logger.warning("_find_conflict_candidates failed: %s", e)
+        return []
+
+
+def run_conflict_detection(engine) -> None:
+    """Find potentially contradicting nodes and create edges."""
+    try:
+        settings = engine.settings
+
+        if not settings.llm_enabled:
+            logger.debug("Conflict detection skipped: LLM not enabled")
+            return
+
+        candidates = _find_conflict_candidates(engine, limit=10000)
+        edges_created = 0
+        dirty_nodes: dict[str, list[Connection]] = {}
+
+        for candidate in candidates:
+            node_a = candidate["node_a"]
+            node_b = candidate["node_b"]
+
+            llm_result = _llm_check_conflict(settings, node_a, node_b)
+            if llm_result is None:
+                continue
+            if not llm_result.get("conflict"):
+                continue
+            if not llm_result.get("same_subject", True):
+                continue
+
+            explanation = llm_result.get("explanation", "")
+            now = datetime.now(timezone.utc).isoformat()
+            conflict_type = llm_result.get("type", "tension")
+
+            with engine.db.transaction() as db_conn:
+                if conflict_type == "evolution":
+                    evolved = llm_result.get("evolved_node", "b")
+                    if evolved == "a":
+                        newer_id, older_id = node_a["id"], node_b["id"]
                     else:
-                        db_conn.execute(
-                            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
-                            "VALUES (?, ?, 'contradicts', 0.9, ?, ?)",
-                            (node["id"], match["id"], now, explanation),
-                        )
-                        edge_type_str = "contradicts"
-                        source_id, target_id = node["id"], match["id"]
+                        newer_id, older_id = node_b["id"], node_a["id"]
 
-                # Track for markdown persistence
-                md_conn = Connection(
-                    target=target_id,
-                    edge=EdgeType(edge_type_str),
-                    weight=0.9,
-                )
-                dirty_nodes.setdefault(source_id, []).append(md_conn)
+                    db_conn.execute(
+                        "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+                        "VALUES (?, ?, 'evolved_from', 0.9, ?, ?)",
+                        (newer_id, older_id, now, explanation),
+                    )
+                    edge_type_str = "evolved_from"
+                    source_id, target_id = newer_id, older_id
+                else:
+                    db_conn.execute(
+                        "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+                        "VALUES (?, ?, 'contradicts', 0.9, ?, ?)",
+                        (node_a["id"], node_b["id"], now, explanation),
+                    )
+                    edge_type_str = "contradicts"
+                    source_id, target_id = node_a["id"], node_b["id"]
 
-                edges_created += 1
+            md_conn = Connection(
+                target=target_id,
+                edge=EdgeType(edge_type_str),
+                weight=0.9,
+            )
+            dirty_nodes.setdefault(source_id, []).append(md_conn)
+            edges_created += 1
 
         # Persist new connections to markdown files
         for nid, new_connections in dirty_nodes.items():

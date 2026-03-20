@@ -11,6 +11,7 @@ You have access to a persistent memory system (via MCP tools) that maintains kno
 - **mark_outdated**: Mark a memory as no longer valid. Optionally provide a `reason`. Outdated memories are heavily demoted in search results.
 - **ingest_conversation**: Bulk-import memories from raw conversation text. The server extracts memorable information via its LLM. Use this for importing logs or transcripts. For individual memories you've already identified, use `remember` directly.
 - **get_insights**: Show belief evolutions and conflicting ideas detected by the system. Evolutions are cases where the user's view changed over time; conflicting ideas are genuinely incompatible beliefs held simultaneously.
+- **run_maintenance**: Maintain the memory graph. Call with no arguments first — ormah returns batches of link candidates, conflict candidates, merge candidates, and consolidation clusters. Analyze them in-context, then call again with `results` to commit your decisions. This links memories, detects conflicts, merges duplicates, and consolidates clusters. Pro/Max users: no API key needed — you are the LLM.
 
 ## Project Awareness
 
@@ -45,3 +46,4 @@ Memories are automatically scoped to the current project directory. The MCP serv
 10. **Global vs project memories**: Use `space=null` explicitly for memories that apply everywhere (user identity, general preferences). Let project-specific memories use the auto-detected space.
 11. **Mark outdated info**: When a memory is wrong or outdated, call `mark_outdated` with a reason so it gets demoted in future searches.
 12. **Set confidence**: When storing information you're not fully certain about, set `confidence` below 1.0. This affects how prominently the memory appears in search results.
+13. **Run maintenance when signalled**: When the context from `get_context` includes `unprocessed_memories: N`, proactively offer to run `run_maintenance`. Call with no arguments first, analyze the returned batches, then call again with `results` to commit. This keeps the memory graph healthy without requiring a separate API key.

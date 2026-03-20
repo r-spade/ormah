@@ -305,6 +305,15 @@ async def _dispatch(
                 lines.append(f"  - {mem['title']} (ID: {mem['node_id'][:8]}...)")
             return "\n".join(lines)
 
+        elif name == "run_maintenance":
+            body = {}
+            if args.get("results"):
+                body["results"] = args["results"]
+            resp = await client.post("/agent/maintenance", json=body)
+            if not resp.is_success:
+                return _handle_error(resp)
+            return resp.text
+
         else:
             return f"Unknown tool: {name}"
 

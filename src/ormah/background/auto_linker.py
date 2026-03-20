@@ -117,12 +117,164 @@ def _llm_classify_link(settings, node_row, other_row) -> dict | None:
         return None
 
 
+def _node_dict(row, content_limit: int = 400) -> dict:
+    """Convert a DB row to a plain node dict for candidate lists."""
+    return {
+        "id": row["id"],
+        "title": row["title"] or "",
+        "type": row["type"] or "",
+        "space": row["space"] or "",
+        "content": (row["content"] or "")[:content_limit],
+    }
+
+
+def _find_link_candidates(engine, limit: int = 8) -> list[dict]:
+    """Find node pairs that need link classification.
+
+    Returns up to *limit* pairs as
+    ``[{"node_a": {...}, "node_b": {...}, "similarity": float}]``.
+    Does NOT call the LLM — just applies the same pre-filters as
+    ``run_auto_linker`` (similarity threshold, cross-space penalty,
+    not in auto_link_checked, no existing edge).
+    """
+    try:
+        from ormah.embeddings.encoder import get_encoder
+        from ormah.embeddings.vector_store import VectorStore
+
+        settings = engine.settings
+        encoder = get_encoder(settings)
+        vec_store = VectorStore(engine.db)
+
+        conn = engine.db.conn
+        nodes = conn.execute("SELECT id, content, title, type, space FROM nodes").fetchall()
+        threshold = settings.auto_link_similarity_threshold
+        cross_space_penalty = settings.auto_link_cross_space_penalty
+
+        candidates: list[dict] = []
+        seen_pairs: set[tuple[str, str]] = set()
+
+        for node in nodes:
+            if len(candidates) >= limit:
+                break
+
+            text = f"{node['title'] or ''} {node['content']}".strip()
+            if not text:
+                continue
+
+            query_vec = encoder.encode(text)
+            similar = vec_store.search(query_vec, limit=6)
+
+            for match in similar:
+                if len(candidates) >= limit:
+                    break
+                if match["id"] == node["id"]:
+                    continue
+
+                similarity = match["similarity"]
+
+                other_space = conn.execute(
+                    "SELECT space FROM nodes WHERE id = ?", (match["id"],)
+                ).fetchone()
+                if other_space is not None:
+                    src_space = node["space"] or ""
+                    tgt_space = other_space["space"] or ""
+                    if src_space != tgt_space:
+                        similarity -= cross_space_penalty
+
+                if similarity < threshold:
+                    continue
+
+                pair = tuple(sorted([node["id"], match["id"]]))
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+
+                already_checked = conn.execute(
+                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?",
+                    pair,
+                ).fetchone()
+                if already_checked:
+                    continue
+
+                existing = conn.execute(
+                    "SELECT 1 FROM edges WHERE "
+                    "(source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
+                    (node["id"], match["id"], match["id"], node["id"]),
+                ).fetchone()
+                if existing:
+                    continue
+
+                other = conn.execute(
+                    "SELECT id, title, content, type, space FROM nodes WHERE id = ?",
+                    (match["id"],),
+                ).fetchone()
+                if other is None:
+                    continue
+
+                candidates.append({
+                    "node_a": _node_dict(node),
+                    "node_b": _node_dict(other),
+                    "similarity": round(similarity, 3),
+                })
+
+        return candidates
+
+    except Exception as e:
+        logger.warning("_find_link_candidates failed: %s", e)
+        return []
+
+
+def _apply_edge(
+    engine,
+    node_a_id: str,
+    node_b_id: str,
+    edge_type: str,
+    reason: str,
+    similarity: float = 0.0,
+) -> None:
+    """Record a link decision: write to auto_link_checked and optionally create an edge.
+
+    ``edge_type="none"`` records the pair as checked without creating an edge.
+    """
+    from ormah.models.node import Connection, EdgeType
+
+    pair = tuple(sorted([node_a_id, node_b_id]))
+    now = datetime.now(timezone.utc).isoformat()
+
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO auto_link_checked (node_a, node_b, result, checked_at) "
+            "VALUES (?, ?, ?, ?)",
+            (*pair, edge_type, now),
+        )
+
+        if edge_type != "none":
+            conn.execute(
+                "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (node_a_id, node_b_id, edge_type, round(similarity, 3), now, reason),
+            )
+
+    if edge_type != "none":
+        try:
+            mem_node = engine.file_store.load(node_a_id)
+            if mem_node is not None:
+                md_conn = Connection(
+                    target=node_b_id,
+                    edge=EdgeType(edge_type),
+                    weight=round(similarity, 2),
+                )
+                mem_node.connections.append(md_conn)
+                engine.file_store.save(mem_node)
+        except Exception as e:
+            logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
+
+
 def run_auto_linker(engine) -> None:
     """Find similar nodes and create edges between them."""
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
-        from ormah.models.node import Connection, EdgeType
 
         settings = engine.settings
         encoder = get_encoder(settings)
@@ -138,8 +290,6 @@ def run_auto_linker(engine) -> None:
         cross_space_penalty = settings.auto_link_cross_space_penalty
         max_edges = settings.auto_link_max_edges_per_run
         created = 0
-        # Track which source nodes gained connections so we persist once per node
-        dirty_nodes: dict[str, list[Connection]] = {}
 
         for node in nodes:
             if created >= max_edges:
@@ -155,10 +305,9 @@ def run_auto_linker(engine) -> None:
             for match in similar:
                 if match["id"] == node["id"]:
                     continue
-                # sqlite-vec returns distance, lower = more similar
+
                 similarity = match["similarity"]
 
-                # Penalize cross-space pairs to reduce spurious links
                 other_space = conn.execute(
                     "SELECT space FROM nodes WHERE id = ?", (match["id"],)
                 ).fetchone()
@@ -171,10 +320,8 @@ def run_auto_linker(engine) -> None:
                 if similarity < threshold:
                     continue
 
-                # Canonical pair ordering for dedup
                 pair = tuple(sorted([node["id"], match["id"]]))
 
-                # Skip if already checked in a previous run
                 already_checked = conn.execute(
                     "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?",
                     pair,
@@ -182,22 +329,18 @@ def run_auto_linker(engine) -> None:
                 if already_checked:
                     continue
 
-                # Check if edge already exists
                 existing = conn.execute(
                     "SELECT 1 FROM edges WHERE "
                     "(source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
                     (node["id"], match["id"], match["id"], node["id"]),
                 ).fetchone()
-
                 if existing:
                     continue
 
-                # LLM classification required
                 other = conn.execute(
                     "SELECT title, content, type, space FROM nodes WHERE id = ?",
                     (match["id"],),
                 ).fetchone()
-
                 if other is None:
                     continue
 
@@ -207,53 +350,11 @@ def run_auto_linker(engine) -> None:
                     continue
 
                 relationship = llm_result["relationship"]
+                reason = llm_result.get("reason", "")
+                _apply_edge(engine, node["id"], match["id"], relationship, reason, similarity)
 
-                # Record the checked pair and create edge in a single transaction
-                now = datetime.now(timezone.utc).isoformat()
-                with engine.db.transaction() as conn:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO auto_link_checked (node_a, node_b, result, checked_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (*pair, relationship, now),
-                    )
-
-                    if relationship == "none":
-                        continue
-
-                    reason = llm_result.get("reason", "")
-                    conn.execute(
-                        "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            node["id"],
-                            match["id"],
-                            relationship,
-                            round(similarity, 3),
-                            now,
-                            reason,
-                        ),
-                    )
-
-                created += 1
-
-                # Track connection for markdown persistence
-                md_conn = Connection(
-                    target=match["id"],
-                    edge=EdgeType(relationship),
-                    weight=round(similarity, 2),
-                )
-                dirty_nodes.setdefault(node["id"], []).append(md_conn)
-
-        # Persist new connections to markdown files
-        for node_id, new_connections in dirty_nodes.items():
-            try:
-                mem_node = engine.file_store.load(node_id)
-                if mem_node is None:
-                    continue
-                mem_node.connections.extend(new_connections)
-                engine.file_store.save(mem_node)
-            except Exception as e:
-                logger.debug("Failed to persist connection to markdown for %s: %s", node_id[:8], e)
+                if relationship != "none":
+                    created += 1
 
         if created:
             logger.info("Auto-linker created %d edges", created)

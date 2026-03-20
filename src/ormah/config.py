@@ -183,6 +183,10 @@ class Settings(BaseSettings):
     # Consolidation
     consolidation_interval_minutes: int = 1440
 
+    # Claude-in-the-loop maintenance
+    claude_maintenance_enabled: bool = False
+    claude_maintenance_threshold: int = 20  # unprocessed nodes before whispering signal
+
     # --- Validators ---
 
     @field_validator("port")

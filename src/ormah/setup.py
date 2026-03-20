@@ -610,6 +610,24 @@ def backfill_transcripts() -> None:
     ok(f"Backfill complete: {total_memories} memories from {len(selected)} transcripts")
 
 
+def configure_claude_maintenance() -> None:
+    """Ask whether to use Claude Code as the LLM for memory maintenance."""
+    print("\n  Use Claude for memory maintenance?")
+    print("  (Recommended for Pro/Max users — links memories, detects conflicts,")
+    print("   merges duplicates. No API key needed — Claude is the LLM.)")
+    try:
+        answer = input("\n  Enable? (Y/n) ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("n", "no"):
+        env = _read_env_file()
+        env["ORMAH_CLAUDE_MAINTENANCE_ENABLED"] = "true"
+        _write_env_file(env)
+        ok("Claude maintenance enabled — run_maintenance via MCP when signalled")
+    else:
+        info("Skipped — run 'ormah setup' again to enable later")
+
+
 def _diagnose_server_failure() -> None:
     """Print a helpful error when the server fails to start."""
     port = settings.port
@@ -1048,6 +1066,8 @@ def run_setup(ci: bool = False) -> None:
         configure_claude_hooks(ormah_bin)
         configure_claude_code_mcp(ormah_bin)
         install_claude_md()
+        if not ci:
+            configure_claude_maintenance()
 
     desktop_configured = configure_claude_desktop(ormah_bin)
 

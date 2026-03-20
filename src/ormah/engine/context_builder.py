@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
@@ -189,9 +190,28 @@ class ContextBuilder:
                 other_core, working_nodes, space or "default"
             )
 
-        if identity_text:
-            return identity_text + "\n\n" + core_text
-        return core_text
+        result = (identity_text + "\n\n" + core_text) if identity_text else core_text
+
+        # Append maintenance signal when Claude maintenance is enabled and
+        # the count of recently added unprocessed nodes exceeds the threshold.
+        if self.engine is not None:
+            settings = getattr(self.engine, "settings", None)
+            if settings and getattr(settings, "claude_maintenance_enabled", False):
+                threshold = getattr(settings, "claude_maintenance_threshold", 20)
+                try:
+                    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                    count = self.graph.conn.execute(
+                        "SELECT COUNT(*) FROM nodes n "
+                        "WHERE n.created >= ? "
+                        "AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source_id = n.id)",
+                        (cutoff,),
+                    ).fetchone()[0]
+                    if count > threshold:
+                        result = result + f"\nunprocessed_memories: {count}"
+                except Exception as e:
+                    logger.warning("Failed to compute unprocessed_memories count: %s", e)
+
+        return result
 
     def build_whisper_context(
         self,

@@ -202,6 +202,86 @@ TOOLS = [
             "properties": {},
         },
     },
+    {
+        "name": "run_maintenance",
+        "description": (
+            "Maintain the memory graph by linking, conflict-checking, deduplicating, and "
+            "consolidating memories. Uses a two-call protocol:\n\n"
+            "**Phase 1** — call with no arguments to get pending work. Returns four batches:\n"
+            "  - link_candidates: pairs of memories to classify (supports/part_of/etc./none)\n"
+            "  - conflict_candidates: belief pairs to check for contradictions or evolutions\n"
+            "  - merge_candidates: near-duplicate pairs to merge\n"
+            "  - consolidation_clusters: groups of similar memories to synthesize into one\n\n"
+            "**Phase 2** — analyze all four batches in-context, then call again with 'results':\n"
+            "  - edges: list of {node_a_id, node_b_id, edge_type, reason} — use 'none' to skip\n"
+            "  - merges: list of {keep_id, discard_id, merged_content, merged_title}\n"
+            "  - consolidations: list of {node_ids, title, content, type}\n\n"
+            "Use after ingest_conversation or heavy remember sessions when the whisper context "
+            "signals unprocessed_memories. Pro/Max users: no API key needed — you are the LLM."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "results": {
+                    "type": "object",
+                    "description": (
+                        "Phase 2 only: your analysis of the batches returned in Phase 1. "
+                        "Omit this parameter in Phase 1 to get the pending work."
+                    ),
+                    "properties": {
+                        "edges": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "node_a_id": {"type": "string"},
+                                    "node_b_id": {"type": "string"},
+                                    "edge_type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "supports", "contradicts", "evolved_from",
+                                            "part_of", "depends_on", "related_to", "none",
+                                        ],
+                                    },
+                                    "reason": {"type": "string"},
+                                },
+                                "required": ["node_a_id", "node_b_id", "edge_type"],
+                            },
+                        },
+                        "merges": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "keep_id": {"type": "string"},
+                                    "discard_id": {"type": "string"},
+                                    "merged_content": {"type": "string"},
+                                    "merged_title": {"type": "string"},
+                                },
+                                "required": ["keep_id", "discard_id"],
+                            },
+                        },
+                        "consolidations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "node_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "title": {"type": "string"},
+                                    "content": {"type": "string"},
+                                    "type": {"type": "string"},
+                                },
+                                "required": ["node_ids", "title", "content"],
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
 ]
 
 # Admin tools — available via CLI and HTTP API but not exposed to AI agents via MCP.

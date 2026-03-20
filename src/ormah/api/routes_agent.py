@@ -316,6 +316,25 @@ async def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, reque
     }
 
 
+@router.post("/maintenance")
+async def run_maintenance(request: Request):
+    """Claude-in-the-loop maintenance: get pending work or apply Claude's decisions.
+
+    Phase 1 — call with no body (or ``{}``):
+        Returns four batches of candidates (link, conflict, merge, consolidation).
+
+    Phase 2 — call with ``{"results": {...}}``:
+        Claude submits its analysis; ormah applies edges/merges/consolidations.
+    """
+    body = await request.json()
+    engine = request.app.state.engine
+    if "results" in body:
+        counts = engine.apply_maintenance_results(body["results"])
+        return {"status": "applied", "summary": counts}
+    batches = engine.get_maintenance_batches()
+    return batches
+
+
 @router.get("/merges")
 async def list_merges(
     request: Request,

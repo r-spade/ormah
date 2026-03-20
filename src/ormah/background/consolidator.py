@@ -18,40 +18,42 @@ _MIN_CLUSTER_SIZE = 2
 _CLUSTER_THRESHOLD = 0.6
 
 
-def run_consolidation(engine) -> None:
-    """Find clusters of similar working memories and consolidate via LLM."""
-    settings = engine.settings
-    if not settings.llm_enabled:
-        return
+def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
+    """Find clusters of similar working-tier nodes for consolidation.
 
+    Returns up to *limit* clusters, each a list of node dicts (max 5 nodes).
+    Does NOT call the LLM — pure similarity-based clustering.
+    """
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
     except ImportError:
-        return
+        return []
 
     conn = engine.db.conn
 
-    # Get all working-tier nodes
     rows = conn.execute(
         "SELECT id, title, content, space FROM nodes WHERE tier = 'working'"
     ).fetchall()
     if len(rows) < _MIN_CLUSTER_SIZE:
-        return
+        return []
 
-    encoder = get_encoder(settings)
-    vec_store = VectorStore(engine.db)
+    try:
+        vec_store = VectorStore(engine.db)
+    except Exception:
+        return []
 
-    # Greedy clustering
     clustered_ids: set[str] = set()
     clusters: list[list[dict]] = []
 
     for row in rows:
+        if len(clusters) >= limit:
+            break
+
         nid = row["id"]
         if nid in clustered_ids:
             continue
 
-        # Get embedding and find similar nodes
         node_vec = vec_store.get(nid)
         if node_vec is None:
             continue
@@ -61,12 +63,13 @@ def run_consolidation(engine) -> None:
         clustered_ids.add(nid)
 
         for match in similar:
+            if len(cluster) >= 5:  # cap at 5 nodes per cluster
+                break
             mid = match["id"]
             if mid == nid or mid in clustered_ids:
                 continue
             if match["similarity"] < _CLUSTER_THRESHOLD:
                 continue
-            # Must also be working tier
             m_row = conn.execute(
                 "SELECT id, title, content, space, tier FROM nodes WHERE id = ?",
                 (mid,),
@@ -79,11 +82,110 @@ def run_consolidation(engine) -> None:
         if len(cluster) >= _MIN_CLUSTER_SIZE:
             clusters.append(cluster)
 
+    return clusters
+
+
+def _apply_consolidation(
+    engine,
+    node_ids: list[str],
+    title: str,
+    content: str,
+    node_type: str,
+) -> str:
+    """Create a consolidated node, link originals, and demote them to archival.
+
+    Returns the new node's ID.
+    """
+    from ormah.models.node import (
+        ConnectRequest,
+        CreateNodeRequest,
+        EdgeType,
+        Tier,
+        UpdateNodeRequest,
+    )
+
+    conn = engine.db.conn
+    placeholders = ",".join("?" * len(node_ids))
+
+    # Fetch cluster nodes for space determination and identity transfer
+    cluster_rows = conn.execute(
+        f"SELECT id, space FROM nodes WHERE id IN ({placeholders})",
+        node_ids,
+    ).fetchall()
+    cluster = [dict(r) for r in cluster_rows]
+
+    # Determine space by majority vote
+    space_counts: dict[str | None, int] = {}
+    for node in cluster:
+        sp = node.get("space")
+        space_counts[sp] = space_counts.get(sp, 0) + 1
+    space = max(space_counts, key=space_counts.get)  # type: ignore[arg-type]
+
+    # Create consolidated node
+    req = CreateNodeRequest(
+        content=content,
+        type=node_type,
+        title=title,
+        space=space,
+        tags=["consolidated"],
+    )
+    new_id, _ = engine.remember(req, agent_id="consolidator")
+
+    # Transfer identity edges
+    if engine.user_node_id:
+        has_identity = conn.execute(
+            f"SELECT 1 FROM edges WHERE source_id = ? AND edge_type = 'defines' "
+            f"AND target_id IN ({placeholders}) LIMIT 1",
+            [engine.user_node_id] + node_ids,
+        ).fetchone()
+        if has_identity:
+            try:
+                engine.connect(ConnectRequest(
+                    source_id=engine.user_node_id,
+                    target_id=new_id,
+                    edge=EdgeType.defines,
+                    weight=1.0,
+                ))
+            except Exception:
+                pass
+            new_node = engine.file_store.load(new_id)
+            if new_node and "about_self" not in new_node.tags:
+                new_node.tags.append("about_self")
+                engine.file_store.save(new_node)
+                with engine.db.transaction() as tx_conn:
+                    tx_conn.execute(
+                        "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, 'about_self')",
+                        (new_id,),
+                    )
+
+    # Create derived_from edges and demote originals to archival
+    for node_id in node_ids:
+        try:
+            engine.connect(ConnectRequest(
+                source_id=new_id,
+                target_id=node_id,
+                edge=EdgeType.derived_from,
+                weight=1.0,
+            ))
+        except Exception:
+            pass
+        engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+
+    return new_id
+
+
+def run_consolidation(engine) -> None:
+    """Find clusters of similar working memories and consolidate via LLM."""
+    settings = engine.settings
+    if not settings.llm_enabled:
+        return
+
+    clusters = _find_consolidation_clusters(engine, limit=_MAX_CLUSTERS_PER_RUN)
     if not clusters:
         return
 
     consolidated_count = 0
-    for cluster in clusters[:_MAX_CLUSTERS_PER_RUN]:
+    for cluster in clusters:
         try:
             _consolidate_cluster(engine, cluster)
             consolidated_count += 1
@@ -97,12 +199,6 @@ def run_consolidation(engine) -> None:
 def _consolidate_cluster(engine, cluster: list[dict]) -> None:
     """Consolidate a single cluster using LLM summarization."""
     from ormah.background.llm_client import llm_generate
-    from ormah.models.node import (
-        CreateNodeRequest,
-        EdgeType,
-        ConnectRequest,
-        Tier,
-    )
 
     # Build prompt
     items = []
@@ -155,68 +251,5 @@ Return a JSON object:
     if not summary:
         return
 
-    # Determine space by majority vote
-    space_counts: dict[str | None, int] = {}
-    for node in cluster:
-        sp = node.get("space")
-        space_counts[sp] = space_counts.get(sp, 0) + 1
-    space = max(space_counts, key=space_counts.get)  # type: ignore[arg-type]
-
-    # Create consolidated node
-    req = CreateNodeRequest(
-        content=summary,
-        type=node_type,
-        title=title,
-        space=space,
-        tags=["consolidated"],
-    )
-    new_id, _ = engine.remember(req, agent_id="consolidator")
-
-    # Transfer identity edges: if any original was an identity node (linked via
-    # 'defines' from user node), link the new consolidated node to the user node
-    # and carry over the about_self tag.
-    if engine.user_node_id:
-        conn = engine.db.conn
-        original_ids = [n["id"] for n in cluster]
-        placeholders = ",".join("?" * len(original_ids))
-        has_identity = conn.execute(
-            f"SELECT 1 FROM edges WHERE source_id = ? AND edge_type = 'defines' "
-            f"AND target_id IN ({placeholders}) LIMIT 1",
-            [engine.user_node_id] + original_ids,
-        ).fetchone()
-        if has_identity:
-            try:
-                engine.connect(ConnectRequest(
-                    source_id=engine.user_node_id,
-                    target_id=new_id,
-                    edge=EdgeType.defines,
-                    weight=1.0,
-                ))
-            except Exception:
-                pass
-            # Ensure about_self tag on the new node
-            new_node = engine.file_store.load(new_id)
-            if new_node and "about_self" not in new_node.tags:
-                new_node.tags.append("about_self")
-                engine.file_store.save(new_node)
-                with engine.db.transaction() as tx_conn:
-                    tx_conn.execute(
-                        "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, 'about_self')",
-                        (new_id,),
-                    )
-
-    # Create derived_from edges to originals and demote originals to archival
-    for node in cluster:
-        try:
-            engine.connect(ConnectRequest(
-                source_id=new_id,
-                target_id=node["id"],
-                edge=EdgeType.derived_from,
-                weight=1.0,
-            ))
-        except Exception:
-            pass
-
-        # Demote original to archival
-        from ormah.models.node import UpdateNodeRequest
-        engine.update_node(node["id"], UpdateNodeRequest(tier=Tier.archival))
+    node_ids = [n["id"] for n in cluster]
+    _apply_consolidation(engine, node_ids, title, summary, node_type)

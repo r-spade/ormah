@@ -1156,6 +1156,119 @@ class MemoryEngine:
         rows = self.db.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
+    def get_maintenance_batches(self, limit_per_batch: int = 8) -> dict:
+        """Return pending maintenance work for Claude-in-the-loop processing.
+
+        Phase 1 of the ``run_maintenance`` two-call protocol.  Returns four
+        batches of candidates (link, conflict, merge, consolidation clusters)
+        plus a summary string.  Batch sizes are capped: up to *limit_per_batch*
+        pairs for link/conflict/merge (default 8), up to 4 clusters of max 5
+        nodes each for consolidation.
+        """
+        from ormah.background.auto_linker import _find_link_candidates
+        from ormah.background.conflict_detector import _find_conflict_candidates
+        from ormah.background.consolidator import _find_consolidation_clusters
+        from ormah.background.duplicate_merger import _find_merge_candidates
+
+        link_candidates = _find_link_candidates(self, limit_per_batch)
+        conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
+        merge_candidates = _find_merge_candidates(self, limit_per_batch)
+        consolidation_clusters = _find_consolidation_clusters(self, limit=4)
+
+        def _norm(node: dict) -> dict:
+            return {
+                "id": node.get("id", ""),
+                "title": node.get("title", ""),
+                "type": node.get("type", ""),
+                "space": node.get("space", ""),
+                "content": (node.get("content") or "")[:400],
+            }
+
+        def _norm_pair(c: dict) -> dict:
+            return {
+                "node_a": _norm(c["node_a"]),
+                "node_b": _norm(c["node_b"]),
+                "similarity": c.get("similarity", 0.0),
+            }
+
+        parts = []
+        if link_candidates:
+            parts.append(f"{len(link_candidates)} link candidates")
+        if conflict_candidates:
+            parts.append(f"{len(conflict_candidates)} conflict candidates")
+        if merge_candidates:
+            parts.append(f"{len(merge_candidates)} merge candidates")
+        if consolidation_clusters:
+            parts.append(f"{len(consolidation_clusters)} cluster(s)")
+        summary = ", ".join(parts) if parts else "nothing to process"
+
+        return {
+            "link_candidates": [_norm_pair(c) for c in link_candidates],
+            "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
+            "merge_candidates": [_norm_pair(c) for c in merge_candidates],
+            "consolidation_clusters": [
+                [_norm(n) for n in cluster]
+                for cluster in consolidation_clusters
+            ],
+            "summary": summary,
+        }
+
+    def apply_maintenance_results(self, results: dict) -> dict:
+        """Apply Claude's maintenance decisions.
+
+        Phase 2 of the ``run_maintenance`` two-call protocol.  Accepts
+        ``results`` as returned by Claude (edges, merges, consolidations) and
+        applies each decision, returning counts.
+        """
+        from ormah.background.auto_linker import _apply_edge
+        from ormah.background.consolidator import _apply_consolidation
+
+        counts: dict[str, int] = {"edges": 0, "merges": 0, "consolidations": 0, "skipped": 0}
+
+        for e in results.get("edges", []):
+            try:
+                _apply_edge(
+                    self,
+                    e["node_a_id"],
+                    e["node_b_id"],
+                    e["edge_type"],
+                    e.get("reason", ""),
+                    similarity=0.0,
+                )
+                if e["edge_type"] != "none":
+                    counts["edges"] += 1
+                else:
+                    counts["skipped"] += 1
+            except Exception as exc:
+                logger.warning("apply_maintenance_results: edge failed: %s", exc)
+
+        for m in results.get("merges", []):
+            try:
+                self.execute_merge(
+                    m["keep_id"],
+                    m["discard_id"],
+                    merged_content=m.get("merged_content"),
+                    merged_title=m.get("merged_title"),
+                )
+                counts["merges"] += 1
+            except Exception as exc:
+                logger.warning("apply_maintenance_results: merge failed: %s", exc)
+
+        for c in results.get("consolidations", []):
+            try:
+                _apply_consolidation(
+                    self,
+                    c["node_ids"],
+                    c["title"],
+                    c["content"],
+                    c.get("type", "fact"),
+                )
+                counts["consolidations"] += 1
+            except Exception as exc:
+                logger.warning("apply_maintenance_results: consolidation failed: %s", exc)
+
+        return counts
+
     @staticmethod
     def _pick_keeper(a: MemoryNode, b: MemoryNode) -> tuple[MemoryNode, MemoryNode]:
         """Pick which node to keep: higher tier > longer content > more recent."""
