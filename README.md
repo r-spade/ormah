@@ -134,6 +134,31 @@ Ormah runs 8 background jobs that keep the knowledge graph healthy without human
 
 **Index updater**: Runs every minute. Incrementally updates the full-text and vector indexes for any nodes created or modified since the last run. Keeps search results fresh without a full rebuild.
 
+### Claude-in-the-loop maintenance
+
+Background jobs use an LLM to make linking, conflict, merge, and consolidation decisions. If you don't have a separate API key, you can use Claude Code itself as the intelligence layer via `run_maintenance`.
+
+Enable it during `ormah setup` (or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`). When enabled, `get_context` appends a whisper signal — `unprocessed_memories: N` — when recently-added unlinked nodes exceed a threshold. This prompts Claude to run maintenance.
+
+`run_maintenance` uses a two-call protocol:
+
+**Phase 1** — call with no arguments to get pending work:
+- `link_candidates`: node pairs to classify with a relationship type
+- `conflict_candidates`: belief pairs to check for contradictions or evolutions
+- `merge_candidates`: near-duplicate pairs to collapse
+- `consolidation_clusters`: groups of related nodes to synthesize into one
+
+**Phase 2** — analyze the batches in-context, then call again with your decisions:
+```
+run_maintenance(results={
+  edges: [{node_a_id, node_b_id, edge_type, reason}],   // use "none" to skip
+  merges: [{keep_id, discard_id, merged_title, merged_content}],
+  consolidations: [{node_ids, title, content, type}]
+})
+```
+
+Claude Code Pro/Max users get this for free — no API key needed, Claude is the LLM.
+
 ## The graph UI
 
 Open `http://localhost:8787` to see your knowledge graph rendered as a live force-directed visualization.
@@ -156,7 +181,7 @@ Ormah is designed to work with any LLM agent through multiple integration points
 
 ### MCP (Model Context Protocol)
 
-Any MCP-compatible client gets 7 focused tools:
+Any MCP-compatible client gets 8 focused tools:
 
 | Tool | What it does |
 |------|-------------|
@@ -167,6 +192,7 @@ Any MCP-compatible client gets 7 focused tools:
 | `mark_outdated` | Demote a memory as no longer valid. Optionally provide a reason. Heavily deprioritized in future searches. |
 | `ingest_conversation` | Bulk-import memories from raw conversation text. LLM extracts memorable information and deduplicates. |
 | `get_insights` | View belief evolutions (where your thinking changed) and contradictions (active tensions). |
+| `run_maintenance` | Claude-in-the-loop graph maintenance. See below. |
 
 ### HTTP API
 
