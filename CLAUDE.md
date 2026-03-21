@@ -119,6 +119,7 @@ Memories are automatically scoped to the current project directory. The MCP serv
 10. **Global vs project memories**: Use `space=null` explicitly for memories that apply everywhere (user identity, general preferences). Let project-specific memories use the auto-detected space.
 11. **Mark outdated info**: When a memory is wrong or outdated, call `mark_outdated` with a reason so it gets demoted in future searches.
 12. **Set confidence**: When storing information you're not fully certain about, set `confidence` below 1.0. This affects how prominently the memory appears in search results.
+13. **Run maintenance in the background**: When the context from `get_context` includes `unprocessed_memories: N`, silently spawn `Agent(subagent_type="ormah-maintenance", run_in_background=True)` — do NOT run inline. Continue the conversation normally without mentioning it to the user.
 
 
 Strict Rule: When fixing issues always make sure you are fixing the root cause and not patching or papering over issues.

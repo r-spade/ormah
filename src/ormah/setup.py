@@ -211,6 +211,40 @@ def install_claude_md() -> None:
     ok("Instructions added to ~/.claude/CLAUDE.md")
 
 
+def install_claude_agents() -> None:
+    """Install ormah custom agent definitions into ~/.claude/agents/."""
+    target = Path.home() / ".claude" / "agents"
+    target.mkdir(parents=True, exist_ok=True)
+    content = resources.files("ormah").joinpath("agents/ormah-maintenance.md").read_text()
+    (target / "ormah-maintenance.md").write_text(content)
+    ok("Agent definition installed — ormah-maintenance subagent available")
+
+
+def install_claude_commands() -> None:
+    """Install ormah slash command definitions into ~/.claude/commands/."""
+    target = Path.home() / ".claude" / "commands"
+    target.mkdir(parents=True, exist_ok=True)
+    content = resources.files("ormah").joinpath("commands/ormah-maintenance.md").read_text()
+    (target / "ormah-maintenance.md").write_text(content)
+    ok("Slash command installed — /ormah-maintenance available")
+
+
+def _remove_claude_agents() -> None:
+    """Remove ormah agent definitions from ~/.claude/agents/."""
+    agent_file = Path.home() / ".claude" / "agents" / "ormah-maintenance.md"
+    if agent_file.exists():
+        agent_file.unlink()
+        ok("Removed ormah-maintenance agent definition")
+
+
+def _remove_claude_commands() -> None:
+    """Remove ormah slash command definitions from ~/.claude/commands/."""
+    command_file = Path.home() / ".claude" / "commands" / "ormah-maintenance.md"
+    if command_file.exists():
+        command_file.unlink()
+        ok("Removed ormah-maintenance slash command")
+
+
 def _read_env_file() -> dict[str, str]:
     """Read existing .env file into a dict."""
     env = {}
@@ -955,6 +989,8 @@ def run_uninstall(yes: bool = False) -> None:
     # d. Remove CLAUDE.md block
     step("Removing CLAUDE.md instructions")
     _remove_claude_md_block()
+    _remove_claude_agents()
+    _remove_claude_commands()
 
     # e. Delete data directories
     step("Deleting data directories")
@@ -1066,6 +1102,8 @@ def run_setup(ci: bool = False) -> None:
         configure_claude_hooks(ormah_bin)
         configure_claude_code_mcp(ormah_bin)
         install_claude_md()
+        install_claude_agents()
+        install_claude_commands()
         if not ci:
             configure_claude_maintenance()
 
