@@ -54,6 +54,7 @@ memory/deleted/
 # Eval scripts and snapshots (local dev only)
 scripts/eval_*.py
 scripts/eval_snapshots/
+scripts/release.sh
 
 # Generated docs and plans (local dev artifacts)
 ARCHITECTURE.md

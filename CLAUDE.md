@@ -16,6 +16,8 @@ make lint        # Run ruff linter (src/, tests/)
 
 Run a single test: `uv run pytest tests/path/to/test.py::test_name -v`
 
+**Releasing:** Use `./scripts/release.sh [patch|minor|major|<version>]` to bump the version, commit, tag, build, and publish to PyPI. The script is gitignored (local only). After it runs, push with `git push && git push --tags`.
+
 The CLI is also the primary interface:
 ```bash
 ormah server start [-d]    # Start server (foreground or daemon)
@@ -57,7 +59,7 @@ Store layer (markdown files in memory/nodes/*.md as backup)
 - **Embeddings**: Default provider is `local` with `BAAI/bge-base-en-v1.5` (768-dim, no task prefixes needed). Also supports ollama and litellm.
 - **Background jobs** (APScheduler): auto-linker, conflict detector, duplicate merger, importance scorer, decay manager, consolidator, hippocampus (file watcher), session watcher.
 - **Tier decay**: working-tier memories decay after ~14 days using FSRS spaced repetition; `core` is capped at 50.
-- **MCP tools exposed**: `remember`, `recall`, `get_context`, `get_self`, `mark_outdated`, `ingest_conversation`, `get_insights`.
+- **MCP tools exposed**: `remember`, `recall`, `get_context`, `get_self`, `mark_outdated`, `run_maintenance`.
 
 ### Frontend
 
@@ -83,8 +85,6 @@ You have access to a persistent memory system (via MCP tools) that maintains kno
 - **get_context**: Load core memories (call at conversation start). Pass `task_hint` to filter context to only the most relevant memories for the current task instead of loading everything.
 - **get_self**: Get the user's identity profile — name, preferences, and personal facts. Returns all identity-linked memories.
 - **mark_outdated**: Mark a memory as no longer valid. Optionally provide a `reason`. Outdated memories are heavily demoted in search results.
-- **ingest_conversation**: Bulk-import memories from raw conversation text. The server extracts memorable information via its LLM. Use this for importing logs or transcripts. For individual memories you've already identified, use `remember` directly.
-- **get_insights**: Show belief evolutions and conflicting ideas detected by the system. Evolutions are cases where the user's view changed over time; conflicting ideas are genuinely incompatible beliefs held simultaneously.
 
 ### Project Awareness
 

@@ -194,8 +194,6 @@ Any MCP-compatible client gets 8 focused tools:
 | `get_context` | Load core memories + project context. Pass `task_hint` to get only memories relevant to the current task. |
 | `get_self` | Get the user's identity profile: all memories linked via `defines` edges from the user node. |
 | `mark_outdated` | Demote a memory as no longer valid. Optionally provide a reason. Heavily deprioritized in future searches. |
-| `ingest_conversation` | Bulk-import memories from raw conversation text. LLM extracts memorable information and deduplicates. |
-| `get_insights` | View belief evolutions (where your thinking changed) and contradictions (active tensions). |
 | `run_maintenance` | Claude-in-the-loop graph maintenance. See below. |
 
 ### HTTP API

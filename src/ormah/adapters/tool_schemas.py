@@ -1,6 +1,6 @@
 """Canonical tool definitions shared across MCP and OpenAI adapters.
 
-TOOLS: The core set of tools exposed via MCP to AI agents (7 tools).
+TOOLS: The core set of tools exposed via MCP to AI agents (6 tools).
 ADMIN_TOOLS: Tools for human administration via CLI/API only (9 tools).
 ALL_TOOLS: Combined list for adapters that want the full set.
 """
@@ -179,39 +179,6 @@ TOOLS = [
         },
     },
     {
-        "name": "ingest_conversation",
-        "description": (
-            "Bulk-import memories from raw conversation text. "
-            "The server uses its LLM to extract decisions, preferences, facts, "
-            "and other memorable information, deduplicates against existing memories, "
-            "and stores new ones. Use this for importing conversation logs or transcripts. "
-            "For individual memories you've already identified, use 'remember' instead."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Raw conversation text to extract memories from.",
-                },
-            },
-            "required": ["content"],
-        },
-    },
-    {
-        "name": "get_insights",
-        "description": (
-            "Show belief evolutions and conflicting ideas detected by the system. "
-            "Evolutions are cases where the user's view changed over time (newer supersedes older). "
-            "Conflicting ideas are genuinely incompatible beliefs held simultaneously. "
-            "Each insight includes an explanation of why the system flagged it."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-        },
-    },
-    {
         "name": "run_maintenance",
         "description": (
             "Maintain the memory graph by linking, conflict-checking, deduplicating, and "
@@ -225,7 +192,7 @@ TOOLS = [
             "  - edges: list of {node_a_id, node_b_id, edge_type, reason} — use 'none' to skip\n"
             "  - merges: list of {keep_id, discard_id, merged_content, merged_title}\n"
             "  - consolidations: list of {node_ids, title, content, type}\n\n"
-            "Use after ingest_conversation or heavy remember sessions when the whisper context "
+            "Use after heavy remember sessions when the whisper context "
             "signals unprocessed_memories. Pro/Max users: no API key needed — you are the LLM."
         ),
         "parameters": {

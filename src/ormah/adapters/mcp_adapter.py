@@ -163,42 +163,6 @@ async def _dispatch(
                 return _handle_error(resp)
             return resp.json()["text"]
 
-        elif name == "get_insights":
-            resp = await client.get("/agent/insights")
-            if not resp.is_success:
-                return _handle_error(resp)
-            data = resp.json()
-            evolutions = data.get("evolutions", [])
-            tensions = data.get("tensions", [])
-            if not evolutions and not tensions:
-                return "No insights yet. The system detects belief evolutions and conflicting ideas during background analysis."
-            lines = []
-            if evolutions:
-                lines.append("## Belief Evolutions\n")
-                for evo in evolutions:
-                    newer_title = evo.get("newer_title") or "Untitled"
-                    older_title = evo.get("older_title") or "Untitled"
-                    explanation = evo.get("reason") or ""
-                    lines.append(
-                        f"  {older_title}\n"
-                        f"    ↓ evolved into\n"
-                        f"  {newer_title}"
-                    )
-                    if explanation:
-                        lines.append(f"    Why: {explanation}")
-                    lines.append("")
-            if tensions:
-                lines.append("## Conflicting Ideas\n")
-                for t in tensions:
-                    title_a = t.get("title_a") or "Untitled"
-                    title_b = t.get("title_b") or "Untitled"
-                    explanation = t.get("reason") or ""
-                    lines.append(f"  {title_a}  ↔  {title_b}")
-                    if explanation:
-                        lines.append(f"    Why: {explanation}")
-                    lines.append("")
-            return "\n".join(lines)
-
         elif name == "list_proposals":
             resp = await client.get("/agent/proposals")
             if not resp.is_success:
@@ -287,25 +251,6 @@ async def _dispatch(
             if not resp.is_success:
                 return _handle_error(resp)
             return resp.json()["text"]
-
-        elif name == "ingest_conversation":
-            body = {"content": args["content"]}
-            params = {}
-            if default_space:
-                params["default_space"] = default_space
-            resp = await client.post("/ingest/conversation", json=body, params=params)
-            if not resp.is_success:
-                return _handle_error(resp)
-            data = resp.json()
-            if data.get("status") == "error":
-                return data["result"]
-            count = data.get("extracted", 0)
-            if count == 0:
-                return "No new memories extracted from the conversation."
-            lines = [f"Extracted {count} memories:"]
-            for mem in data.get("memories", []):
-                lines.append(f"  - {mem['title']} (ID: {mem['node_id'][:8]}...)")
-            return "\n".join(lines)
 
         elif name == "run_maintenance":
             body = {}

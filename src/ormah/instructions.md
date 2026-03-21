@@ -9,8 +9,6 @@ You have access to a persistent memory system (via MCP tools) that maintains kno
 - **get_context**: Load core memories (call at conversation start). Pass `task_hint` to filter context to only the most relevant memories for the current task instead of loading everything.
 - **get_self**: Get the user's identity profile — name, preferences, and personal facts. Returns all identity-linked memories.
 - **mark_outdated**: Mark a memory as no longer valid. Optionally provide a `reason`. Outdated memories are heavily demoted in search results.
-- **ingest_conversation**: Bulk-import memories from raw conversation text. The server extracts memorable information via its LLM. Use this for importing logs or transcripts. For individual memories you've already identified, use `remember` directly.
-- **get_insights**: Show belief evolutions and conflicting ideas detected by the system. Evolutions are cases where the user's view changed over time; conflicting ideas are genuinely incompatible beliefs held simultaneously.
 - **run_maintenance**: Maintain the memory graph. Call with no arguments first — ormah returns batches of link candidates, conflict candidates, merge candidates, and consolidation clusters. Analyze them in-context, then call again with `results` to commit your decisions. This links memories, detects conflicts, merges duplicates, and consolidates clusters. Pro/Max users: no API key needed — you are the LLM.
 
 ## Project Awareness
