@@ -148,7 +148,7 @@ def format_context(
 ) -> str:
     """Format core memories for system prompt injection."""
     if not core_nodes:
-        return "No core memories stored yet."
+        return ""
 
     lines = [f"{header_prefix} Core Memories\n"]
     for node in core_nodes:
@@ -173,7 +173,7 @@ def format_context_with_project(
 ) -> str:
     """Format core memories + project working memories for system prompt injection."""
     if not core_nodes and not project_nodes:
-        return "No core memories stored yet."
+        return ""
 
     lines = []
 

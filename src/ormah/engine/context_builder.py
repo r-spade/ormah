@@ -24,6 +24,25 @@ _WHISPER_FRAMING = (
     "If a memory is truncated and you need the full content, you can use the recall tool with its node ID."
 )
 
+_ONBOARDING_NUDGE = (
+    "\n\n## Ormah: Action required — initiate first-session onboarding\n"
+    "This is the user's first Claude Code session with ormah. The identity profile is empty. "
+    "Your very first response MUST start the onboarding — do not just reply to the user's message. "
+    "Briefly introduce what you're doing (e.g. 'Before we dive in, I'd love to get to know you a bit'), "
+    "then ask your first question. Cover these areas naturally, one question at a time:\n"
+    "- Start personal: ask something like 'If you had to describe who you are, what would you say? "
+    "What are you passionate about or what do you love doing?' — warm and open, not work-first\n"
+    "- Family and close friends — ask gently, don't press for details\n"
+    "- Professional background: ask for a LinkedIn URL, GitHub profile, personal site, or CV file "
+    "you could read — say something like 'Do you have a LinkedIn, GitHub, or CV I can look at? "
+    "It's easier than describing everything from scratch.' Don't just ask them to describe their role\n"
+    "- How they like to collaborate and communicate\n\n"
+    "Once you have a decent picture (around 5–10 facts stored), wrap up warmly: "
+    "\"I have enough context to get started — I'll keep learning as we work together.\" "
+    "Store everything you learn using the `remember` tool with `about_self=true`. "
+    "This message will not appear again."
+)
+
 
 def _first_sentence_truncate(content: str, max_len: int) -> str:
     """Return the first sentence of content, capped to max_len."""
@@ -190,7 +209,29 @@ class ContextBuilder:
                 other_core, working_nodes, space or "default"
             )
 
-        result = (identity_text + "\n\n" + core_text) if identity_text else core_text
+        if identity_text and core_text:
+            result = identity_text + "\n\n" + core_text
+        elif identity_text:
+            result = identity_text
+        elif core_text:
+            result = core_text
+        else:
+            result = "No core memories stored yet."
+
+        # One-time onboarding nudge: fires exactly once after fresh install
+        if self.engine is not None:
+            try:
+                row = self.graph.conn.execute(
+                    "SELECT value FROM meta WHERE key = 'onboarding_prompted'"
+                ).fetchone()
+                if row is None:
+                    result = (result + _ONBOARDING_NUDGE) if result else _ONBOARDING_NUDGE
+                    with self.engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
+                        )
+            except Exception as e:
+                logger.warning("Onboarding nudge check failed: %s", e)
 
         # Append maintenance signal when Claude maintenance is enabled and
         # the count of recently added unprocessed nodes exceeds the threshold.
