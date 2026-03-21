@@ -81,6 +81,8 @@ async def _dispatch(
                 body["about_self"] = True
             if "confidence" in args:
                 body["confidence"] = args["confidence"]
+            if args.get("links"):
+                body["connections"] = [{"target": node_id} for node_id in args["links"]]
             params = {}
             if default_space:
                 params["default_space"] = default_space

@@ -68,6 +68,15 @@ TOOLS = [
                     "description": "Belief strength 0.0-1.0. Lower values mean less certain.",
                     "default": 1.0,
                 },
+                "links": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Node IDs of related memories to link at creation time. "
+                        "Use when you have IDs from a recent recall and know these memories belong together. "
+                        "Creates 'related_to' edges. Background jobs will classify the relationship type further."
+                    ),
+                },
             },
             "required": ["content"],
         },
