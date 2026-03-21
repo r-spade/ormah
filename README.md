@@ -136,9 +136,13 @@ Ormah runs 8 background jobs that keep the knowledge graph healthy without human
 
 ### Claude-in-the-loop maintenance
 
-Background jobs use an LLM to make linking, conflict, merge, and consolidation decisions. If you don't have a separate API key, you can use Claude Code itself as the intelligence layer via `run_maintenance`.
+Background jobs use an LLM to make linking, conflict, merge, and consolidation decisions. If you don't have a separate API key, you can use Claude Code itself as the intelligence layer.
 
-Enable it during `ormah setup` (or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`). When enabled, `get_context` appends a whisper signal — `unprocessed_memories: N` — when recently-added unlinked nodes exceed a threshold. This prompts Claude to run maintenance.
+Enable it during `ormah setup` (or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`). When enabled, `get_context` appends a whisper signal — `unprocessed_memories: N` — when recently-added unlinked nodes exceed a threshold.
+
+When Claude detects this signal, it silently spawns a dedicated **ormah-maintenance background agent** — a custom Claude Code subagent installed by `ormah setup` into `~/.claude/agents/`. The agent runs the two-call `run_maintenance` protocol autonomously in the background without interrupting your conversation.
+
+You can also trigger it manually with the `/ormah-maintenance` slash command (also installed by `ormah setup` into `~/.claude/commands/`).
 
 `run_maintenance` uses a two-call protocol:
 
@@ -185,7 +189,7 @@ Any MCP-compatible client gets 8 focused tools:
 
 | Tool | What it does |
 |------|-------------|
-| `remember` | Store a memory with type, tier, confidence, tags, and space. Set `about_self: true` for identity memories. |
+| `remember` | Store a memory with type, tier, confidence, tags, and space. Set `about_self: true` for identity memories. Pass `links` to explicitly connect the new memory to existing nodes at store time. |
 | `recall` | Search by natural language. Hybrid search with spreading activation. Filterable by type, space, tags, and date range. |
 | `get_context` | Load core memories + project context. Pass `task_hint` to get only memories relevant to the current task. |
 | `get_self` | Get the user's identity profile: all memories linked via `defines` edges from the user node. |
