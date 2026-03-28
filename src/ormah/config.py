@@ -187,6 +187,9 @@ class Settings(BaseSettings):
     # Ingestion
     ingest_max_content_chars: int = 100000
 
+    # Archival soft-delete (0 = disabled)
+    archival_softdelete_days: int = 0
+
     # Consolidation
     consolidation_interval_minutes: int = 1440
 

@@ -37,7 +37,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
-    from ormah.background.decay_manager import run_decay
+    from ormah.background.decay_manager import run_archival_softdelete, run_decay
 
     scheduler.add_job(
         tracked(tracker, "decay_manager", run_decay, engine),
@@ -47,6 +47,16 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         name="Decay manager",
         misfire_grace_time=_MISFIRE_GRACE,
     )
+
+    if s.archival_softdelete_days > 0:
+        scheduler.add_job(
+            tracked(tracker, "archival_softdelete", run_archival_softdelete, engine),
+            "interval",
+            hours=24,
+            id="archival_softdelete",
+            name="Archival soft-delete",
+            misfire_grace_time=_MISFIRE_GRACE,
+        )
 
     from ormah.background.conflict_detector import run_conflict_detection
 

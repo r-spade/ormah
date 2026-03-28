@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ormah.models.node import Tier, UpdateNodeRequest
 
@@ -66,3 +66,43 @@ def run_decay(engine) -> None:
 
     except Exception as e:
         logger.warning("Decay manager failed: %s", e)
+
+
+def run_archival_softdelete(engine) -> None:
+    """Soft-delete archival nodes not accessed within archival_softdelete_days."""
+    try:
+        settings = engine.settings
+        if settings.archival_softdelete_days <= 0:
+            return
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=settings.archival_softdelete_days)
+
+        rows = engine.db.conn.execute(
+            "SELECT id, last_accessed, created FROM nodes WHERE tier = 'archival'"
+        ).fetchall()
+
+        if not rows:
+            return
+
+        user_node_id = getattr(engine, "user_node_id", None)
+        deleted = 0
+        for row in rows:
+            if row["id"] == user_node_id:
+                continue
+            anchor_str = row["last_accessed"] or row["created"]
+            try:
+                anchor = datetime.fromisoformat(anchor_str)
+            except (ValueError, TypeError):
+                continue
+            if anchor >= cutoff:
+                continue
+            result = engine.delete_node(row["id"])
+            if result:
+                deleted += 1
+
+        if deleted:
+            logger.info("Archival soft-delete removed %d stale archival nodes", deleted)
+
+    except Exception as e:
+        logger.warning("Archival soft-delete failed: %s", e)

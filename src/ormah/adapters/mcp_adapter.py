@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 
 import httpx
 from mcp.server import Server
@@ -17,8 +19,71 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = f"http://localhost:{settings.port}"
 
+# ---------------------------------------------------------------------------
+# Session cache — one entry per active MCP stdio process.
+# Key: session_id (UUID string generated in run_mcp_stdio).
+# Value: {prefetch_result, prefetch_done, prefetch_failed, task_result}
+# ---------------------------------------------------------------------------
+_session_cache: dict[str, dict] = {}
 
-def create_mcp_server(base_url: str, default_space: str | None = None) -> Server:
+
+async def _prefetch_context(
+    base_url: str, session_id: str, default_space: str | None
+) -> None:
+    """Background task: eagerly fetch general context right after initialize.
+
+    Runs concurrently with the MCP initialize handshake so that the first
+    get_context call from the LLM is served from cache with zero API latency.
+    """
+    _session_cache[session_id] = {
+        "prefetch_result": None,
+        "prefetch_done": False,
+        "prefetch_failed": False,
+        "task_result": None,
+    }
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+            params: dict = {}
+            if default_space:
+                params["space"] = default_space
+            resp = await client.get("/agent/context", params=params)
+            if resp.is_success:
+                text = resp.json()["text"]
+                entry = _session_cache.get(session_id)
+                if entry is not None:
+                    entry["prefetch_result"] = text
+                logger.info(
+                    "Whisper pre-fetch done for session %s: %d chars",
+                    session_id[:8],
+                    len(text),
+                )
+            else:
+                logger.warning(
+                    "Whisper pre-fetch failed for session %s: HTTP %s",
+                    session_id[:8],
+                    resp.status_code,
+                )
+                entry = _session_cache.get(session_id)
+                if entry is not None:
+                    entry["prefetch_failed"] = True
+    except Exception as exc:
+        logger.warning(
+            "Whisper pre-fetch error for session %s: %s", session_id[:8], exc
+        )
+        entry = _session_cache.get(session_id)
+        if entry is not None:
+            entry["prefetch_failed"] = True
+    finally:
+        entry = _session_cache.get(session_id)
+        if entry is not None:
+            entry["prefetch_done"] = True
+
+
+def create_mcp_server(
+    base_url: str,
+    default_space: str | None = None,
+    session_id: str | None = None,
+) -> Server:
     """Create an MCP server that delegates to the HTTP API."""
     server = Server("ormah")
 
@@ -36,7 +101,11 @@ def create_mcp_server(base_url: str, default_space: str | None = None) -> Server
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         try:
-            result = await _dispatch(base_url, name, arguments, default_space=default_space)
+            result = await _dispatch(
+                base_url, name, arguments,
+                default_space=default_space,
+                session_id=session_id,
+            )
             return [TextContent(type="text", text=result)]
         except httpx.ConnectError:
             return [
@@ -62,7 +131,11 @@ def _handle_error(resp: httpx.Response) -> str:
 
 
 async def _dispatch(
-    base_url: str, name: str, args: dict, default_space: str | None = None
+    base_url: str,
+    name: str,
+    args: dict,
+    default_space: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
         if name == "remember":
@@ -142,15 +215,33 @@ async def _dispatch(
             return resp.json()["text"]
 
         elif name == "get_context":
-            params = {}
+            task_hint = args.get("task_hint")
+            cache = _session_cache.get(session_id) if session_id else None
+
+            # Fast path: no task_hint and pre-fetch already resolved → return immediately.
+            if not task_hint and cache and cache.get("prefetch_result") is not None:
+                logger.debug(
+                    "get_context fast path hit for session %s",
+                    session_id[:8] if session_id else "?",
+                )
+                return cache["prefetch_result"]
+
+            # Slow path: task_hint provided, or cache miss / pre-fetch failure.
+            params: dict = {}
             if default_space:
                 params["space"] = default_space
-            if args.get("task_hint"):
-                params["task_hint"] = args["task_hint"]
+            if task_hint:
+                params["task_hint"] = task_hint
+            if session_id:
+                params["session_id"] = session_id
             resp = await client.get("/agent/context", params=params)
             if not resp.is_success:
                 return _handle_error(resp)
-            return resp.json()["text"]
+            text = resp.json()["text"]
+            # Store task-scoped result in cache for reference.
+            if cache is not None:
+                cache["task_result"] = text
+            return text
 
         elif name == "mark_outdated":
             body = {}
@@ -277,14 +368,34 @@ async def _dispatch(
 
 
 async def run_mcp_stdio():
-    """Run the MCP server over stdio transport."""
+    """Run the MCP server over stdio transport.
+
+    Generates a unique session_id per process instance and immediately kicks
+    off a background context pre-fetch so that the first get_context call from
+    the LLM is served from cache (whisper inject for Claude Desktop).
+    """
+    session_id = str(uuid.uuid4())
     default_space = detect_space_from_cwd()
-    logger.info("Detected project space: %s", default_space or "(global)")
+    logger.info(
+        "MCP session %s started  space: %s",
+        session_id[:8],
+        default_space or "(global)",
+    )
 
-    server = create_mcp_server(_BASE_URL, default_space=default_space)
+    server = create_mcp_server(_BASE_URL, default_space=default_space, session_id=session_id)
 
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    # Kick off context pre-fetch concurrently with the MCP initialize handshake.
+    # By the time the LLM makes its first get_context call, the result is ready.
+    asyncio.create_task(
+        _prefetch_context(_BASE_URL, session_id, default_space)
+    )
+
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    finally:
+        _session_cache.pop(session_id, None)
+        logger.info("MCP session %s closed.", session_id[:8])
 
 
 def main():

@@ -129,10 +129,14 @@ TOOLS = [
     {
         "name": "get_context",
         "description": (
-            "Get core memories and current project context formatted for inclusion in the system prompt. "
-            "Automatically scoped to the current project directory. "
-            "Call this at the start of a conversation to load persistent context. "
-            "Pass `task_hint` when the task is known to get focused context instead of loading everything."
+            "Retrieve core memories and current project context for this session. "
+            "IMPORTANT: Call this tool at the very start of every conversation, "
+            "before doing any other work. Pass the user's first message (or a concise "
+            "summary of their task) as `task_hint` so the most relevant memories are "
+            "returned. If no specific task is evident yet, call without `task_hint` to "
+            "get general project context. The returned text is formatted for inclusion "
+            "in your working context and may contain project facts, preferences, past "
+            "decisions, and ongoing work summaries."
         ),
         "parameters": {
             "type": "object",
@@ -140,9 +144,9 @@ TOOLS = [
                 "task_hint": {
                     "type": "string",
                     "description": (
-                        "Optional task description to filter context. When provided, "
-                        "only the most relevant memories for the task are returned "
-                        "instead of all core memories."
+                        "A brief description of the current task, extracted from the user's "
+                        "first message. When provided, only the most relevant memories for "
+                        "this task are returned. Omit only if no task context is available yet."
                     ),
                 },
             },
