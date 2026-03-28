@@ -49,7 +49,9 @@ async def _prefetch_context(
             resp = await client.get("/agent/context", params=params)
             if resp.is_success:
                 text = resp.json()["text"]
-                _session_cache[session_id]["prefetch_result"] = text
+                entry = _session_cache.get(session_id)
+                if entry is not None:
+                    entry["prefetch_result"] = text
                 logger.info(
                     "Whisper pre-fetch done for session %s: %d chars",
                     session_id[:8],
@@ -61,14 +63,20 @@ async def _prefetch_context(
                     session_id[:8],
                     resp.status_code,
                 )
-                _session_cache[session_id]["prefetch_failed"] = True
+                entry = _session_cache.get(session_id)
+                if entry is not None:
+                    entry["prefetch_failed"] = True
     except Exception as exc:
         logger.warning(
             "Whisper pre-fetch error for session %s: %s", session_id[:8], exc
         )
-        _session_cache[session_id]["prefetch_failed"] = True
+        entry = _session_cache.get(session_id)
+        if entry is not None:
+            entry["prefetch_failed"] = True
     finally:
-        _session_cache[session_id]["prefetch_done"] = True
+        entry = _session_cache.get(session_id)
+        if entry is not None:
+            entry["prefetch_done"] = True
 
 
 def create_mcp_server(
