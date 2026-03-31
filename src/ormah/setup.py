@@ -211,7 +211,7 @@ def configure_claude_desktop(ormah_bin: str) -> bool:
 
     _merge_json_file(config_path, {"mcpServers": mcp_entry})
     ok("Connected to Claude Desktop \u2014 MCP tools available")
-    info("Whisper hooks require Claude Code; Desktop uses MCP tools directly")
+    info("Claude Desktop uses MCP tools directly, including the whisper tool")
     return True
 
 

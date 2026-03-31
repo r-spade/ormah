@@ -132,6 +132,28 @@ TOOLS = [
         },
     },
     {
+        "name": "whisper",
+        "description": (
+            "Get compact contextual memory relevant to the current user message. "
+            "Pass the latest user prompt verbatim. Returns an empty string when "
+            "nothing relevant should be injected. This is especially useful in "
+            "MCP-only clients that do not support pre-prompt hooks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "The latest user message or prompt. Pass it verbatim so whisper "
+                        "can retrieve context for this turn."
+                    ),
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
         "name": "get_self",
         "description": (
             "Get the user's identity profile — preferences, goals, decisions, and key facts. "
@@ -214,7 +236,7 @@ TOOLS = [
             "  - edges: list of {node_a_id, node_b_id, edge_type, reason} — use 'none' to skip\n"
             "  - merges: list of {keep_id, discard_id, merged_content, merged_title}\n"
             "  - consolidations: list of {node_ids, title, content, type}\n\n"
-            "Use when get_context signals unprocessed_memories. "
+            "Use when whisper or another Ormah signal indicates maintenance is due. "
             "No separate API key needed — the calling LLM performs the analysis."
         ),
         "parameters": {

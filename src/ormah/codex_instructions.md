@@ -18,12 +18,12 @@ Ormah is your persistent memory system. It stores, recalls, and surfaces memorie
 
 7. **Use appropriate tiers**: `core` for always-relevant info (user identity, preferences, key architectural decisions), `working` for anything actively relevant now, `archival` for historical/reference data.
 
-8. **Start with context**: Call `get_context` at the beginning of conversations to load core memories. Use `task_hint` when the task is known to get focused context.
+8. **Start with the current turn**: If your client does not already have Ormah whisper hooks, call `whisper` with the latest user message at the start of each new turn. Use `get_self` for explicit identity/profile reads and `recall` for targeted lookups.
 
 9. **Mark outdated info**: When a memory is wrong or outdated, call `mark_outdated` with a reason so it gets demoted in future searches.
 
 10. **Set confidence**: When storing information you're not fully certain about, set `confidence` below 1.0. This affects how prominently the memory appears in search results.
 
-11. **Run maintenance off the critical path**: When `get_context` returns `unprocessed_memories` with a non-zero value, handle maintenance separately from the user-facing turn. If the `ormah-maintenance` custom agent is available, spawn it to run the two-call `run_maintenance` flow instead of doing it inline. Otherwise, defer maintenance to the next safe point rather than interrupting the current response.
+11. **Run maintenance off the critical path**: When whisper surfaces a `maintenance_due` signal, handle maintenance separately from the user-facing turn. If the `ormah-maintenance` custom agent is available, spawn it to run the two-call `run_maintenance` flow instead of doing it inline. Otherwise, defer maintenance to the next safe point rather than interrupting the current response.
 
 12. **Submit implicit feedback on whispered memories**: If a whispered memory is genuinely useful and you actively draw on it in your response, call `submit_feedback(node_id=<id>, signal=1, source="implicit")`. If you explicitly decide a whispered memory is not relevant, call `submit_feedback(node_id=<id>, signal=-1, source="implicit")`. Do not call `submit_feedback` for silence — only call it when you actively use a memory or actively decide it's irrelevant.

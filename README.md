@@ -41,7 +41,7 @@ One command gets you to a working setup.
 3. Detect supported clients and wire them up automatically:
    - Claude Code: whisper hooks, MCP tools, instructions, maintenance agent, slash command
    - Codex: whisper hooks, MCP tools, instructions, maintenance agent
-   - Claude Desktop (macOS): MCP tools
+   - Claude Desktop (macOS): MCP tools, including whisper
 4. Offer transcript backfill for Claude Code so you can bootstrap memory from earlier sessions
 
 If Claude Code, Codex, or Claude Desktop are already installed, Ormah connects itself to them automatically.
@@ -56,9 +56,10 @@ Before the model sees your prompt, Ormah decides what from your memory graph mat
 
 You usually never see it. Your agent just knows.
 
-Whisper is available three ways:
+Whisper is available four ways:
 
 - Hooks: `ormah setup` wires supported clients to run whisper automatically before each prompt
+- MCP: the `whisper` tool for MCP-only clients such as Claude Desktop
 - CLI: `ormah whisper inject` and `ormah whisper store`
 - HTTP: `POST /agent/whisper`
 
@@ -229,8 +230,8 @@ Ormah is designed to work with both humans and agents through several surfaces.
 
 - Claude Code: hooks, MCP, transcript backfill, session watcher support, maintenance agent
 - Codex: hooks, MCP, maintenance agent
-- Claude Desktop (macOS): MCP
-- Any MCP-compatible client: memory tools
+- Claude Desktop (macOS): MCP, including whisper
+- Any MCP-compatible client: memory tools, including whisper
 - Any local tool that can make HTTP requests: direct API access
 
 ### MCP
@@ -239,6 +240,7 @@ Primary MCP tools:
 
 - `remember`
 - `recall`
+- `whisper`
 - `get_self`
 - `mark_outdated`
 - `submit_feedback`

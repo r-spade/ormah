@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 
 import httpx
 from mcp.server import Server
@@ -33,7 +34,11 @@ def _coerce_list(value):
     return value
 
 
-def create_mcp_server(base_url: str, default_space: str | None = None) -> Server:
+def create_mcp_server(
+    base_url: str,
+    default_space: str | None = None,
+    session_id: str | None = None,
+) -> Server:
     """Create an MCP server that delegates to the HTTP API."""
     server = Server("ormah")
 
@@ -51,7 +56,13 @@ def create_mcp_server(base_url: str, default_space: str | None = None) -> Server
     @server.call_tool(validate_input=False)
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         try:
-            result = await _dispatch(base_url, name, arguments, default_space=default_space)
+            result = await _dispatch(
+                base_url,
+                name,
+                arguments,
+                default_space=default_space,
+                session_id=session_id,
+            )
             return [TextContent(type="text", text=result)]
         except httpx.ConnectError:
             return [
@@ -149,7 +160,11 @@ def _format_maintenance_batches(batches: dict) -> str:
 
 
 async def _dispatch(
-    base_url: str, name: str, args: dict, default_space: str | None = None
+    base_url: str,
+    name: str,
+    args: dict,
+    default_space: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
         if name == "remember":
@@ -226,6 +241,17 @@ async def _dispatch(
             if "weight" in args:
                 body["weight"] = args["weight"]
             resp = await client.post("/agent/connect", json=body)
+            if not resp.is_success:
+                return _handle_error(resp)
+            return resp.json()["text"]
+
+        elif name == "whisper":
+            body = {"prompt": args["prompt"]}
+            if default_space:
+                body["space"] = default_space
+            if session_id:
+                body["session_id"] = session_id
+            resp = await client.post("/agent/whisper", json=body)
             if not resp.is_success:
                 return _handle_error(resp)
             return resp.json()["text"]
@@ -365,10 +391,19 @@ async def _dispatch(
 
 async def run_mcp_stdio():
     """Run the MCP server over stdio transport."""
+    session_id = str(uuid.uuid4())
     default_space = detect_space_from_cwd()
-    logger.info("Detected project space: %s", default_space or "(global)")
+    logger.info(
+        "Detected project space: %s (mcp session %s)",
+        default_space or "(global)",
+        session_id[:8],
+    )
 
-    server = create_mcp_server(_BASE_URL, default_space=default_space)
+    server = create_mcp_server(
+        _BASE_URL,
+        default_space=default_space,
+        session_id=session_id,
+    )
 
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
