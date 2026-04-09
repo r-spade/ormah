@@ -75,6 +75,7 @@ Before each hooked prompt, Ormah:
 4. Reranks candidates for precision
 5. Avoids repeating recently-whispered context when the topic has not shifted
 6. Applies a relevance gate so silence beats noise
+7. Adjusts that gate over time based on your feedback — accepted whispers raise it, rejected ones lower it
 
 The result is a compact block of context added before the model sees your message.
 
@@ -418,6 +419,12 @@ ORMAH_SIMILARITY_THRESHOLD=0.4
 ORMAH_WHISPER_MAX_NODES=6
 ORMAH_WHISPER_INJECTION_GATE=0.50
 ORMAH_WHISPER_RERANKER_ENABLED=true
+
+# Feedback-driven gate tuning (adjusts injection gate based on submit_feedback signals)
+ORMAH_GATE_TUNING_ENABLED=true
+ORMAH_GATE_MIN=0.30
+ORMAH_GATE_MAX=0.80
+ORMAH_GATE_LEARNING_RATE=0.02
 
 # FSRS decay
 ORMAH_FSRS_INITIAL_STABILITY=1.0
