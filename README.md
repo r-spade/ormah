@@ -193,13 +193,40 @@ Ormah does not just collect memories. It keeps the graph healthy.
 Background jobs:
 
 - link related memories
-- detect contradictions and belief evolution
+- detect contradictions and belief evolution — surfaced as queryable `[observation]` nodes
 - merge near-duplicates
 - score importance from access, centrality, and recency
 - decay stale memories with FSRS-style retrievability
 - consolidate overlapping working memories
 - assign spaces to orphaned memories
 - refresh indexes incrementally
+
+### Conflict surfacing
+
+When the conflict detector finds a genuine **tension** between two beliefs — both simultaneously held and irreconcilable — it no longer just adds a silent `contradicts` edge. It creates a new `[observation]` node that makes the conflict visible and actionable.
+
+The observation node:
+
+- Is tagged `conflict` and `needs-review` so it surfaces in whisper when related topics come up
+- Includes the explanation of why the two memories contradict each other
+- Links directly to both conflicting nodes via `contradicts` edges
+- Stays in the graph until resolved
+
+**To resolve a conflict**, recall it first:
+
+```bash
+ormah recall "conflict needs-review"
+```
+
+Then mark the outdated belief:
+
+```bash
+ormah outdated <node-id> --reason "superseded by newer decision"
+```
+
+Or use the `mark_outdated` MCP tool from within your agent.
+
+**Evolution is handled differently.** When the detector finds that a newer belief superseded an older one — the person's view simply changed over time — it creates an `evolved_from` edge instead. No observation node is created because there is nothing to resolve; the history is just recorded.
 
 ### Agent-in-the-loop maintenance
 
