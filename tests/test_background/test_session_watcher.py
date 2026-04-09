@@ -248,3 +248,98 @@ def test_nonexistent_watch_dir(engine, tmp_path):
 
     observers = start_session_watcher(engine)
     assert observers == []
+
+
+# --- Session summary tests ---
+
+def test_session_summary_created_after_ingestion(engine, tmp_path):
+    """A session summary [event] node is created after successful ingestion."""
+    engine.settings.session_summary_enabled = True
+    engine.settings.session_summary_min_turns = 3
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "sum_session.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=3)
+
+    summaries = engine.recall_search_structured(
+        "session summary", tags=["session-summary"], touch_access=False
+    )
+    assert len(summaries) >= 1
+    node = summaries[0]["node"]
+    assert node["type"] == "event"
+    assert "myproject" in node["content"]
+    # Verify tag via DB
+    tags = [r[0] for r in engine.db.conn.execute(
+        "SELECT tag FROM node_tags WHERE node_id = ?", (node["id"],)
+    ).fetchall()]
+    assert "session-summary" in tags
+
+
+def test_session_summary_disabled_creates_no_node(engine, tmp_path):
+    """No summary node when session_summary_enabled=False."""
+    engine.settings.session_summary_enabled = False
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-nosum"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "nosummary.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=3)
+
+    summaries = engine.recall_search_structured(
+        "session summary", tags=["session-summary"], touch_access=False
+    )
+    assert len(summaries) == 0
+
+
+def test_session_summary_skipped_for_trivial_session(engine, tmp_path):
+    """No summary when user_turn_count < session_summary_min_turns."""
+    engine.settings.session_summary_enabled = True
+    engine.settings.session_summary_min_turns = 10
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-trivial"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "trivial.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=3)
+
+    summaries = engine.recall_search_structured(
+        "session summary", tags=["session-summary"], touch_access=False
+    )
+    assert len(summaries) == 0
+
+
+def test_session_summary_includes_type_breakdown(engine, tmp_path):
+    """Summary content includes memory type breakdown."""
+    engine.settings.session_summary_enabled = True
+    engine.settings.session_summary_min_turns = 3
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-breakdown"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "breakdown.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=3)
+
+    summaries = engine.recall_search_structured(
+        "session summary", tags=["session-summary"], touch_access=False
+    )
+    assert len(summaries) >= 1
+    content = summaries[0]["node"]["content"]
+    assert "decision" in content

@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     session_watcher_debounce_seconds: float = 60.0
     session_watcher_min_turns: int = 5
     session_watcher_lookback_hours: int = 72
+    session_summary_enabled: bool = True
+    session_summary_min_turns: int = 3  # skip summary for trivial sessions
 
     # Tier limits
     core_memory_cap: int = 50

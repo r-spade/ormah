@@ -2044,6 +2044,7 @@ class MemoryEngine:
             created.append({
                 "node_id": node_id,
                 "title": mem_title,
+                "type": node_type.value,
             })
 
         if skipped:
