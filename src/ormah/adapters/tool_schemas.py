@@ -442,6 +442,24 @@ ADMIN_TOOLS = [
             },
         },
     },
+    {
+        "name": "recall_history",
+        "description": (
+            "Show the full human-readable edit history for a specific memory node. "
+            "Returns a chronological changelog of all updates, outdating, and deletions, "
+            "with field-by-field diffs showing old → new values for each change."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "The ID of the memory node to show history for.",
+                },
+            },
+            "required": ["node_id"],
+        },
+    },
 ]
 
 ALL_TOOLS = TOOLS + ADMIN_TOOLS

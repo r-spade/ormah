@@ -336,6 +336,13 @@ async def _dispatch(
                 )
             return "\n\n".join(lines)
 
+        elif name == "recall_history":
+            node_id = args.get("node_id", "")
+            resp = await client.get(f"/agent/recall/{node_id}/history")
+            if not resp.is_success:
+                return _handle_error(resp)
+            return resp.json().get("text", "")
+
         elif name == "undo_merge":
             resp = await client.post(f"/agent/merges/{args['merge_id']}/undo")
             if not resp.is_success:

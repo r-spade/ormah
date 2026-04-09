@@ -104,6 +104,14 @@ async def delete_node(node_id: str, request: Request):
     return TextResponse(text=text, node_id=node_id)
 
 
+@router.get("/recall/{node_id}/history", response_model=TextResponse)
+async def recall_history(node_id: str, request: Request):
+    """Get the full edit history for a specific memory."""
+    engine = request.app.state.engine
+    text = engine.recall_history(node_id)
+    return TextResponse(text=text, node_id=node_id)
+
+
 @router.post("/connect", response_model=TextResponse)
 async def connect(req: ConnectRequest, request: Request):
     """Create a connection between two memories."""

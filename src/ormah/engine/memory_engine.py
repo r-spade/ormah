@@ -811,12 +811,16 @@ class MemoryEngine:
                     (node_id, node_id),
                 )
 
-        # Audit log
+        # Audit log — store old snapshot in node_snapshot, new snapshot + changed fields in detail
+        new_snapshot = node.model_dump(mode="json")
         self._write_audit_log(
             operation="update",
             node_id=node_id,
             node_snapshot=json.dumps(old_snapshot),
-            detail=json.dumps({"changed_fields": changed_fields}),
+            detail=json.dumps({
+                "changed_fields": changed_fields,
+                "new_snapshot": new_snapshot,
+            }),
         )
 
         return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
@@ -1349,6 +1353,79 @@ class MemoryEngine:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+
+    def recall_history(self, node_id: str) -> str:
+        """Return a human-readable changelog for a node.
+
+        Each audit entry shows the operation, timestamp, and a field-by-field
+        diff between old and new snapshots for update operations.
+        """
+        node = self.graph.get_node(node_id)
+        if node is None:
+            return f"Node {node_id} not found."
+
+        entries = self.list_audit_log(node_id=node["id"], limit=50)
+        if not entries:
+            return f"No history found for node {node_id[:8]}..."
+
+        title = node.get("title") or node.get("content", "")[:60]
+        lines = [f"# History: {title}", f"ID: {node['id']}", ""]
+
+        for entry in reversed(entries):  # oldest first
+            op = entry["operation"]
+            when = entry["performed_at"]
+            lines.append(f"## {op.upper()} — {when}")
+
+            if op == "update":
+                detail = {}
+                try:
+                    detail = json.loads(entry.get("detail") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+                changed = detail.get("changed_fields", [])
+                old = {}
+                new = {}
+                try:
+                    old = json.loads(entry.get("node_snapshot") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                try:
+                    new = detail.get("new_snapshot") or {}
+                except Exception:
+                    pass
+
+                if changed and (old or new):
+                    for field in changed:
+                        old_val = old.get(field, "—")
+                        new_val = new.get(field, "—")
+                        if old_val != new_val:
+                            old_str = str(old_val)[:200]
+                            new_str = str(new_val)[:200]
+                            lines.append(f"  **{field}**: `{old_str}` → `{new_str}`")
+                elif changed:
+                    lines.append(f"  Changed: {', '.join(changed)}")
+                else:
+                    lines.append("  (no field details)")
+
+            elif op == "mark_outdated":
+                detail = {}
+                try:
+                    detail = json.loads(entry.get("detail") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                reason = detail.get("reason", "no reason given")
+                new_confidence = detail.get("new_confidence")
+                lines.append(f"  Reason: {reason}")
+                if new_confidence is not None:
+                    lines.append(f"  Confidence set to: {new_confidence}")
+
+            elif op == "delete":
+                lines.append("  Node was deleted.")
+
+            lines.append("")
+
+        return "\n".join(lines)
 
     def list_audit_log(
         self,
