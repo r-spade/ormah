@@ -164,6 +164,12 @@ class Settings(BaseSettings):
     # Whisper injection gate (minimum blended score to justify injection)
     whisper_injection_gate: float = 0.50
 
+    # Feedback-driven gate tuning
+    gate_tuning_enabled: bool = True
+    gate_min: float = 0.30
+    gate_max: float = 0.80
+    gate_learning_rate: float = 0.02
+
     # Affinity boost (adaptive feedback loop)
     affinity_similarity_threshold: float = 0.70
     affinity_half_life_days: float = 30.0
