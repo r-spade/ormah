@@ -533,6 +533,14 @@ class MemoryEngine:
         # Touch access
         self._touch_access(resolved_node_id)
 
+        # Acknowledge any pending decay alerts for this node
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE decay_alert_log SET acknowledged = 1 "
+                "WHERE node_id = ? AND acknowledged = 0",
+                (resolved_node_id,),
+            )
+
         edges = self.graph.get_edges_for(resolved_node_id)
         neighbors = self.graph.get_neighbors(resolved_node_id, depth=1)
         self._log_feedback_candidates(

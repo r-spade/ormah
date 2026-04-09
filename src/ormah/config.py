@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     # Decay: skip nodes above this importance
     decay_importance_threshold: float = 0.5
 
+    # Proactive decay alerts (warn before demotion)
+    decay_alert_enabled: bool = True
+    decay_alert_threshold: float = 0.40   # alert when R drops below this (above fsrs_decay_threshold)
+    decay_alert_refire_days: int = 7      # suppress repeat alerts for this many days
+
     # Whisper-out (involuntary storage on compaction / session end)
     whisper_out_enabled: bool = True
     whisper_out_min_turns: int = 3
