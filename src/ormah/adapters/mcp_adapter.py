@@ -248,6 +248,13 @@ async def _dispatch(
                 return _handle_error(resp)
             return resp.json()["text"]
 
+        elif name == "promote_memory":
+            body = {"tier": args.get("tier", "core")}
+            resp = await client.post(f"/agent/promote/{args['node_id']}", json=body)
+            if not resp.is_success:
+                return _handle_error(resp)
+            return resp.json()["text"]
+
         elif name == "mark_outdated":
             body = {}
             if args.get("reason"):
