@@ -112,6 +112,65 @@ def configure_claude_hooks(ormah_bin: str) -> None:
             }
         ],
     }
+    # PostToolUse checkpoint — fires after high-impact operations and prompts
+    # the agent to call remember() before continuing, enabling mid-session
+    # write-back rather than waiting until session end.
+    checkpoint_script = Path(settings_path).parent / "hooks" / "ormah-checkpoint.sh"
+    checkpoint_script.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_script.write_text(
+        "#!/usr/bin/env bash\n"
+        "# Ormah mid-session checkpoint hook (installed by ormah setup).\n"
+        "# Reads PostToolUse JSON from stdin; outputs a checkpoint reminder\n"
+        "# after high-impact operations so agents save state immediately.\n"
+        "set -euo pipefail\n"
+        "input=$(cat)\n"
+        'tool_name=$(echo "$input" | python3 -c '
+        '"import sys,json; d=json.load(sys.stdin); print(d.get(\'tool_name\',\'\'))" 2>/dev/null || echo "")\n'
+        'tool_input=$(echo "$input" | python3 -c '
+        '"import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get(\'tool_input\',\'\')))" 2>/dev/null || echo "")\n'
+        "is_high_impact=0\n"
+        'case "$tool_name" in\n'
+        "  Bash)\n"
+        '    cmd=$(echo "$tool_input" | python3 -c '
+        '"import sys,json; d=json.load(sys.stdin); print(d.get(\'command\',\'\'))" 2>/dev/null || echo "")\n'
+        '    if echo "$cmd" | grep -qiE '
+        '"git (commit|push|merge|rebase)|systemctl|deploy|docker|kubectl|npm publish|pip install|uv (sync|add|remove)|rm -rf|DROP|ALTER TABLE"; then\n'
+        "      is_high_impact=1\n"
+        "    fi\n"
+        "    ;;\n"
+        "  Write)\n"
+        "    is_high_impact=1\n"
+        "    ;;\n"
+        "  Edit)\n"
+        '    file=$(echo "$tool_input" | python3 -c '
+        '"import sys,json; d=json.load(sys.stdin); print(d.get(\'file_path\',\'\'))" 2>/dev/null || echo "")\n'
+        '    if echo "$file" | grep -qiE '
+        r'"\.(env|json|toml|yaml|yml|sh|service|conf|ini)$|CLAUDE\.md|settings"; then'
+        "\n"
+        "      is_high_impact=1\n"
+        "    fi\n"
+        "    ;;\n"
+        "esac\n"
+        'if [ "$is_high_impact" -eq 1 ]; then\n'
+        '  echo "CHECKPOINT: A high-impact operation just completed. '
+        "If a decision was made, a config changed, or a milestone was reached — "
+        'call remember() now to save it before continuing."\n'
+        "fi\n"
+    )
+    checkpoint_script.chmod(0o755)
+
+    hooks["PostToolUse"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": str(checkpoint_script),
+                    "timeout": 5,
+                }
+            ]
+        }
+    ]
+
     hooks["PreCompact"] = [
         {
             "hooks": [
