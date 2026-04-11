@@ -462,6 +462,15 @@ class MemoryEngine:
             formatted += f"\nAuto-linked to {len(auto_links)} related memories:"
             for link_id, link_title, sim in auto_links:
                 formatted += f"\n  → {link_title} ({sim:.0%} similar)"
+
+        # Pre-storage contradiction check (inline, rule-based — no LLM)
+        if getattr(self.settings, "contradiction_prestorage_enabled", True):
+            conflicts = self._check_contradiction_prestorage(node)
+            if conflicts:
+                formatted += "\n⚠ Possible contradiction with existing memories:"
+                for cid, ctitle, csim in conflicts:
+                    formatted += f"\n  · {ctitle} (id: {cid[:8]}, {csim:.0%} similar) — review with recall(node_id='{cid[:8]}')"
+
         return node.id, formatted
 
     def _encode_feedback_prompt_vec(self, prompt_text: str) -> bytes:
@@ -1014,10 +1023,68 @@ class MemoryEngine:
             }),
         )
 
-        return (
+        result = (
             f"Marked outdated [{node.type.value}]: {node.title or node.content[:80]}\n"
             f"ID: {node.id} | valid_until: {node.valid_until.isoformat()}"
         )
+
+        # Tag-cascade: surface sibling nodes sharing any tags so user can batch-review
+        if node.tags and getattr(self.settings, "tag_cascade_invalidation_enabled", True):
+            cascade_nodes = self._find_tag_siblings(
+                node_id=node.id,
+                tags=node.tags,
+                space=node.space,
+                limit=getattr(self.settings, "tag_cascade_max_results", 10),
+            )
+            if cascade_nodes:
+                result += f"\n\n{len(cascade_nodes)} other node(s) share tag(s) {node.tags} — consider reviewing:"
+                for sibling_id, sibling_title, shared_tags in cascade_nodes:
+                    tag_str = ", ".join(shared_tags)
+                    result += f"\n  · {sibling_title} (id: {sibling_id[:8]}, tags: {tag_str})"
+
+        return result
+
+    def _find_tag_siblings(
+        self,
+        node_id: str,
+        tags: list[str],
+        space: str | None,
+        limit: int = 10,
+    ) -> list[tuple[str, str, list[str]]]:
+        """Return [(node_id, title, shared_tags)] for active nodes sharing any of *tags*.
+
+        Excludes *node_id* itself. Restricts to the same space when space is set.
+        Only returns nodes that are NOT already marked outdated (valid_until IS NULL
+        or valid_until > now).
+        """
+        if not tags:
+            return []
+
+        placeholders = ",".join("?" * len(tags))
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        rows = self.db.conn.execute(
+            f"""
+            SELECT n.id, n.title, n.content, GROUP_CONCAT(nt.tag) AS shared_tags
+              FROM node_tags nt
+              JOIN nodes n ON n.id = nt.node_id
+             WHERE nt.tag IN ({placeholders})
+               AND nt.node_id != ?
+               AND (n.valid_until IS NULL OR n.valid_until > ?)
+               {'AND n.space = ?' if space else ''}
+             GROUP BY n.id
+             ORDER BY COUNT(nt.tag) DESC, n.id
+             LIMIT ?
+            """,
+            [*tags, node_id, now_iso, *(([space]) if space else []), limit],
+        ).fetchall()
+
+        result = []
+        for r in rows:
+            title = r["title"] or (r["content"] or "")[:50]
+            shared = r["shared_tags"].split(",") if r["shared_tags"] else []
+            result.append((r["id"], title, shared))
+        return result
 
     def rebuild_index(self) -> int:
         """Full rebuild of the index from markdown files, including embeddings."""
@@ -1946,6 +2013,69 @@ class MemoryEngine:
 
         except Exception as e:
             logger.debug("Auto-link on remember failed: %s", e)
+            return []
+
+    def _check_contradiction_prestorage(
+        self,
+        node: MemoryNode,
+        similarity_threshold: float | None = None,
+        top_k: int = 5,
+    ) -> list[tuple[str, str, float]]:
+        """Return a list of (node_id, title, similarity) for existing nodes that
+        may contradict the incoming node.
+
+        Only nodes in the same space (or both space-less) are considered — cross-
+        space matches are never flagged. The threshold defaults to
+        ``settings.contradiction_prestorage_threshold`` (default 0.88).
+
+        Entirely rule-based (no LLM call) so it stays fast at store-time. The
+        background conflict_detector handles deeper LLM-powered checks later.
+        """
+        threshold = similarity_threshold
+        if threshold is None:
+            threshold = getattr(
+                self.settings, "contradiction_prestorage_threshold", 0.88
+            )
+
+        try:
+            from ormah.embeddings.vector_store import VectorStore
+            from ormah.embeddings.encoder import get_encoder
+
+            encoder = get_encoder(self.settings)
+            vec_store = VectorStore(self.db)
+
+            text = _embedding_text(node.title, node.content, self.settings.embedding_max_content_chars)
+            if not text:
+                return []
+
+            query_vec = encoder.encode(text)
+            similar = vec_store.search(query_vec, limit=top_k + 1)
+
+            flagged = []
+            node_space = node.space or ""
+
+            for match in similar:
+                if match["id"] == node.id:
+                    continue
+                if match["similarity"] < threshold:
+                    continue
+
+                other = self.graph.get_node(match["id"])
+                if other is None:
+                    continue
+
+                # Only flag same-space pairs
+                other_space = (other.get("space") or "")
+                if other_space != node_space:
+                    continue
+
+                title = other.get("title") or (other.get("content") or "")[:50]
+                flagged.append((match["id"], title, match["similarity"]))
+
+            return flagged
+
+        except Exception as e:
+            logger.debug("Pre-storage contradiction check failed: %s", e)
             return []
 
     # --- Provenance ---

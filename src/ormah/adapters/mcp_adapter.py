@@ -14,10 +14,12 @@ from mcp.types import TextContent, Tool
 from ormah.adapters.space_detect import detect_space_from_cwd
 from ormah.adapters.tool_schemas import TOOLS
 from ormah.config import settings
+from ormah.store.write_buffer import WriteBuffer, buffer_path_for
 
 logger = logging.getLogger(__name__)
 
 _BASE_URL = f"http://localhost:{settings.port}"
+_write_buffer = WriteBuffer(buffer_path_for(settings.memory_dir))
 
 
 def _coerce_list(value):
@@ -159,6 +161,47 @@ def _format_maintenance_batches(batches: dict) -> str:
     return "\n".join(lines)
 
 
+async def _drain_write_buffer(client: httpx.AsyncClient, base_params: dict) -> str:
+    """Replay any buffered remember calls. Returns a summary string if items were drained."""
+    if _write_buffer.is_empty():
+        return ""
+    pending = _write_buffer.load()
+    if not pending:
+        return ""
+    succeeded, failed = 0, []
+    for entry in pending:
+        buffered_args = entry.get("args", {})
+        buffered_params = entry.get("params", base_params)
+        body = {
+            "content": buffered_args["content"],
+            "type": buffered_args.get("type", "fact"),
+            "tier": buffered_args.get("tier", "working"),
+        }
+        for key in ("title", "space", "about_self", "confidence"):
+            if buffered_args.get(key) is not None:
+                body[key] = buffered_args[key]
+        if buffered_args.get("tags"):
+            body["tags"] = _coerce_list(buffered_args["tags"])
+        if buffered_args.get("links"):
+            body["connections"] = [
+                {"target": nid} for nid in _coerce_list(buffered_args["links"])
+            ]
+        try:
+            resp = await client.post("/agent/remember", json=body, params=buffered_params)
+            if resp.is_success:
+                succeeded += 1
+            else:
+                failed.append(entry)
+        except httpx.ConnectError:
+            failed.append(entry)
+            failed.extend(pending[pending.index(entry) + 1 :])
+            break
+    _write_buffer.rewrite(failed)
+    if succeeded:
+        return f"(Replayed {succeeded} buffered write{'s' if succeeded > 1 else ''} from local queue.)"
+    return ""
+
+
 async def _dispatch(
     base_url: str,
     name: str,
@@ -188,10 +231,24 @@ async def _dispatch(
             params = {}
             if default_space:
                 params["default_space"] = default_space
-            resp = await client.post("/agent/remember", json=body, params=params)
+
+            # Drain buffered writes before sending the current one.
+            drain_msg = await _drain_write_buffer(client, params)
+
+            try:
+                resp = await client.post("/agent/remember", json=body, params=params)
+            except httpx.ConnectError:
+                _write_buffer.append(args=args, params=params)
+                buffered_suffix = (
+                    "\n(Server unreachable — memory queued in local buffer and will be "
+                    "replayed automatically when the server comes back online.)"
+                )
+                return drain_msg + buffered_suffix if drain_msg else buffered_suffix.lstrip()
+
             if not resp.is_success:
                 return _handle_error(resp)
-            return resp.json()["text"]
+            result = resp.json()["text"]
+            return f"{drain_msg}\n{result}" if drain_msg else result
 
         elif name == "recall":
             body = {"query": args["query"]}
