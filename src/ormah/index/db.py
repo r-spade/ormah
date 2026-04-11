@@ -168,6 +168,34 @@ class Database:
                     "CREATE INDEX IF NOT EXISTS idx_review_log_node ON review_log(node_id)"
                 )
 
+            if "gate_state" not in existing_tables:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS gate_state (
+                        key         TEXT PRIMARY KEY,
+                        value       REAL NOT NULL,
+                        updated_at  TEXT NOT NULL
+                    )
+                    """
+                )
+
+            if "decay_alert_log" not in existing_tables:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS decay_alert_log (
+                        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                        node_id        TEXT NOT NULL,
+                        alerted_at     TEXT NOT NULL,
+                        retrievability REAL NOT NULL,
+                        tier           TEXT NOT NULL,
+                        acknowledged   INTEGER DEFAULT 0
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_decay_alert_node ON decay_alert_log(node_id)"
+                )
+
         # Migrate FTS table to porter stemmer if needed
         self._migrate_fts_tokenizer()
 

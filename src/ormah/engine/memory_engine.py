@@ -462,6 +462,15 @@ class MemoryEngine:
             formatted += f"\nAuto-linked to {len(auto_links)} related memories:"
             for link_id, link_title, sim in auto_links:
                 formatted += f"\n  → {link_title} ({sim:.0%} similar)"
+
+        # Pre-storage contradiction check (inline, rule-based — no LLM)
+        if getattr(self.settings, "contradiction_prestorage_enabled", True):
+            conflicts = self._check_contradiction_prestorage(node)
+            if conflicts:
+                formatted += "\n⚠ Possible contradiction with existing memories:"
+                for cid, ctitle, csim in conflicts:
+                    formatted += f"\n  · {ctitle} (id: {cid[:8]}, {csim:.0%} similar) — review with recall(node_id='{cid[:8]}')"
+
         return node.id, formatted
 
     def _encode_feedback_prompt_vec(self, prompt_text: str) -> bytes:
@@ -532,6 +541,14 @@ class MemoryEngine:
 
         # Touch access
         self._touch_access(resolved_node_id)
+
+        # Acknowledge any pending decay alerts for this node
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE decay_alert_log SET acknowledged = 1 "
+                "WHERE node_id = ? AND acknowledged = 0",
+                (resolved_node_id,),
+            )
 
         edges = self.graph.get_edges_for(resolved_node_id)
         neighbors = self.graph.get_neighbors(resolved_node_id, depth=1)
@@ -803,12 +820,16 @@ class MemoryEngine:
                     (node_id, node_id),
                 )
 
-        # Audit log
+        # Audit log — store old snapshot in node_snapshot, new snapshot + changed fields in detail
+        new_snapshot = node.model_dump(mode="json")
         self._write_audit_log(
             operation="update",
             node_id=node_id,
             node_snapshot=json.dumps(old_snapshot),
-            detail=json.dumps({"changed_fields": changed_fields}),
+            detail=json.dumps({
+                "changed_fields": changed_fields,
+                "new_snapshot": new_snapshot,
+            }),
         )
 
         return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
@@ -927,7 +948,7 @@ class MemoryEngine:
             reranker_blend_alpha=self.settings.whisper_reranker_blend_alpha,
             reranker_max_doc_chars=self.settings.whisper_reranker_max_doc_chars,
             recent_prompts=recent_prompts,
-            injection_gate=self.settings.whisper_injection_gate,
+            injection_gate=self.get_gate(),
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
             session_id=session_id,
@@ -1341,6 +1362,79 @@ class MemoryEngine:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+
+    def recall_history(self, node_id: str) -> str:
+        """Return a human-readable changelog for a node.
+
+        Each audit entry shows the operation, timestamp, and a field-by-field
+        diff between old and new snapshots for update operations.
+        """
+        node = self.graph.get_node(node_id)
+        if node is None:
+            return f"Node {node_id} not found."
+
+        entries = self.list_audit_log(node_id=node["id"], limit=50)
+        if not entries:
+            return f"No history found for node {node_id[:8]}..."
+
+        title = node.get("title") or node.get("content", "")[:60]
+        lines = [f"# History: {title}", f"ID: {node['id']}", ""]
+
+        for entry in reversed(entries):  # oldest first
+            op = entry["operation"]
+            when = entry["performed_at"]
+            lines.append(f"## {op.upper()} — {when}")
+
+            if op == "update":
+                detail = {}
+                try:
+                    detail = json.loads(entry.get("detail") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+                changed = detail.get("changed_fields", [])
+                old = {}
+                new = {}
+                try:
+                    old = json.loads(entry.get("node_snapshot") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                try:
+                    new = detail.get("new_snapshot") or {}
+                except Exception:
+                    pass
+
+                if changed and (old or new):
+                    for field in changed:
+                        old_val = old.get(field, "—")
+                        new_val = new.get(field, "—")
+                        if old_val != new_val:
+                            old_str = str(old_val)[:200]
+                            new_str = str(new_val)[:200]
+                            lines.append(f"  **{field}**: `{old_str}` → `{new_str}`")
+                elif changed:
+                    lines.append(f"  Changed: {', '.join(changed)}")
+                else:
+                    lines.append("  (no field details)")
+
+            elif op == "mark_outdated":
+                detail = {}
+                try:
+                    detail = json.loads(entry.get("detail") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                reason = detail.get("reason", "no reason given")
+                new_confidence = detail.get("new_confidence")
+                lines.append(f"  Reason: {reason}")
+                if new_confidence is not None:
+                    lines.append(f"  Confidence set to: {new_confidence}")
+
+            elif op == "delete":
+                lines.append("  Node was deleted.")
+
+            lines.append("")
+
+        return "\n".join(lines)
 
     def list_audit_log(
         self,
@@ -1861,6 +1955,69 @@ class MemoryEngine:
             logger.debug("Auto-link on remember failed: %s", e)
             return []
 
+    def _check_contradiction_prestorage(
+        self,
+        node: MemoryNode,
+        similarity_threshold: float | None = None,
+        top_k: int = 5,
+    ) -> list[tuple[str, str, float]]:
+        """Return a list of (node_id, title, similarity) for existing nodes that
+        may contradict the incoming node.
+
+        Only nodes in the same space (or both space-less) are considered — cross-
+        space matches are never flagged. The threshold defaults to
+        ``settings.contradiction_prestorage_threshold`` (default 0.88).
+
+        Entirely rule-based (no LLM call) so it stays fast at store-time. The
+        background conflict_detector handles deeper LLM-powered checks later.
+        """
+        threshold = similarity_threshold
+        if threshold is None:
+            threshold = getattr(
+                self.settings, "contradiction_prestorage_threshold", 0.88
+            )
+
+        try:
+            from ormah.embeddings.vector_store import VectorStore
+            from ormah.embeddings.encoder import get_encoder
+
+            encoder = get_encoder(self.settings)
+            vec_store = VectorStore(self.db)
+
+            text = _embedding_text(node.title, node.content, self.settings.embedding_max_content_chars)
+            if not text:
+                return []
+
+            query_vec = encoder.encode(text)
+            similar = vec_store.search(query_vec, limit=top_k + 1)
+
+            flagged = []
+            node_space = node.space or ""
+
+            for match in similar:
+                if match["id"] == node.id:
+                    continue
+                if match["similarity"] < threshold:
+                    continue
+
+                other = self.graph.get_node(match["id"])
+                if other is None:
+                    continue
+
+                # Only flag same-space pairs
+                other_space = (other.get("space") or "")
+                if other_space != node_space:
+                    continue
+
+                title = other.get("title") or (other.get("content") or "")[:50]
+                flagged.append((match["id"], title, match["similarity"]))
+
+            return flagged
+
+        except Exception as e:
+            logger.debug("Pre-storage contradiction check failed: %s", e)
+            return []
+
     # --- Provenance ---
 
     @staticmethod
@@ -1959,6 +2116,7 @@ class MemoryEngine:
             created.append({
                 "node_id": node_id,
                 "title": mem_title,
+                "type": node_type.value,
             })
 
         if skipped:
@@ -2098,7 +2256,56 @@ class MemoryEngine:
                     (resolved_node_id,),
                 )
 
+        if getattr(self.settings, "gate_tuning_enabled", True):
+            self._update_gate(signal)
+
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
+
+    def get_gate(self) -> float:
+        """Return the current injection gate value.
+
+        Reads from the gate_state table if gate tuning is enabled, falling
+        back to the static config value otherwise.
+        """
+        if not getattr(self.settings, "gate_tuning_enabled", True):
+            return self.settings.whisper_injection_gate
+        row = self.db.conn.execute(
+            "SELECT value FROM gate_state WHERE key = 'injection_gate'"
+        ).fetchone()
+        if row is None:
+            return self.settings.whisper_injection_gate
+        return float(row["value"])
+
+    def _update_gate(self, signal: int) -> None:
+        """Nudge the injection gate based on a feedback signal.
+
+        Uses a proportional update rule:
+          +1 → gate += lr * (1 - gate)   (pulls toward gate_max)
+          -1 → gate -= lr * gate          (pulls toward gate_min)
+        Result is clamped to [gate_min, gate_max].
+        """
+        current = self.get_gate()
+        lr = getattr(self.settings, "gate_learning_rate", 0.02)
+        gate_min = getattr(self.settings, "gate_min", 0.30)
+        gate_max = getattr(self.settings, "gate_max", 0.80)
+
+        if signal > 0:
+            new_gate = current + lr * (gate_max - current)
+        else:
+            new_gate = current - lr * (current - gate_min)
+
+        new_gate = max(gate_min, min(gate_max, new_gate))
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO gate_state (key, value, updated_at)
+                VALUES ('injection_gate', ?, datetime('now'))
+                ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (new_gate,),
+            )
+        logger.debug("Gate tuning: signal=%+d %.4f → %.4f", signal, current, new_gate)
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""

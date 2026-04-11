@@ -248,6 +248,13 @@ async def _dispatch(
                 return _handle_error(resp)
             return resp.json()["text"]
 
+        elif name == "promote_memory":
+            body = {"tier": args.get("tier", "core")}
+            resp = await client.post(f"/agent/promote/{args['node_id']}", json=body)
+            if not resp.is_success:
+                return _handle_error(resp)
+            return resp.json()["text"]
+
         elif name == "mark_outdated":
             body = {}
             if args.get("reason"):
@@ -335,6 +342,13 @@ async def _dispatch(
                     f"  Performed at: {e['performed_at']}"
                 )
             return "\n\n".join(lines)
+
+        elif name == "recall_history":
+            node_id = args.get("node_id", "")
+            resp = await client.get(f"/agent/recall/{node_id}/history")
+            if not resp.is_success:
+                return _handle_error(resp)
+            return resp.json().get("text", "")
 
         elif name == "undo_merge":
             resp = await client.post(f"/agent/merges/{args['merge_id']}/undo")
