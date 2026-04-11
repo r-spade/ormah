@@ -103,6 +103,17 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.recall_promoter import run_recall_promotion
+
+    scheduler.add_job(
+        tracked(tracker, "recall_promoter", run_recall_promotion, engine),
+        "interval",
+        minutes=s.recall_promotion_interval_minutes,
+        id="recall_promoter",
+        name="Recall promoter",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     scheduler.add_job(
         tracked(tracker, "index_updater", engine.builder.incremental_update),
         "interval",

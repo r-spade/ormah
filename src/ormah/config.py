@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     # Auto-merge
     auto_merge_threshold: float = 0.85
 
+    # Auto-promotion: promote working nodes with positive recall hits across N sessions
+    recall_promotion_sessions: int = 3   # min distinct sessions with positive signal
+    recall_promotion_interval_minutes: int = 60
+
     # Importance scoring weights (3 dynamic signals)
     importance_access_weight: float = 0.34
     importance_edge_weight: float = 0.33
