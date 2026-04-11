@@ -1021,10 +1021,68 @@ class MemoryEngine:
             }),
         )
 
-        return (
+        result = (
             f"Marked outdated [{node.type.value}]: {node.title or node.content[:80]}\n"
             f"ID: {node.id} | valid_until: {node.valid_until.isoformat()}"
         )
+
+        # Tag-cascade: surface sibling nodes sharing any tags so user can batch-review
+        if node.tags and getattr(self.settings, "tag_cascade_invalidation_enabled", True):
+            cascade_nodes = self._find_tag_siblings(
+                node_id=node.id,
+                tags=node.tags,
+                space=node.space,
+                limit=getattr(self.settings, "tag_cascade_max_results", 10),
+            )
+            if cascade_nodes:
+                result += f"\n\n{len(cascade_nodes)} other node(s) share tag(s) {node.tags} — consider reviewing:"
+                for sibling_id, sibling_title, shared_tags in cascade_nodes:
+                    tag_str = ", ".join(shared_tags)
+                    result += f"\n  · {sibling_title} (id: {sibling_id[:8]}, tags: {tag_str})"
+
+        return result
+
+    def _find_tag_siblings(
+        self,
+        node_id: str,
+        tags: list[str],
+        space: str | None,
+        limit: int = 10,
+    ) -> list[tuple[str, str, list[str]]]:
+        """Return [(node_id, title, shared_tags)] for active nodes sharing any of *tags*.
+
+        Excludes *node_id* itself. Restricts to the same space when space is set.
+        Only returns nodes that are NOT already marked outdated (valid_until IS NULL
+        or valid_until > now).
+        """
+        if not tags:
+            return []
+
+        placeholders = ",".join("?" * len(tags))
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        rows = self.db.conn.execute(
+            f"""
+            SELECT n.id, n.title, n.content, GROUP_CONCAT(nt.tag) AS shared_tags
+              FROM node_tags nt
+              JOIN nodes n ON n.id = nt.node_id
+             WHERE nt.tag IN ({placeholders})
+               AND nt.node_id != ?
+               AND (n.valid_until IS NULL OR n.valid_until > ?)
+               {'AND n.space = ?' if space else ''}
+             GROUP BY n.id
+             ORDER BY COUNT(nt.tag) DESC, n.id
+             LIMIT ?
+            """,
+            [*tags, node_id, now_iso, *(([space]) if space else []), limit],
+        ).fetchall()
+
+        result = []
+        for r in rows:
+            title = r["title"] or (r["content"] or "")[:50]
+            shared = r["shared_tags"].split(",") if r["shared_tags"] else []
+            result.append((r["id"], title, shared))
+        return result
 
     def rebuild_index(self) -> int:
         """Full rebuild of the index from markdown files, including embeddings."""

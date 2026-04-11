@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     contradiction_prestorage_enabled: bool = True
     contradiction_prestorage_threshold: float = 0.88  # cosine similarity to flag
 
+    # Tag-cascade invalidation: surface siblings when mark_outdated is called
+    tag_cascade_invalidation_enabled: bool = True
+    tag_cascade_max_results: int = 10  # max sibling nodes to surface
+
     # Importance scoring weights (3 dynamic signals)
     importance_access_weight: float = 0.34
     importance_edge_weight: float = 0.33
