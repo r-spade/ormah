@@ -122,7 +122,85 @@ def _ingest_session(
         "Session watcher ingested %s (%d turns, %d memories extracted)",
         rel, result.user_turn_count, count,
     )
+
+    # Session summary: create an [event] node summarising what was extracted.
+    settings = engine.settings
+    if (
+        getattr(settings, "session_summary_enabled", True)
+        and result.user_turn_count >= getattr(settings, "session_summary_min_turns", 3)
+        and new_node_ids
+    ):
+        _create_session_summary(engine, ingested, result, space)
+
     return True
+
+
+def _create_session_summary(
+    engine: MemoryEngine,
+    ingested: list,
+    result,
+    space: str | None,
+) -> None:
+    """Create a concise [event] memory summarising a completed session.
+
+    Counts extracted nodes by type, picks the top titles, and stores a
+    self-contained summary so the session is searchable and whisper-able
+    without re-reading the full transcript.
+    """
+    from ormah.models.node import CreateNodeRequest, NodeType, Tier
+
+    # Count nodes by type
+    type_counts: dict[str, int] = {}
+    titles: list[str] = []
+    for m in ingested:
+        ntype = m.get("type", "fact")
+        type_counts[ntype] = type_counts.get(ntype, 0) + 1
+        title = m.get("title") or m.get("content", "")[:60]
+        if title:
+            titles.append(title)
+
+    type_summary_parts = []
+    for ntype in ("decision", "fact", "event", "preference", "procedure", "observation"):
+        n = type_counts.get(ntype, 0)
+        if n:
+            type_summary_parts.append(f"{n} {ntype}{'s' if n > 1 else ''}")
+    for ntype, n in type_counts.items():
+        if ntype not in ("decision", "fact", "event", "preference", "procedure", "observation") and n:
+            type_summary_parts.append(f"{n} {ntype}{'s' if n > 1 else ''}")
+
+    space_label = space or "global"
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    total = len(ingested)
+
+    body_lines = [
+        f"Session on {date_str} in space '{space_label}': "
+        f"{result.user_turn_count} turns, {total} {'memory' if total == 1 else 'memories'} extracted.",
+    ]
+    if type_summary_parts:
+        body_lines.append("Extracted: " + ", ".join(type_summary_parts) + ".")
+    if titles:
+        preview = titles[:5]
+        body_lines.append("Key memories: " + "; ".join(f'"{t}"' for t in preview) + ".")
+
+    session_id_short = (result.session_id or "")[:8] or "unknown"
+    try:
+        engine.remember(
+            CreateNodeRequest(
+                title=f"Session summary — {date_str} [{space_label}]",
+                content="\n".join(body_lines),
+                type=NodeType.event,
+                tier=Tier.working,
+                space=space,
+                tags=["session-summary", space_label] if space_label != "global" else ["session-summary"],
+            ),
+            agent_id="session-watcher",
+        )
+        logger.info(
+            "Session watcher created summary for session %s (%d memories)",
+            session_id_short, total,
+        )
+    except Exception as e:
+        logger.warning("Session summary creation failed: %s", e)
 
 
 def _scan_sessions(

@@ -112,6 +112,7 @@ Before each hooked prompt, Ormah:
 4. Reranks candidates for precision
 5. Avoids repeating recently-whispered context when the topic has not shifted
 6. Applies a relevance gate so silence beats noise
+7. Adjusts that gate over time based on your feedback — accepted whispers raise it, rejected ones lower it
 
 The result is a compact block of context added before the model sees your message.
 
@@ -230,13 +231,40 @@ Ormah does not just collect memories. It keeps the graph healthy.
 Background jobs:
 
 - link related memories
-- detect contradictions and belief evolution
+- detect contradictions and belief evolution — surfaced as queryable `[observation]` nodes
 - merge near-duplicates
 - score importance from access, centrality, and recency
 - decay stale memories with FSRS-style retrievability
 - consolidate overlapping working memories
 - assign spaces to orphaned memories
 - refresh indexes incrementally
+
+### Conflict surfacing
+
+When the conflict detector finds a genuine **tension** between two beliefs — both simultaneously held and irreconcilable — it no longer just adds a silent `contradicts` edge. It creates a new `[observation]` node that makes the conflict visible and actionable.
+
+The observation node:
+
+- Is tagged `conflict` and `needs-review` so it surfaces in whisper when related topics come up
+- Includes the explanation of why the two memories contradict each other
+- Links directly to both conflicting nodes via `contradicts` edges
+- Stays in the graph until resolved
+
+**To resolve a conflict**, recall it first:
+
+```bash
+ormah recall "conflict needs-review"
+```
+
+Then mark the outdated belief:
+
+```bash
+ormah outdated <node-id> --reason "superseded by newer decision"
+```
+
+Or use the `mark_outdated` MCP tool from within your agent.
+
+**Evolution is handled differently.** When the detector finds that a newer belief superseded an older one — the person's view simply changed over time — it creates an `evolved_from` edge instead. No observation node is created because there is nothing to resolve; the history is just recorded.
 
 ### Agent-in-the-loop maintenance
 
@@ -430,6 +458,12 @@ ORMAH_SIMILARITY_THRESHOLD=0.4
 ORMAH_WHISPER_MAX_NODES=6
 ORMAH_WHISPER_INJECTION_GATE=0.50
 ORMAH_WHISPER_RERANKER_ENABLED=true
+
+# Feedback-driven gate tuning (adjusts injection gate based on submit_feedback signals)
+ORMAH_GATE_TUNING_ENABLED=true
+ORMAH_GATE_MIN=0.30
+ORMAH_GATE_MAX=0.80
+ORMAH_GATE_LEARNING_RATE=0.02
 
 # FSRS decay
 ORMAH_FSRS_INITIAL_STABILITY=1.0

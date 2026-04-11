@@ -7,7 +7,8 @@ import logging
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_conflict_type
-from ormah.models.node import Connection, EdgeType
+from ormah.models.node import Connection, EdgeType, NodeType, Tier
+from ormah.models.node import CreateNodeRequest
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,38 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
         return []
 
 
+def _store_conflict_node(engine, node_a: dict, node_b: dict, explanation: str) -> None:
+    """Create a queryable observation node surfacing a tension conflict."""
+    try:
+        title_a = (node_a.get("title") or node_a["id"][:8])[:50]
+        title_b = (node_b.get("title") or node_b["id"][:8])[:50]
+        space = node_a.get("space") or None
+
+        content = (
+            f"{explanation}\n\n"
+            f"Node A: {title_a} (id: {node_a['id']})\n"
+            f"Node B: {title_b} (id: {node_b['id']})\n\n"
+            f"Resolve by marking the outdated node with `mark_outdated`."
+        )
+
+        req = CreateNodeRequest(
+            type=NodeType.observation,
+            tier=Tier.working,
+            title=f"Conflict: {title_a} vs {title_b}",
+            content=content,
+            tags=["conflict", "needs-review"],
+            space=space,
+            source="conflict-detector",
+            connections=[
+                Connection(target=node_a["id"], edge=EdgeType.contradicts, weight=0.9),
+                Connection(target=node_b["id"], edge=EdgeType.contradicts, weight=0.9),
+            ],
+        )
+        engine.remember(req, agent_id="conflict-detector")
+    except Exception as e:
+        logger.debug("Failed to store conflict node: %s", e)
+
+
 def run_conflict_detection(engine) -> None:
     """Find potentially contradicting nodes and create edges."""
     try:
@@ -257,6 +290,9 @@ def run_conflict_detection(engine) -> None:
                     )
                     edge_type_str = "contradicts"
                     source_id, target_id = node_a["id"], node_b["id"]
+
+                    # Surface tension conflicts as queryable observation nodes
+                    _store_conflict_node(engine, node_a, node_b, explanation)
 
             md_conn = Connection(
                 target=target_id,
