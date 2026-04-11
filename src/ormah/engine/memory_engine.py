@@ -462,6 +462,15 @@ class MemoryEngine:
             formatted += f"\nAuto-linked to {len(auto_links)} related memories:"
             for link_id, link_title, sim in auto_links:
                 formatted += f"\n  → {link_title} ({sim:.0%} similar)"
+
+        # Pre-storage contradiction check (inline, rule-based — no LLM)
+        if getattr(self.settings, "contradiction_prestorage_enabled", True):
+            conflicts = self._check_contradiction_prestorage(node)
+            if conflicts:
+                formatted += "\n⚠ Possible contradiction with existing memories:"
+                for cid, ctitle, csim in conflicts:
+                    formatted += f"\n  · {ctitle} (id: {cid[:8]}, {csim:.0%} similar) — review with recall(node_id='{cid[:8]}')"
+
         return node.id, formatted
 
     def _encode_feedback_prompt_vec(self, prompt_text: str) -> bytes:
@@ -1944,6 +1953,69 @@ class MemoryEngine:
 
         except Exception as e:
             logger.debug("Auto-link on remember failed: %s", e)
+            return []
+
+    def _check_contradiction_prestorage(
+        self,
+        node: MemoryNode,
+        similarity_threshold: float | None = None,
+        top_k: int = 5,
+    ) -> list[tuple[str, str, float]]:
+        """Return a list of (node_id, title, similarity) for existing nodes that
+        may contradict the incoming node.
+
+        Only nodes in the same space (or both space-less) are considered — cross-
+        space matches are never flagged. The threshold defaults to
+        ``settings.contradiction_prestorage_threshold`` (default 0.88).
+
+        Entirely rule-based (no LLM call) so it stays fast at store-time. The
+        background conflict_detector handles deeper LLM-powered checks later.
+        """
+        threshold = similarity_threshold
+        if threshold is None:
+            threshold = getattr(
+                self.settings, "contradiction_prestorage_threshold", 0.88
+            )
+
+        try:
+            from ormah.embeddings.vector_store import VectorStore
+            from ormah.embeddings.encoder import get_encoder
+
+            encoder = get_encoder(self.settings)
+            vec_store = VectorStore(self.db)
+
+            text = _embedding_text(node.title, node.content, self.settings.embedding_max_content_chars)
+            if not text:
+                return []
+
+            query_vec = encoder.encode(text)
+            similar = vec_store.search(query_vec, limit=top_k + 1)
+
+            flagged = []
+            node_space = node.space or ""
+
+            for match in similar:
+                if match["id"] == node.id:
+                    continue
+                if match["similarity"] < threshold:
+                    continue
+
+                other = self.graph.get_node(match["id"])
+                if other is None:
+                    continue
+
+                # Only flag same-space pairs
+                other_space = (other.get("space") or "")
+                if other_space != node_space:
+                    continue
+
+                title = other.get("title") or (other.get("content") or "")[:50]
+                flagged.append((match["id"], title, match["similarity"]))
+
+            return flagged
+
+        except Exception as e:
+            logger.debug("Pre-storage contradiction check failed: %s", e)
             return []
 
     # --- Provenance ---

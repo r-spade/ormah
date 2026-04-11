@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     # Auto-merge
     auto_merge_threshold: float = 0.85
 
+    # Pre-storage contradiction check (inline, rule-based — no LLM)
+    contradiction_prestorage_enabled: bool = True
+    contradiction_prestorage_threshold: float = 0.88  # cosine similarity to flag
+
     # Importance scoring weights (3 dynamic signals)
     importance_access_weight: float = 0.34
     importance_edge_weight: float = 0.33
