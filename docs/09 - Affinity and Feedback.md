@@ -141,9 +141,44 @@ flowchart LR
     SEARCH[hybrid search] --> RERANK[rerank]
     RERANK --> AFF[affinity boost]
     AFF --> GATE[injection gate]
+    GATE --> TUNE[gate tuning]
 ```
 
 It can rescue a borderline candidate or slightly suppress a noisy one, but it is capped.
+
+## Feedback-driven Gate Tuning
+
+Beyond per-node affinity boosts, each `submit_feedback` call also nudges the **global injection gate** — the minimum blended score required for any memory to be whispered.
+
+The update rule is proportional:
+
+```python
+if signal > 0:
+    new_gate = current + lr * (gate_max - current)   # pull toward gate_max
+else:
+    new_gate = current - lr * (current - gate_min)   # pull toward gate_min
+
+new_gate = clamp(new_gate, gate_min, gate_max)
+```
+
+This means:
+
+- Accepting whispers (`signal=+1`) gradually raises the gate, making future whispers more selective.
+- Rejecting whispers (`signal=-1`) gradually lowers it, widening the window.
+- The gate converges toward the implicit "right level" the user's feedback reveals over time.
+
+The gate value is persisted in the `gate_state` table and survives server restarts. It replaces the static `ORMAH_WHISPER_INJECTION_GATE` config value at runtime.
+
+### Gate tuning config
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `ORMAH_GATE_TUNING_ENABLED` | `true` | Enable/disable gate tuning. `false` falls back to static config. |
+| `ORMAH_GATE_MIN` | `0.30` | Floor — gate never goes below this |
+| `ORMAH_GATE_MAX` | `0.80` | Ceiling — gate never goes above this |
+| `ORMAH_GATE_LEARNING_RATE` | `0.02` | Step size per feedback signal |
+
+The initial gate value is `ORMAH_WHISPER_INJECTION_GATE` (default `0.50`) until the first feedback signal shifts it.
 
 ## Review Loop
 
