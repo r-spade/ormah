@@ -104,6 +104,65 @@ async def delete_node(node_id: str, request: Request):
     return TextResponse(text=text, node_id=node_id)
 
 
+@router.get("/recall/{node_id}/history", response_model=TextResponse)
+async def recall_history(node_id: str, request: Request):
+    """Get the full edit history for a specific memory."""
+    engine = request.app.state.engine
+    text = engine.recall_history(node_id)
+    return TextResponse(text=text, node_id=node_id)
+
+
+class PromoteRequest(BaseModel):
+    tier: str = "core"
+
+
+@router.post("/promote/{node_id}", response_model=TextResponse)
+async def promote_node(node_id: str, request: Request, body: PromoteRequest | None = None):
+    """Promote a memory to a higher tier (default: core)."""
+    from ormah.models.node import Tier
+
+    target_tier_str = (body.tier if body else None) or "core"
+    try:
+        target_tier = Tier(target_tier_str)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid tier: {target_tier_str!r}")
+
+    engine = request.app.state.engine
+    node = engine.graph.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    tier_order = [Tier.archival, Tier.working, Tier.core]
+    current_tier = Tier(node["tier"])
+    current_idx = tier_order.index(current_tier)
+    target_idx = tier_order.index(target_tier)
+
+    if target_idx <= current_idx:
+        return TextResponse(
+            text=f"Memory is already at {current_tier.value} tier — no promotion needed.",
+            node_id=node_id,
+        )
+
+    text = engine.update_node(node_id, UpdateNodeRequest(tier=target_tier))
+    if text is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    # Enforce core cap after promotion
+    if target_tier == Tier.core:
+        protected = {engine.user_node_id} if engine.user_node_id else set()
+        core_nodes = [
+            engine.file_store.load(r["id"])
+            for r in engine.graph.get_nodes_by_tier("core")
+        ]
+        core_nodes = [n for n in core_nodes if n is not None]
+        demoted = engine.tier_manager.enforce_core_cap(core_nodes, protected_ids=protected)
+        for d in demoted:
+            path = engine.file_store.save(d)
+            engine.builder.index_single(path)
+
+    return TextResponse(text=text, node_id=node_id)
+
+
 @router.post("/connect", response_model=TextResponse)
 async def connect(req: ConnectRequest, request: Request):
     """Create a connection between two memories."""

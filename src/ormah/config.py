@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     session_watcher_debounce_seconds: float = 60.0
     session_watcher_min_turns: int = 5
     session_watcher_lookback_hours: int = 72
+    session_summary_enabled: bool = True
+    session_summary_min_turns: int = 3  # skip summary for trivial sessions
 
     # Tier limits
     core_memory_cap: int = 50
@@ -115,6 +117,10 @@ class Settings(BaseSettings):
     # Auto-merge
     auto_merge_threshold: float = 0.85
 
+    # Auto-promotion: promote working nodes with positive recall hits across N sessions
+    recall_promotion_sessions: int = 3   # min distinct sessions with positive signal
+    recall_promotion_interval_minutes: int = 60
+
     # Importance scoring weights (3 dynamic signals)
     importance_access_weight: float = 0.34
     importance_edge_weight: float = 0.33
@@ -130,6 +136,11 @@ class Settings(BaseSettings):
 
     # Decay: skip nodes above this importance
     decay_importance_threshold: float = 0.5
+
+    # Proactive decay alerts (warn before demotion)
+    decay_alert_enabled: bool = True
+    decay_alert_threshold: float = 0.40   # alert when R drops below this (above fsrs_decay_threshold)
+    decay_alert_refire_days: int = 7      # suppress repeat alerts for this many days
 
     # Whisper-out (involuntary storage on compaction / session end)
     whisper_out_enabled: bool = True
@@ -163,6 +174,12 @@ class Settings(BaseSettings):
 
     # Whisper injection gate (minimum blended score to justify injection)
     whisper_injection_gate: float = 0.50
+
+    # Feedback-driven gate tuning
+    gate_tuning_enabled: bool = True
+    gate_min: float = 0.30
+    gate_max: float = 0.80
+    gate_learning_rate: float = 0.02
 
     # Affinity boost (adaptive feedback loop)
     affinity_similarity_threshold: float = 0.70

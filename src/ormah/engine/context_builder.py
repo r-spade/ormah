@@ -20,6 +20,13 @@ _WHISPER_FRAMING = (
 )
 
 
+_DECAY_ALERT_FRAMING = (
+    "\n\n## Ormah: memory fading\n"
+    "The following {count} {word} {verb} low retrievability and {may} be demoted to archival soon. "
+    "Recalling them will reset their stability.\n\n"
+    "{items}"
+)
+
 _REVIEW_FRAMING = (
     "\n\n## Ormah: one thing to review when you get a chance\n"
     "In a recent session, the user was working on:\n"
@@ -713,6 +720,39 @@ class ContextBuilder:
                     result = result + review_block
             except Exception as e:
                 logger.warning("Review mechanism failed: %s", e)
+
+        # Decay alerts: surface fading memories once per session (first message only).
+        if recent_prompts is None and self.engine is not None:
+            settings = getattr(self.engine, "settings", None)
+            if settings and getattr(settings, "decay_alert_enabled", True):
+                try:
+                    alert_rows = self.graph.conn.execute(
+                        """
+                        SELECT dal.id, dal.node_id, dal.retrievability, dal.tier,
+                               n.title, n.type
+                        FROM decay_alert_log dal
+                        JOIN nodes n ON n.id = dal.node_id
+                        WHERE dal.acknowledged = 0
+                        ORDER BY dal.retrievability ASC
+                        LIMIT 5
+                        """
+                    ).fetchall()
+                    if alert_rows:
+                        count = len(alert_rows)
+                        word = "memory" if count == 1 else "memories"
+                        verb = "has" if count == 1 else "have"
+                        may = "may" if alert_rows[0]["tier"] == "core" else "will"
+                        items = "\n".join(
+                            f"- **{r['title'] or r['node_id'][:8]}** "
+                            f"[{r['type']}/{r['tier']}] R={r['retrievability']:.2f} "
+                            f"(id: {r['node_id'][:8]}...)"
+                            for r in alert_rows
+                        )
+                        result = result + _DECAY_ALERT_FRAMING.format(
+                            count=count, word=word, verb=verb, may=may, items=items
+                        )
+                except Exception as e:
+                    logger.warning("Decay alert surfacing failed: %s", e)
 
         if _return_debug:
             return result, _injected_ids
