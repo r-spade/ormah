@@ -19,6 +19,29 @@ _WHISPER_FRAMING = (
     "to get the full content and related memories."
 )
 
+_WHISPER_FRAMING_COMPACT = "# Ormah whispers\nTop memories (full). Rest: titles only. Use recall(node_id) for details."
+
+# Compact mode: abbreviated type labels to reduce token overhead.
+_TYPE_ABBREV: dict[str, str] = {
+    "fact": "F",
+    "concept": "C",
+    "decision": "D",
+    "preference": "P",
+    "observation": "O",
+    "event": "E",
+    "person": "Prs",
+    "project": "Prj",
+    "procedure": "Proc",
+    "goal": "G",
+}
+
+
+_DECAY_ALERT_FRAMING = (
+    "\n\n## Ormah: memory fading\n"
+    "The following {count} {word} {verb} low retrievability and {may} be demoted to archival soon. "
+    "Recalling them will reset their stability.\n\n"
+    "{items}"
+)
 
 _REVIEW_FRAMING = (
     "\n\n## Ormah: one thing to review when you get a chance\n"
@@ -234,6 +257,8 @@ class ContextBuilder:
         topic_shift_threshold: float = 0.75,
         injection_gate: float = 0.55,
         session_id: str | None = None,
+        compact_mode: bool = False,
+        compact_content_chars: int = 200,
         _return_debug: bool = False,
     ) -> str | tuple[str, list[str]]:
         """Build compact whisper context for involuntary recall injection.
@@ -593,14 +618,21 @@ class ContextBuilder:
             node_type = node.get("type", "fact")
             id_suffix = f" (id: {short_id})" if short_id else ""
 
-            lines.append(f"- **[{node_type}]** {title}{id_suffix}")
+            if compact_mode:
+                type_label = _TYPE_ABBREV.get(node_type, node_type[:1].upper())
+                lines.append(f"- **[{type_label}]** {title}{id_suffix}")
+            else:
+                lines.append(f"- **[{node_type}]** {title}{id_suffix}")
 
             if i < full_content_count:
                 content = node.get("content", "").strip()
                 if content and content != title:
+                    if compact_mode:
+                        content = _truncate_at_word_boundary(content, max_len=compact_content_chars)
                     lines.append(f"  {content}")
 
-            lines.append("")
+            if not compact_mode:
+                lines.append("")
 
         body = "\n".join(lines).rstrip()
 
@@ -641,7 +673,8 @@ class ContextBuilder:
         if not body:
             result = ""
         else:
-            result = _WHISPER_FRAMING + "\n\n" + body
+            framing = _WHISPER_FRAMING_COMPACT if compact_mode else _WHISPER_FRAMING
+            result = framing + "\n\n" + body
 
         logger.info(
             "Whisper diagnostics: prompt=%r intent=%s identity_only=%s temporal=%s "
@@ -713,6 +746,39 @@ class ContextBuilder:
                     result = result + review_block
             except Exception as e:
                 logger.warning("Review mechanism failed: %s", e)
+
+        # Decay alerts: surface fading memories once per session (first message only).
+        if recent_prompts is None and self.engine is not None:
+            settings = getattr(self.engine, "settings", None)
+            if settings and getattr(settings, "decay_alert_enabled", True):
+                try:
+                    alert_rows = self.graph.conn.execute(
+                        """
+                        SELECT dal.id, dal.node_id, dal.retrievability, dal.tier,
+                               n.title, n.type
+                        FROM decay_alert_log dal
+                        JOIN nodes n ON n.id = dal.node_id
+                        WHERE dal.acknowledged = 0
+                        ORDER BY dal.retrievability ASC
+                        LIMIT 5
+                        """
+                    ).fetchall()
+                    if alert_rows:
+                        count = len(alert_rows)
+                        word = "memory" if count == 1 else "memories"
+                        verb = "has" if count == 1 else "have"
+                        may = "may" if alert_rows[0]["tier"] == "core" else "will"
+                        items = "\n".join(
+                            f"- **{r['title'] or r['node_id'][:8]}** "
+                            f"[{r['type']}/{r['tier']}] R={r['retrievability']:.2f} "
+                            f"(id: {r['node_id'][:8]}...)"
+                            for r in alert_rows
+                        )
+                        result = result + _DECAY_ALERT_FRAMING.format(
+                            count=count, word=word, verb=verb, may=may, items=items
+                        )
+                except Exception as e:
+                    logger.warning("Decay alert surfacing failed: %s", e)
 
         if _return_debug:
             return result, _injected_ids

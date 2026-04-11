@@ -1,7 +1,7 @@
 """Canonical tool definitions shared across MCP and OpenAI adapters.
 
-TOOLS: The core set of tools exposed via MCP to AI agents (6 tools).
-ADMIN_TOOLS: Tools for human administration via CLI/API only (7 tools).
+TOOLS: The core set of tools exposed via MCP to AI agents (10 tools).
+ADMIN_TOOLS: Tools for human administration via CLI/API only (4 tools).
 ALL_TOOLS: Combined list for adapters that want the full set.
 """
 
@@ -286,16 +286,12 @@ TOOLS = [
             },
         },
     },
-]
-
-# Admin tools — available via CLI and HTTP API but not exposed to AI agents via MCP.
-# These are for human review and administration of the memory system.
-ADMIN_TOOLS = [
     {
         "name": "update_memory",
         "description": (
-            "Update an existing memory's content, type, tier, or tags. "
-            "Use this to correct or enhance stored memories."
+            "Correct or enhance an existing memory. Use this when you find that a stored memory "
+            "has wrong content, an outdated type/tier, or needs better tags. "
+            "Only pass the fields you want to change — omitted fields are left unchanged."
         ),
         "parameters": {
             "type": "object",
@@ -304,16 +300,42 @@ ADMIN_TOOLS = [
                     "type": "string",
                     "description": "The UUID of the memory to update.",
                 },
-                "content": {"type": "string", "description": "New content."},
-                "type": {"type": "string", "description": "New type."},
-                "tier": {"type": "string", "description": "New tier."},
+                "content": {
+                    "type": "string",
+                    "description": "Corrected or updated content.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "New short title.",
+                },
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "fact", "decision", "preference", "event", "person",
+                        "project", "concept", "procedure", "goal", "observation",
+                    ],
+                    "description": "New memory type.",
+                },
+                "tier": {
+                    "type": "string",
+                    "enum": ["core", "working", "archival"],
+                    "description": "New importance tier. Use 'core' to pin permanently, 'archival' to deprioritize.",
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "Updated confidence 0.0–1.0.",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "New tags.",
+                    "description": "Replacement tag list (replaces existing tags entirely).",
                 },
-                "title": {"type": "string", "description": "New title."},
-                "space": {"type": "string", "description": "New space/project scope. Use null for global memories."},
+                "space": {
+                    "type": "string",
+                    "description": "New space/project scope. Use null to make the memory global.",
+                },
             },
             "required": ["node_id"],
         },
@@ -321,8 +343,10 @@ ADMIN_TOOLS = [
     {
         "name": "connect_memories",
         "description": (
-            "Create a typed connection between two memories. "
-            "Use this to build relationships in the knowledge graph."
+            "Create a typed edge between two memories. Use this when you recognise a meaningful "
+            "relationship between nodes — e.g. one decision supports another, a fact is part of a "
+            "concept, or two observations contradict each other. "
+            "Background auto-linker runs periodically, but call this for immediate graph updates."
         ),
         "parameters": {
             "type": "object",
@@ -333,20 +357,68 @@ ADMIN_TOOLS = [
                     "type": "string",
                     "enum": [
                         "related_to", "supports", "contradicts", "part_of",
-                        "derived_from", "depends_on", "defines",
+                        "derived_from", "depends_on", "defines", "evolved_from",
                     ],
-                    "description": "The type of connection.",
+                    "description": "The relationship type.",
                     "default": "related_to",
                 },
                 "weight": {
                     "type": "number",
-                    "description": "Connection strength 0.0-1.0.",
+                    "description": "Connection strength 0.0–1.0.",
                     "default": 0.5,
                 },
             },
             "required": ["source_id", "target_id"],
         },
     },
+    {
+        "name": "promote_memory",
+        "description": (
+            "Promote a memory to core tier, marking it as permanently important. "
+            "Use this when you discover a memory that should always be accessible — "
+            "key decisions, identity facts, architectural constants. "
+            "Core memories are never decayed and always surface in whisper context."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "UUID of the memory to promote.",
+                },
+                "tier": {
+                    "type": "string",
+                    "enum": ["core", "working"],
+                    "description": "Target tier (default: core). Use 'working' to un-archive a demoted memory.",
+                    "default": "core",
+                },
+            },
+            "required": ["node_id"],
+        },
+    },
+    {
+        "name": "recall_history",
+        "description": (
+            "Show the full edit history for a memory. Returns a chronological changelog "
+            "of all updates with field-by-field old→new diffs. "
+            "Use this to understand how a memory has changed over time."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "The UUID of the memory to show history for.",
+                },
+            },
+            "required": ["node_id"],
+        },
+    },
+]
+
+# Admin tools — available via CLI and HTTP API but not exposed to AI agents via MCP.
+# These are for human review and administration of the memory system.
+ADMIN_TOOLS = [
     {
         "name": "list_proposals",
         "description": (
