@@ -943,6 +943,8 @@ class MemoryEngine:
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
             session_id=session_id,
+            compact_mode=self.settings.whisper_compact_mode,
+            compact_content_chars=self.settings.whisper_compact_content_chars,
             _return_debug=_return_debug,
         )
         if not onboarding:

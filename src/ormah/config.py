@@ -194,6 +194,10 @@ class Settings(BaseSettings):
     # Consolidation
     consolidation_interval_minutes: int = 1440
 
+    # Whisper compact mode (token-compressed injection)
+    whisper_compact_mode: bool = False
+    whisper_compact_content_chars: int = 200  # max content chars per full-content node
+
     # Claude-in-the-loop maintenance
     claude_maintenance_enabled: bool = False
     claude_maintenance_interval_hours: int = 24  # hours between maintenance runs

@@ -19,6 +19,22 @@ _WHISPER_FRAMING = (
     "to get the full content and related memories."
 )
 
+_WHISPER_FRAMING_COMPACT = "# Ormah whispers\nTop memories (full). Rest: titles only. Use recall(node_id) for details."
+
+# Compact mode: abbreviated type labels to reduce token overhead.
+_TYPE_ABBREV: dict[str, str] = {
+    "fact": "F",
+    "concept": "C",
+    "decision": "D",
+    "preference": "P",
+    "observation": "O",
+    "event": "E",
+    "person": "Prs",
+    "project": "Prj",
+    "procedure": "Proc",
+    "goal": "G",
+}
+
 
 _DECAY_ALERT_FRAMING = (
     "\n\n## Ormah: memory fading\n"
@@ -241,6 +257,8 @@ class ContextBuilder:
         topic_shift_threshold: float = 0.75,
         injection_gate: float = 0.55,
         session_id: str | None = None,
+        compact_mode: bool = False,
+        compact_content_chars: int = 200,
         _return_debug: bool = False,
     ) -> str | tuple[str, list[str]]:
         """Build compact whisper context for involuntary recall injection.
@@ -600,14 +618,21 @@ class ContextBuilder:
             node_type = node.get("type", "fact")
             id_suffix = f" (id: {short_id})" if short_id else ""
 
-            lines.append(f"- **[{node_type}]** {title}{id_suffix}")
+            if compact_mode:
+                type_label = _TYPE_ABBREV.get(node_type, node_type[:1].upper())
+                lines.append(f"- **[{type_label}]** {title}{id_suffix}")
+            else:
+                lines.append(f"- **[{node_type}]** {title}{id_suffix}")
 
             if i < full_content_count:
                 content = node.get("content", "").strip()
                 if content and content != title:
+                    if compact_mode:
+                        content = _truncate_at_word_boundary(content, max_len=compact_content_chars)
                     lines.append(f"  {content}")
 
-            lines.append("")
+            if not compact_mode:
+                lines.append("")
 
         body = "\n".join(lines).rstrip()
 
@@ -648,7 +673,8 @@ class ContextBuilder:
         if not body:
             result = ""
         else:
-            result = _WHISPER_FRAMING + "\n\n" + body
+            framing = _WHISPER_FRAMING_COMPACT if compact_mode else _WHISPER_FRAMING
+            result = framing + "\n\n" + body
 
         logger.info(
             "Whisper diagnostics: prompt=%r intent=%s identity_only=%s temporal=%s "
