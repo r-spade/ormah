@@ -123,6 +123,17 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.co_change_mapper import run_co_change_mapping
+
+    scheduler.add_job(
+        tracked(tracker, "co_change_mapper", run_co_change_mapping, engine),
+        "interval",
+        hours=s.co_change_mapping_interval_hours,
+        id="co_change_mapper",
+        name="Co-change mapper",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     scheduler.start()
     logger.info("Background scheduler started with %d jobs", len(scheduler.get_jobs()))
     return scheduler, tracker

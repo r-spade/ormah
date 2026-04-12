@@ -206,6 +206,12 @@ class Settings(BaseSettings):
     # Consolidation
     consolidation_interval_minutes: int = 1440
 
+    # Co-change mapping (git commit co-occurrence → related_to edges)
+    co_change_mapping_enabled: bool = True
+    co_change_mapping_interval_hours: int = 24
+    co_change_min_commits: int = 2       # min shared commits to create an edge
+    co_change_lookback_commits: int = 500  # how many commits to parse
+
     # Whisper compact mode (token-compressed injection)
     whisper_compact_mode: bool = False
     whisper_compact_content_chars: int = 200  # max content chars per full-content node
