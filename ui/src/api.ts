@@ -1,4 +1,4 @@
-import type { GraphData, InsightsData, MemoryNode, NodeDetail, Proposal } from "./types";
+import type { BlindSpotsData, GraphData, InsightsData, MemoryNode, NodeDetail, Proposal, RecallDebugData } from "./types";
 
 const BASE = "";
 
@@ -47,6 +47,14 @@ export function fetchInsights(): Promise<InsightsData> {
 
 export function fetchStats(): Promise<Record<string, unknown>> {
   return get("/admin/stats");
+}
+
+export function fetchBlindSpots(): Promise<BlindSpotsData> {
+  return get("/ui/blind-spots");
+}
+
+export function fetchRecallDebug(limit = 30): Promise<RecallDebugData> {
+  return get(`/ui/recall-debug?limit=${limit}`);
 }
 
 export interface AdminTask {

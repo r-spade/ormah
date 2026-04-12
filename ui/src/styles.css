@@ -962,6 +962,151 @@ body {
   font-size: 14px;
 }
 
+/* ---- Blind Spots ---- */
+
+.insights-subsection-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.blindspot-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.blindspot-type-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-bright);
+}
+
+.blindspot-count {
+  color: var(--text-muted);
+}
+
+.blindspot-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.blindspot-row:last-child {
+  border-bottom: none;
+}
+
+.blindspot-row.clickable {
+  cursor: pointer;
+}
+
+.blindspot-row.clickable:hover .blindspot-title {
+  color: var(--accent);
+}
+
+.blindspot-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-bright);
+}
+
+.blindspot-space {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-bright);
+}
+
+.blindspot-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* ---- Recall Debug ---- */
+
+.recall-debug-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.recall-debug-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.recall-debug-table th {
+  text-align: left;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.recall-debug-table td {
+  padding: 5px 8px;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+}
+
+.recall-row {
+  cursor: pointer;
+}
+
+.recall-row:hover td {
+  background: var(--hover);
+}
+
+.recall-row:last-child td {
+  border-bottom: none;
+}
+
+.recall-injected {
+  border-left: 2px solid var(--edge-supports, #4a9);
+}
+
+.recall-skipped {
+  opacity: 0.6;
+}
+
+.recall-time {
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.recall-node {
+  color: var(--text-bright);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recall-type {
+  color: var(--text-muted);
+}
+
+.recall-score {
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.recall-injected-cell {
+  text-align: center;
+  color: var(--text-muted);
+}
+
 /* ---- Scrollbar ---- */
 ::-webkit-scrollbar {
   width: 6px;
