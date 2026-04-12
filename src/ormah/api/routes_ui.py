@@ -140,6 +140,97 @@ async def get_insights(request: Request):
     return {"evolutions": evolutions, "tensions": tensions}
 
 
+@router.get("/blind-spots")
+async def get_blind_spots(request: Request):
+    """Surface memory coverage gaps: isolated nodes, sparse spaces, uncovered types."""
+    engine = request.app.state.engine
+    conn = engine.db.conn
+
+    # Nodes with zero edges (completely isolated)
+    isolated = conn.execute(
+        """
+        SELECT n.id, n.title, n.type, n.tier, n.space, n.created
+        FROM nodes n
+        WHERE NOT EXISTS (
+            SELECT 1 FROM edges e
+            WHERE e.source_id = n.id OR e.target_id = n.id
+        )
+        ORDER BY n.created DESC
+        LIMIT 20
+        """
+    ).fetchall()
+
+    # Spaces with node counts (NULL space = global)
+    sparse_spaces = conn.execute(
+        """
+        SELECT
+            COALESCE(space, '') AS space,
+            COUNT(*) AS node_count,
+            (
+                SELECT COUNT(*) FROM edges e
+                JOIN nodes n2 ON (n2.id = e.source_id OR n2.id = e.target_id)
+                WHERE COALESCE(n2.space, '') = COALESCE(nodes.space, '')
+            ) AS edge_count
+        FROM nodes
+        GROUP BY space
+        HAVING node_count < 5
+        ORDER BY node_count ASC
+        LIMIT 10
+        """
+    ).fetchall()
+
+    # Node types that have no core-tier members
+    all_types = [
+        "fact", "decision", "preference", "event", "person",
+        "project", "concept", "procedure", "goal", "observation",
+    ]
+    type_rows = conn.execute(
+        """
+        SELECT type, COUNT(*) AS total,
+               SUM(CASE WHEN tier = 'core' THEN 1 ELSE 0 END) AS core_count
+        FROM nodes
+        GROUP BY type
+        """
+    ).fetchall()
+    type_map = {r["type"]: dict(r) for r in type_rows}
+    uncovered_types = [
+        {"type": t, "total": type_map.get(t, {}).get("total", 0),
+         "core_count": type_map.get(t, {}).get("core_count", 0)}
+        for t in all_types
+        if type_map.get(t, {}).get("core_count", 0) == 0
+        and type_map.get(t, {}).get("total", 0) > 0
+    ]
+
+    return {
+        "isolated_nodes": [dict(r) for r in isolated],
+        "sparse_spaces": [dict(r) for r in sparse_spaces],
+        "uncovered_types": uncovered_types,
+    }
+
+
+@router.get("/recall-debug")
+async def get_recall_debug(request: Request, limit: int = 30):
+    """Return recent whisper injection log for debugging recall behaviour."""
+    engine = request.app.state.engine
+    conn = engine.db.conn
+
+    rows = conn.execute(
+        """
+        SELECT
+            wl.id, wl.session_id, wl.space, wl.prompt_text,
+            wl.node_id, wl.score, wl.was_injected, wl.logged_at,
+            n.title AS node_title, n.type AS node_type
+        FROM whisper_log wl
+        LEFT JOIN nodes n ON n.id = wl.node_id
+        ORDER BY wl.logged_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    return {"entries": [dict(r) for r in rows]}
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket for real-time graph updates."""

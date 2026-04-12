@@ -103,12 +103,45 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.recall_promoter import run_recall_promotion
+
+    scheduler.add_job(
+        tracked(tracker, "recall_promoter", run_recall_promotion, engine),
+        "interval",
+        minutes=s.recall_promotion_interval_minutes,
+        id="recall_promoter",
+        name="Recall promoter",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     scheduler.add_job(
         tracked(tracker, "index_updater", engine.builder.incremental_update),
         "interval",
         minutes=1,
         id="index_updater",
         name="Index updater",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
+    from ormah.background.decision_drift_detector import run_decision_drift_detection
+
+    scheduler.add_job(
+        tracked(tracker, "decision_drift_detector", run_decision_drift_detection, engine),
+        "interval",
+        hours=s.decision_drift_interval_hours,
+        id="decision_drift_detector",
+        name="Decision drift detector",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
+    from ormah.background.co_change_mapper import run_co_change_mapping
+
+    scheduler.add_job(
+        tracked(tracker, "co_change_mapper", run_co_change_mapping, engine),
+        "interval",
+        hours=s.co_change_mapping_interval_hours,
+        id="co_change_mapper",
+        name="Co-change mapper",
         misfire_grace_time=_MISFIRE_GRACE,
     )
 

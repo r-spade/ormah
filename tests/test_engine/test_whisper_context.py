@@ -2271,3 +2271,150 @@ class TestWhisperFlatRankedDisplay:
 
         assert "The most relevant memories are shown in full" in result
         assert "use recall with its node ID" in result
+
+
+class TestWhisperCompactMode:
+    """Compact mode emits abbreviated type labels, truncated content, and shorter framing."""
+
+    def _make_node_long(self, node_id, title, node_type="fact"):
+        node = _make_node_dict(node_id, title, node_type=node_type)
+        node["content"] = "A" * 500  # 500-char content
+        return node
+
+    def test_compact_framing_used(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        mock_engine.recall_search_structured.return_value = [
+            {"node": _make_node_dict("n1", "Alpha"), "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="test", injection_gate=0.0, compact_mode=True
+        )
+
+        assert "Top memories (full)" in result
+        # Normal framing should not appear
+        assert "The most relevant memories are shown in full" not in result
+
+    def test_normal_framing_when_compact_off(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        mock_engine.recall_search_structured.return_value = [
+            {"node": _make_node_dict("n1", "Alpha"), "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="test", injection_gate=0.0, compact_mode=False
+        )
+
+        assert "The most relevant memories are shown in full" in result
+
+    def test_type_labels_abbreviated(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict("n1", "A fact node", node_type="fact"),
+            _make_node_dict("n2", "A concept node", node_type="concept"),
+            _make_node_dict("n3", "A decision node", node_type="decision"),
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+            {"node": nodes[2], "score": 0.7, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="test", injection_gate=0.0, compact_mode=True, full_content_count=0
+        )
+
+        assert "[F]" in result
+        assert "[C]" in result
+        assert "[D]" in result
+        # Full type names should not appear
+        assert "[fact]" not in result
+        assert "[concept]" not in result
+        assert "[decision]" not in result
+
+    def test_content_truncated_in_compact_mode(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = self._make_node_long("n1", "Long content node")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="test",
+            injection_gate=0.0,
+            compact_mode=True,
+            compact_content_chars=100,
+            full_content_count=1,
+        )
+
+        # Content should be truncated to ~100 chars (with ellipsis)
+        assert "…" in result
+        # Full 500-char string should not appear
+        assert "A" * 101 not in result
+
+    def test_content_not_truncated_when_compact_off(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = self._make_node_long("n1", "Long content node")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="test",
+            injection_gate=0.0,
+            compact_mode=False,
+            full_content_count=1,
+        )
+
+        # Full content should appear unchanged
+        assert "A" * 500 in result
+
+    def test_no_blank_lines_between_items_in_compact_mode(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict("n1", "First"),
+            _make_node_dict("n2", "Second"),
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="test", injection_gate=0.0, compact_mode=True, full_content_count=0
+        )
+
+        # Items are separated by single newline only (no blank lines between them)
+        assert "First (id: n1)\n- " in result
+
+    def test_blank_lines_present_in_normal_mode(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict("n1", "First"),
+            _make_node_dict("n2", "Second"),
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="test", injection_gate=0.0, compact_mode=False, full_content_count=0
+        )
+
+        # Normal mode has blank separator lines between items
+        assert "First (id: n1)\n\n- " in result

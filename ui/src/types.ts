@@ -118,3 +118,49 @@ export interface SearchResult {
   source: string;
   formatted: string;
 }
+
+// Blind spots
+export interface IsolatedNode {
+  id: string;
+  title: string | null;
+  type: NodeType;
+  tier: Tier;
+  space: string | null;
+  created: string;
+}
+
+export interface SparseSpace {
+  space: string;
+  node_count: number;
+  edge_count: number;
+}
+
+export interface UncoveredType {
+  type: NodeType;
+  total: number;
+  core_count: number;
+}
+
+export interface BlindSpotsData {
+  isolated_nodes: IsolatedNode[];
+  sparse_spaces: SparseSpace[];
+  uncovered_types: UncoveredType[];
+}
+
+// Recall debug
+export interface RecallDebugEntry {
+  id: number;
+  session_id: string;
+  space: string | null;
+  prompt_text: string | null;
+  node_id: string;
+  node_title: string | null;
+  node_type: NodeType | null;
+  score: number;
+  was_injected: number;
+  logged_at: string;
+}
+
+export interface RecallDebugData {
+  entries: RecallDebugEntry[];
+}
