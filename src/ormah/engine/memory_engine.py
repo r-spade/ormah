@@ -1565,6 +1565,19 @@ class MemoryEngine:
             parts.append(f"{len(consolidation_clusters)} cluster(s)")
         summary = ", ".join(parts) if parts else "nothing to process"
 
+        # Record attempt timestamp at Phase 1 so that maintenance_due is silenced
+        # for the full interval even when Phase 2 never runs (e.g. MCP unavailable).
+        # apply_maintenance_results will overwrite this with the completion time.
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
+                    (now_iso,),
+                )
+        except Exception as exc:
+            logger.warning("get_maintenance_batches: failed to record attempt timestamp: %s", exc)
+
         return {
             "link_candidates": [_norm_pair(c) for c in link_candidates],
             "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
