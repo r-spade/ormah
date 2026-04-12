@@ -123,6 +123,17 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.decision_drift_detector import run_decision_drift_detection
+
+    scheduler.add_job(
+        tracked(tracker, "decision_drift_detector", run_decision_drift_detection, engine),
+        "interval",
+        hours=s.decision_drift_interval_hours,
+        id="decision_drift_detector",
+        name="Decision drift detector",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     from ormah.background.co_change_mapper import run_co_change_mapping
 
     scheduler.add_job(

@@ -206,6 +206,12 @@ class Settings(BaseSettings):
     # Consolidation
     consolidation_interval_minutes: int = 1440
 
+    # Decision drift detection (flag stale [decision] nodes when associated code churns)
+    decision_drift_enabled: bool = True
+    decision_drift_interval_hours: int = 24
+    decision_drift_churn_threshold: int = 5   # commits since creation to flag as stale
+    decision_drift_refire_days: int = 30      # suppress repeat alerts for this many days
+
     # Co-change mapping (git commit co-occurrence → related_to edges)
     co_change_mapping_enabled: bool = True
     co_change_mapping_interval_hours: int = 24
