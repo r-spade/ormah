@@ -258,7 +258,6 @@ class ContextBuilder:
         injection_gate: float = 0.55,
         session_id: str | None = None,
         compact_mode: bool = False,
-        compact_content_chars: int = 200,
         _return_debug: bool = False,
     ) -> str | tuple[str, list[str]]:
         """Build compact whisper context for involuntary recall injection.
@@ -627,8 +626,6 @@ class ContextBuilder:
             if i < full_content_count:
                 content = node.get("content", "").strip()
                 if content and content != title:
-                    if compact_mode:
-                        content = _truncate_at_word_boundary(content, max_len=compact_content_chars)
                     lines.append(f"  {content}")
 
             if not compact_mode:

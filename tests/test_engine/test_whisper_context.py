@@ -2338,47 +2338,6 @@ class TestWhisperCompactMode:
         assert "[concept]" not in result
         assert "[decision]" not in result
 
-    def test_content_truncated_in_compact_mode(self, mock_graph):
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-
-        node = self._make_node_long("n1", "Long content node")
-        mock_engine.recall_search_structured.return_value = [
-            {"node": node, "score": 0.9, "source": "hybrid"},
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="test",
-            injection_gate=0.0,
-            compact_mode=True,
-            compact_content_chars=100,
-            full_content_count=1,
-        )
-
-        # Content should be truncated to ~100 chars (with ellipsis)
-        assert "…" in result
-        # Full 500-char string should not appear
-        assert "A" * 101 not in result
-
-    def test_content_not_truncated_when_compact_off(self, mock_graph):
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-
-        node = self._make_node_long("n1", "Long content node")
-        mock_engine.recall_search_structured.return_value = [
-            {"node": node, "score": 0.9, "source": "hybrid"},
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="test",
-            injection_gate=0.0,
-            compact_mode=False,
-            full_content_count=1,
-        )
-
-        # Full content should appear unchanged
-        assert "A" * 500 in result
-
     def test_no_blank_lines_between_items_in_compact_mode(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)

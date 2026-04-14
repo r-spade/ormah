@@ -196,7 +196,6 @@ class Settings(BaseSettings):
 
     # Whisper compact mode (token-compressed injection)
     whisper_compact_mode: bool = False
-    whisper_compact_content_chars: int = 200  # max content chars per full-content node
 
     # Claude-in-the-loop maintenance
     claude_maintenance_enabled: bool = False
