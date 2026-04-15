@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -19,11 +20,13 @@ _BUFFER_FILENAME = "pending_writes.jsonl"
 class WriteBuffer:
     """File-backed queue for buffering remember calls that fail due to server downtime.
 
-    Thread safety: uses atomic rename for writes to avoid partial reads.
+    Thread safety: a threading lock serializes all mutations (append, clear,
+    rewrite) so concurrent appends during a drain cannot lose entries.
     """
 
     def __init__(self, buffer_path: Path) -> None:
         self.path = buffer_path
+        self._lock = threading.Lock()
 
     def is_empty(self) -> bool:
         return not self.path.exists() or self.path.stat().st_size == 0
@@ -31,9 +34,10 @@ class WriteBuffer:
     def append(self, args: dict, params: dict) -> None:
         """Append a pending remember call to the buffer."""
         entry = json.dumps({"args": args, "params": params})
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(entry + "\n")
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(entry + "\n")
         logger.info("Buffered remember call (server unreachable). Buffer: %s", self.path)
 
     def load(self) -> list[dict]:
@@ -54,22 +58,31 @@ class WriteBuffer:
 
     def clear(self) -> None:
         """Remove the buffer file."""
-        try:
-            self.path.unlink(missing_ok=True)
-        except OSError as e:
-            logger.warning("Failed to clear write buffer: %s", e)
+        with self._lock:
+            try:
+                self.path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("Failed to clear write buffer: %s", e)
 
     def rewrite(self, entries: list[dict]) -> None:
-        """Replace buffer contents with the given entries (used after partial drain)."""
-        if not entries:
-            self.clear()
-            return
-        tmp = self.path.with_suffix(".tmp")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with tmp.open("w", encoding="utf-8") as f:
-            for entry in entries:
-                f.write(json.dumps(entry) + "\n")
-        os.replace(tmp, self.path)
+        """Replace buffer contents with the given entries (used after partial drain).
+
+        Holds the lock for the entire read-replace cycle so no concurrent
+        append can slip in between and get lost.
+        """
+        with self._lock:
+            if not entries:
+                try:
+                    self.path.unlink(missing_ok=True)
+                except OSError as e:
+                    logger.warning("Failed to clear write buffer: %s", e)
+                return
+            tmp = self.path.with_suffix(".tmp")
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tmp.open("w", encoding="utf-8") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry) + "\n")
+            os.replace(tmp, self.path)
 
 
 def buffer_path_for(memory_dir: Path) -> Path:

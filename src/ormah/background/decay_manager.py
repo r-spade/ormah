@@ -41,49 +41,48 @@ def run_decay(engine) -> None:
                 "DELETE FROM proposals WHERE type = 'decay' AND status = 'pending'"
             )
 
-        # --- Proactive decay alerts ------------------------------------------
-        if getattr(settings, "decay_alert_enabled", True):
-            alert_threshold = getattr(settings, "decay_alert_threshold", 0.40)
-            refire_days = getattr(settings, "decay_alert_refire_days", 7)
-            user_node_id = getattr(engine, "user_node_id", None)
+        # --- Proactive decay alerts (internal logging only) ------------------
+        alert_threshold = getattr(settings, "decay_alert_threshold", 0.40)
+        refire_days = getattr(settings, "decay_alert_refire_days", 7)
+        user_node_id = getattr(engine, "user_node_id", None)
 
-            alert_rows = engine.db.conn.execute(
-                "SELECT id, tier, importance, stability, last_review, last_accessed "
-                "FROM nodes WHERE tier IN ('core', 'working')"
-            ).fetchall()
+        alert_rows = engine.db.conn.execute(
+            "SELECT id, tier, importance, stability, last_review, last_accessed "
+            "FROM nodes WHERE tier IN ('core', 'working')"
+        ).fetchall()
 
-            alerted = 0
-            for row in alert_rows:
-                if row["id"] == user_node_id:
-                    continue
-                r = _compute_retrievability(row, now)
-                if r is None or r >= alert_threshold:
-                    continue
+        alerted = 0
+        for row in alert_rows:
+            if row["id"] == user_node_id:
+                continue
+            r = _compute_retrievability(row, now)
+            if r is None or r >= alert_threshold:
+                continue
 
-                # Suppress if already alerted recently
-                recent = engine.db.conn.execute(
-                    """
-                    SELECT id FROM decay_alert_log
-                    WHERE node_id = ? AND acknowledged = 0
-                      AND alerted_at > datetime(?, '-' || ? || ' days')
-                    LIMIT 1
-                    """,
-                    (row["id"], now_iso, refire_days),
-                ).fetchone()
-                if recent:
-                    continue
+            # Suppress if already alerted recently
+            recent = engine.db.conn.execute(
+                """
+                SELECT id FROM decay_alert_log
+                WHERE node_id = ? AND acknowledged = 0
+                  AND alerted_at > datetime(?, '-' || ? || ' days')
+                LIMIT 1
+                """,
+                (row["id"], now_iso, refire_days),
+            ).fetchone()
+            if recent:
+                continue
 
-                with engine.db.transaction() as conn:
-                    conn.execute(
-                        "INSERT INTO decay_alert_log "
-                        "(node_id, alerted_at, retrievability, tier) "
-                        "VALUES (?, ?, ?, ?)",
-                        (row["id"], now_iso, r, row["tier"]),
-                    )
-                alerted += 1
+            with engine.db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO decay_alert_log "
+                    "(node_id, alerted_at, retrievability, tier) "
+                    "VALUES (?, ?, ?, ?)",
+                    (row["id"], now_iso, r, row["tier"]),
+                )
+            alerted += 1
 
-            if alerted:
-                logger.info("Decay manager created %d proactive alerts", alerted)
+        if alerted:
+            logger.info("Decay manager created %d proactive alerts", alerted)
 
         # --- Demotion --------------------------------------------------------
         rows = engine.db.conn.execute(

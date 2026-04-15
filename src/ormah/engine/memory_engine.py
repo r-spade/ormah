@@ -948,7 +948,7 @@ class MemoryEngine:
             reranker_blend_alpha=self.settings.whisper_reranker_blend_alpha,
             reranker_max_doc_chars=self.settings.whisper_reranker_max_doc_chars,
             recent_prompts=recent_prompts,
-            injection_gate=self.get_gate(),
+            injection_gate=self.settings.whisper_injection_gate,
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
             session_id=session_id,
@@ -1002,7 +1002,8 @@ class MemoryEngine:
         if node is None:
             return None
 
-        # Snapshot for audit
+        # Snapshot before modification
+        old_snapshot = node.model_dump(mode="json")
         old_valid_until = node.valid_until.isoformat() if node.valid_until else None
 
         node.valid_until = datetime.now(timezone.utc)
@@ -1013,13 +1014,21 @@ class MemoryEngine:
         path = self.file_store.save(node)
         self.builder.index_single(path)
 
+        new_snapshot = node.model_dump(mode="json")
+        changed = [
+            k for k in old_snapshot if old_snapshot[k] != new_snapshot.get(k)
+        ]
+
         # Audit log
         self._write_audit_log(
             operation="mark_outdated",
             node_id=node_id,
+            node_snapshot=json.dumps(old_snapshot),
             detail=json.dumps({
                 "reason": reason,
                 "old_valid_until": old_valid_until,
+                "changed_fields": changed,
+                "new_snapshot": new_snapshot,
             }),
         )
 
@@ -1484,10 +1493,26 @@ class MemoryEngine:
                 except (json.JSONDecodeError, TypeError):
                     pass
                 reason = detail.get("reason", "no reason given")
-                new_confidence = detail.get("new_confidence")
                 lines.append(f"  Reason: {reason}")
-                if new_confidence is not None:
-                    lines.append(f"  Confidence set to: {new_confidence}")
+
+                changed = detail.get("changed_fields", [])
+                old = {}
+                try:
+                    old = json.loads(entry.get("node_snapshot") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                new = detail.get("new_snapshot") or {}
+
+                if changed and (old or new):
+                    for field in changed:
+                        old_val = old.get(field, "—")
+                        new_val = new.get(field, "—")
+                        if old_val != new_val:
+                            old_str = str(old_val)[:200]
+                            new_str = str(new_val)[:200]
+                            lines.append(f"  **{field}**: `{old_str}` → `{new_str}`")
+                elif changed:
+                    lines.append(f"  Changed: {', '.join(changed)}")
 
             elif op == "delete":
                 lines.append("  Node was deleted.")
@@ -2316,56 +2341,7 @@ class MemoryEngine:
                     (resolved_node_id,),
                 )
 
-        if getattr(self.settings, "gate_tuning_enabled", True):
-            self._update_gate(signal)
-
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
-
-    def get_gate(self) -> float:
-        """Return the current injection gate value.
-
-        Reads from the gate_state table if gate tuning is enabled, falling
-        back to the static config value otherwise.
-        """
-        if not getattr(self.settings, "gate_tuning_enabled", True):
-            return self.settings.whisper_injection_gate
-        row = self.db.conn.execute(
-            "SELECT value FROM gate_state WHERE key = 'injection_gate'"
-        ).fetchone()
-        if row is None:
-            return self.settings.whisper_injection_gate
-        return float(row["value"])
-
-    def _update_gate(self, signal: int) -> None:
-        """Nudge the injection gate based on a feedback signal.
-
-        Uses a proportional update rule:
-          +1 → gate += lr * (1 - gate)   (pulls toward gate_max)
-          -1 → gate -= lr * gate          (pulls toward gate_min)
-        Result is clamped to [gate_min, gate_max].
-        """
-        current = self.get_gate()
-        lr = getattr(self.settings, "gate_learning_rate", 0.02)
-        gate_min = getattr(self.settings, "gate_min", 0.30)
-        gate_max = getattr(self.settings, "gate_max", 0.80)
-
-        if signal > 0:
-            new_gate = current + lr * (gate_max - current)
-        else:
-            new_gate = current - lr * (current - gate_min)
-
-        new_gate = max(gate_min, min(gate_max, new_gate))
-
-        with self.db.transaction() as conn:
-            conn.execute(
-                """
-                INSERT INTO gate_state (key, value, updated_at)
-                VALUES ('injection_gate', ?, datetime('now'))
-                ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                (new_gate,),
-            )
-        logger.debug("Gate tuning: signal=%+d %.4f → %.4f", signal, current, new_gate)
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""
