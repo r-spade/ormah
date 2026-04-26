@@ -151,24 +151,31 @@ class TestSystemdTemplate:
 
 
 class TestInstallAutostart:
-    def test_linux_systemd_failure_falls_back_to_background(self, capsys):
+    def test_linux_systemd_failure_falls_back_to_background(self, tmp_path, capsys):
         from ormah.server_manager import install_autostart
 
+        unit_path = tmp_path / "ormah.service"
         error = subprocess.CalledProcessError(
             1,
             ["systemctl", "--user", "daemon-reload"],
             stderr=b"Failed to connect to bus: No medium found\n",
         )
 
+        def fake_install_systemd(*args, **kwargs):
+            unit_path.write_text("partial unit")
+            raise error
+
         with (
             patch("platform.system", return_value="Linux"),
             patch("shutil.which", return_value="/usr/bin/systemctl"),
-            patch("ormah.server_manager.install_systemd_service", side_effect=error),
+            patch("ormah.server_manager.SYSTEMD_UNIT", unit_path),
+            patch("ormah.server_manager.install_systemd_service", side_effect=fake_install_systemd),
             patch("ormah.server_manager._start_server_background") as mock_start,
         ):
             install_autostart("/usr/local/bin/ormah", wrapper_path="/tmp/ormah-server")
 
         mock_start.assert_called_once_with("/tmp/ormah-server")
+        assert not unit_path.exists()
         out = capsys.readouterr().out
         assert "User systemd is unavailable" in out
         assert "Failed to connect to bus" in out

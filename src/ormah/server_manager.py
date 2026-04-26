@@ -202,6 +202,7 @@ def install_autostart(ormah_bin: str, wrapper_path: str | None = None) -> None:
                 install_systemd_service(ormah_bin, wrapper_path=effective_wrapper)
                 return
             except subprocess.CalledProcessError as exc:
+                SYSTEMD_UNIT.unlink(missing_ok=True)
                 print("User systemd is unavailable; starting server in background instead.")
                 details = _called_process_error_output(exc)
                 if details:
