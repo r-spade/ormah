@@ -1719,7 +1719,8 @@ class MemoryEngine:
         for seed in seeds:
             seed_node = seed["node"] if "node" in seed else seed
             seed_id = seed_node["id"]
-            seed_score = seed.get("score", 1.0)
+            _s = seed.get("score")
+            seed_score = _s if _s is not None else 1.0
 
             edges = self.graph.get_edges_for(seed_id)
 
@@ -1733,7 +1734,8 @@ class MemoryEngine:
                     continue
 
                 edge_type = edge["edge_type"]
-                edge_weight = edge.get("weight", 0.5)
+                _w = edge.get("weight")
+                edge_weight = _w if _w is not None else 0.5
                 type_factor = _EDGE_TYPE_FACTORS.get(edge_type, 0.5)
                 score = seed_score * edge_weight * type_factor * decay
                 candidates.append((neighbor_id, score, edge_type))
@@ -1763,7 +1765,7 @@ class MemoryEngine:
 
         # Merge direct + activated results, sort by score descending
         merged = results + activated_results
-        merged.sort(key=lambda x: x.get("score", 0), reverse=True)
+        merged.sort(key=lambda x: (x.get("score") or 0), reverse=True)
 
         return merged[:limit]
 

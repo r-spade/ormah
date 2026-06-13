@@ -213,6 +213,29 @@ def test_merged_sort_order(engine):
     assert neighbor_pos < low_pos, "Activated neighbor should rank above low-score direct hit"
 
 
+def test_null_edge_weight_and_seed_score_do_not_raise(engine):
+    """_spread_activation must not crash when edge weight or seed score is None (issue #20).
+
+    dict.get(key, default) only uses the default when the key is absent; a present-but-None
+    value slips through and causes TypeError on the float multiplication.  This test exercises
+    both NULL-weight edges and None seed scores directly.
+    """
+    seed_id = _remember(engine, "Seed node for null-weight test")
+    neighbor_id = _remember(engine, "Neighbor node for null-weight test")
+    _connect(engine, seed_id, neighbor_id, EdgeType.supports, weight=0.8)
+
+    # Force the edge weight to None as it could arrive from a NULL DB column
+    for edge in engine.graph.get_edges_for(seed_id):
+        edge["weight"] = None
+
+    # Also simulate a seed whose score column was NULL
+    seed_result = {"node": engine.graph.get_node(seed_id), "score": None, "source": "hybrid"}
+
+    enriched = engine._spread_activation([seed_result], limit=10)
+    # Should not raise; neighbor may or may not appear, but we get a list back
+    assert isinstance(enriched, list)
+
+
 def test_spread_activation_honors_total_limit(engine):
     """Activated results compete within the requested total result budget."""
     low_hit = _remember(engine, "Low relevance node")
