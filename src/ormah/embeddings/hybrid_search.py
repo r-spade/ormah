@@ -70,11 +70,17 @@ class HybridSearch:
 
     def __init__(self, db: Database, settings: Settings) -> None:
         self.db = db
-        self.conn = db.conn
         self.settings = settings
-        self.graph = GraphIndex(db.conn)
+        self.graph = GraphIndex(db)
         self.vec_store = VectorStore(db)
         self.encoder = get_encoder(settings)
+
+    @property
+    def conn(self):
+        # Resolve per access so each request thread uses its own thread-local
+        # connection; never capture a single connection (see GraphIndex).
+        db = self.db
+        return db.conn if hasattr(db, "conn") else db
 
     def search(
         self,

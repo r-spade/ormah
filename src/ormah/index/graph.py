@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ormah.index.db import Database
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +18,19 @@ _NOT_EXPIRED = "(n.valid_until IS NULL OR n.valid_until > strftime('%Y-%m-%dT%H:
 class GraphIndex:
     """Graph queries on the SQLite index."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self.conn = conn
+    def __init__(self, db: "Database | sqlite3.Connection") -> None:
+        # Hold the Database (not a captured connection) and resolve ``conn`` per
+        # access so every thread reads through its own thread-local connection.
+        # Sharing one sqlite3.Connection across the request threadpool is a data
+        # race — it raises SQLITE_MISUSE ("bad parameter or other API misuse")
+        # and returns corrupted rows under concurrent load. A raw Connection is
+        # still accepted (legacy/tests) and used directly.
+        self._db = db
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        db = self._db
+        return db.conn if hasattr(db, "conn") else db
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()

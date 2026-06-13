@@ -87,7 +87,7 @@ class MemoryEngine:
         self.db.init_schema()
         self.db.init_vec_table(settings.embedding_dim)
 
-        self.graph = GraphIndex(self.db.conn)
+        self.graph = GraphIndex(self.db)
         self.builder = IndexBuilder(self.db, self.file_store)
         self.tier_manager = TierManager(settings.core_memory_cap)
         self.context_builder = ContextBuilder(self.graph, engine=self)
