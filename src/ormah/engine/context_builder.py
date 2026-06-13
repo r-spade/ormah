@@ -10,6 +10,7 @@ import numpy as np
 
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.index.graph import GraphIndex
+from ormah.text.tokens import distinctive_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -32,21 +33,6 @@ _REVIEW_FRAMING = (
     "this won't be surfaced again for 14 days."
 )
 
-_TOPIC_STOP_WORDS = frozenset({
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "dare", "ought",
-    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
-    "they", "them", "this", "that", "these", "those", "am", "not", "no",
-    "nor", "so", "if", "or", "and", "but", "for", "of", "to", "in",
-    "on", "at", "by", "with", "from", "as", "into", "about", "what",
-    "which", "who", "whom", "when", "where", "why", "how", "all", "any",
-    "each", "every", "both", "few", "more", "most", "other", "some",
-    "such", "than", "too", "very", "just", "because", "also", "let",
-    "lets", "please", "explain", "implemented", "build", "design", "new",
-    "feature", "component", "page", "work", "working", "user",
-})
-
 def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
     """Return *text* truncated to *max_len* characters at a word boundary."""
     if len(text) <= max_len:
@@ -66,8 +52,7 @@ def _prompt_log_snippet(text: str, max_len: int = 80) -> str:
 
 def _topic_tokens(text: str) -> set[str]:
     """Extract meaningful topical tokens from text."""
-    tokens = {tok.lower() for tok in re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b", text)}
-    return {tok for tok in tokens if tok not in _TOPIC_STOP_WORDS}
+    return distinctive_tokens(text)
 def _has_topical_overlap(prompt_tokens: set[str], node: dict) -> bool:
     """Return True when prompt tokens overlap node title/content tokens."""
     if not prompt_tokens:

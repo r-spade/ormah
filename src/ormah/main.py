@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Hippocampus watchers not started: %s", e)
 
-    # Start session watcher for Claude Code transcripts
+    # Start session watcher for agent transcripts
     try:
         from ormah.background.session_watcher import start_session_watcher, stop_session_watcher
 

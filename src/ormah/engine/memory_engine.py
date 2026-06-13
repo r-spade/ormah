@@ -37,6 +37,7 @@ from ormah.models.node import (
     UpdateNodeRequest,
 )
 from ormah.store.file_store import FileStore
+from ormah.text.tokens import STOP_WORDS
 
 logger = logging.getLogger(__name__)
 
@@ -549,21 +550,12 @@ class MemoryEngine:
         )
         return format_node_with_neighbors(node, edges, neighbors)
 
-    # Stop words for detecting "pure temporal" queries (no topical signal).
-    _STOP_WORDS = frozenset({
-        "what", "did", "we", "do", "i", "you", "the", "a", "is", "are",
-        "was", "were", "have", "has", "had", "been", "be", "will", "would",
-        "could", "should", "can", "may", "might", "shall", "on", "in", "at",
-        "to", "for", "of", "with", "by", "from", "up", "about", "into",
-        "through", "during", "before", "after", "above", "below", "between",
-        "out", "off", "over", "under", "again", "further", "then", "once",
-        "here", "there", "when", "where", "why", "how", "all", "each",
-        "every", "both", "few", "more", "most", "other", "some", "such",
-        "no", "not", "only", "own", "same", "so", "than", "too", "very",
-        "just", "because", "as", "until", "while", "and", "but", "or",
-        "nor", "if", "that", "which", "who", "whom", "this", "these",
-        "those", "am", "an", "any", "work", "worked", "working",
-        "me", "my", "our", "us", "show", "tell", "give", "get",
+    # Additional command-like words for detecting "pure temporal" queries.
+    _STOP_WORDS = STOP_WORDS | frozenset({
+        "after", "again", "above", "below", "between", "during", "further",
+        "get", "give", "here", "me", "once", "only", "out", "own", "same",
+        "show", "tell", "then", "through", "under", "until", "up", "us",
+        "while", "work", "worked", "working",
     })
 
     def recall_search_structured(
@@ -2022,7 +2014,7 @@ class MemoryEngine:
             SELECT node_id
             FROM whisper_log
             WHERE node_id = ?
-            ORDER BY logged_at DESC
+            ORDER BY logged_at DESC, id DESC
             LIMIT 1
             """,
             (node_id,),
@@ -2064,10 +2056,10 @@ class MemoryEngine:
 
         row = self.db.conn.execute(
             """
-            SELECT prompt_vec, prompt_text, session_id, space
+            SELECT id, prompt_vec, prompt_text, prompt_hash, session_id, space
             FROM whisper_log
             WHERE node_id = ?
-            ORDER BY logged_at DESC
+            ORDER BY logged_at DESC, id DESC
             LIMIT 1
             """,
             (resolved_node_id,),
@@ -2078,18 +2070,65 @@ class MemoryEngine:
 
         prompt_vec = row["prompt_vec"]
         prompt_text = row["prompt_text"]
+        prompt_hash = row["prompt_hash"]
         session_id = row["session_id"]
         space = row["space"]
+        whisper_log_id = row["id"]
 
         with self.db.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO affinity
-                    (prompt_vec, prompt_text, node_id, signal, source, confirmed_at, space, session_id)
-                VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)
-                ON CONFLICT (node_id, session_id) DO NOTHING
+                    (
+                        prompt_vec, prompt_text, node_id, signal, source,
+                        confirmed_at, space, session_id, whisper_log_id
+                    )
+                VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+                ON CONFLICT DO NOTHING
                 """,
-                (prompt_vec, prompt_text, resolved_node_id, signal, source, space, session_id),
+                (
+                    prompt_vec,
+                    prompt_text,
+                    resolved_node_id,
+                    signal,
+                    source,
+                    space,
+                    session_id,
+                    whisper_log_id,
+                ),
+            )
+            if source == "explicit":
+                conn.execute(
+                    """
+                    UPDATE affinity
+                    SET signal = ?, source = ?, confirmed_at = datetime('now')
+                    WHERE node_id = ? AND whisper_log_id = ?
+                    """,
+                    (signal, source, resolved_node_id, whisper_log_id),
+                )
+            conn.execute(
+                """
+                INSERT INTO signals
+                    (
+                        whisper_log_id, node_id, signal_type, polarity, strength,
+                        source, session_id, surface, space, prompt_hash, evidence, created
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    whisper_log_id,
+                    resolved_node_id,
+                    "feedback_submitted",
+                    signal,
+                    1.0,
+                    source,
+                    session_id,
+                    "submit_feedback",
+                    space,
+                    prompt_hash,
+                    json.dumps({"source": source}),
+                ),
             )
             if source != "implicit":
                 conn.execute(

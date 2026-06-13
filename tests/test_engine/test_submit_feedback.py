@@ -17,14 +17,16 @@ def _insert_whisper_log(
     node_id: str,
     session_id: str = "sess-abc",
     space: str = "myspace",
-) -> None:
-    conn.execute(
+    prompt_text: str = "how does auth work",
+) -> int:
+    cursor = conn.execute(
         "INSERT INTO whisper_log "
         "(node_id, score, session_id, space, prompt_text, prompt_vec, prompt_hash, was_injected, logged_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-        (node_id, 0.48, session_id, space, "how does auth work", b"", "hash-abc", 0),
+        (node_id, 0.48, session_id, space, prompt_text, b"", "hash-abc", 0),
     )
     conn.commit()
+    return cursor.lastrowid
 
 
 def _insert_review_log(conn, node_id: str, session_id: str = "sess-abc") -> int:
@@ -71,6 +73,22 @@ class TestSubmitFeedbackBasic:
         assert row is not None
         assert row["source"] == "implicit"
 
+    def test_feedback_records_signal_row(self, engine):
+        node_id = "node-signal-001"
+        whisper_log_id = _insert_whisper_log(engine.db.conn, node_id)
+
+        engine.submit_feedback(node_id, 1, "explicit")
+
+        row = engine.db.conn.execute(
+            "SELECT * FROM signals WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        assert row is not None
+        assert row["whisper_log_id"] == whisper_log_id
+        assert row["signal_type"] == "feedback_submitted"
+        assert row["polarity"] == 1
+        assert row["source"] == "explicit"
+        assert row["surface"] == "submit_feedback"
+
     def test_short_id_feedback_resolves_full_whisper_log_node_id(self, engine):
         node_id = "72a9ea26-1111-2222-3333-444444444444"
         _insert_whisper_log(engine.db.conn, node_id)
@@ -103,6 +121,30 @@ class TestSubmitFeedbackBasic:
             "SELECT * FROM affinity WHERE node_id = ?", (node_id,)
         ).fetchall()
         assert len(rows) == 1
+
+    def test_same_node_same_session_can_record_distinct_whisper_events(self, engine):
+        node_id = "node-turn-level-001"
+        _insert_whisper_log(
+            engine.db.conn,
+            node_id,
+            session_id="sess-1",
+            prompt_text="first prompt",
+        )
+        engine.submit_feedback(node_id, 1, "explicit")
+        _insert_whisper_log(
+            engine.db.conn,
+            node_id,
+            session_id="sess-1",
+            prompt_text="second prompt",
+        )
+        engine.submit_feedback(node_id, 1, "explicit")
+
+        rows = engine.db.conn.execute(
+            "SELECT whisper_log_id FROM affinity WHERE node_id = ? ORDER BY id",
+            (node_id,),
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["whisper_log_id"] != rows[1]["whisper_log_id"]
 
     def test_explicit_updates_review_log(self, engine):
         node_id = "node-review-001"

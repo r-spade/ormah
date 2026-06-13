@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     hippocampus_enabled: bool = True
     hippocampus_ignore_patterns: list[str] = []
 
-    # Session watcher (auto-ingest Claude Code transcripts)
+    # Session watcher (auto-ingest agent transcripts; default path is Claude Code)
     session_watcher_enabled: bool = False
     session_watcher_dir: Path = Path("~/.claude/projects")
     session_watcher_debounce_seconds: float = 60.0

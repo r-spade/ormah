@@ -99,7 +99,7 @@ def compute_affinity_boost(
         days_ago = (now_utc - confirmed_dt).total_seconds() / 86400.0
         recency = math.exp(-days_ago * ln2 / half_life)
 
-        source_w = implicit_w if row["source"] == "implicit" else 1.0
+        source_w = 1.0 if row["source"] == "explicit" else implicit_w
         weight = sim * recency * source_w
 
         signal = int(row["signal"])

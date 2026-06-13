@@ -1,4 +1,4 @@
-"""Tests for the session watcher — auto-ingestion of Claude Code transcripts."""
+"""Tests for the transcript watcher — auto-ingestion of agent transcripts."""
 
 from __future__ import annotations
 
@@ -13,14 +13,16 @@ from ormah.background.session_watcher import (
     SessionHandler,
     _ingest_session,
     _load_state,
+    _record_whisper_usage_signals,
     _save_state,
     _scan_sessions,
     _space_from_encoded_dir,
     start_session_watcher,
     stop_session_watcher,
 )
-from ormah.config import Settings
 from ormah.engine.memory_engine import MemoryEngine
+from ormah.models.node import CreateNodeRequest
+from ormah.transcript.parser import parse_transcript
 
 _LLM_PATCH = "ormah.background.llm_client.llm_generate"
 
@@ -49,6 +51,41 @@ def _make_jsonl(path: Path, user_turns: int = 6) -> None:
             ]},
         }))
     path.write_text("\n".join(lines) + "\n")
+
+
+def _write_turn_jsonl(path: Path, prompt: str, response: str) -> None:
+    lines = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": prompt},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": response}],
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
+def _insert_injected_whisper_log(
+    engine: MemoryEngine,
+    *,
+    node_id: str,
+    session_id: str,
+    prompt: str,
+) -> int:
+    cursor = engine.db.conn.execute(
+        "INSERT INTO whisper_log "
+        "(session_id, space, prompt_hash, prompt_text, prompt_vec, node_id, score, "
+        "was_injected, logged_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+        (session_id, "myproject", "hash-abc", prompt, b"\x00" * 4, node_id, 0.9, 1),
+    )
+    engine.db.conn.commit()
+    return cursor.lastrowid
 
 
 # --- Test 1: Space detection from encoded directory names ---
@@ -84,9 +121,88 @@ def test_ingest_session_basic(engine, tmp_path):
     assert rel in state
     entry = state[rel]
     assert entry["session_id"] == "abc123"
+    assert entry["source"] == "claude_code"
     assert entry["space"] == "myproject"
     assert entry["user_turns"] == 6
     assert len(entry["node_ids"]) == 1
+
+
+def test_record_whisper_usage_signal_promotes_clear_reference(engine, tmp_path):
+    """Clear references in an assistant response create a signal and affinity row."""
+    prompt = "How should we solve feedback collection?"
+    response = "The right fix is the transcript watcher mines feedback usage approach."
+    transcript_path = tmp_path / "usage-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="The transcript watcher mines feedback usage from completed transcripts.",
+        type="fact",
+        title="Transcript watcher mines feedback usage",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="usage-session",
+        prompt=prompt,
+    )
+
+    recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 1
+    signal = engine.db.conn.execute(
+        "SELECT * FROM signals WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert signal is not None
+    assert signal["signal_type"] == "whisper_referenced"
+    assert signal["polarity"] == 1
+    assert signal["source"] == "transcript_watcher_heuristic"
+    assert signal["surface"] == "transcript_watcher"
+    assert signal["agent_id"] == "claude_code"
+
+    affinity = engine.db.conn.execute(
+        "SELECT * FROM affinity WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert affinity is not None
+    assert affinity["node_id"] == node_id
+    assert affinity["signal"] == 1
+    assert affinity["source"] == "auto_heuristic"
+
+
+def test_record_whisper_usage_signal_keeps_unreferenced_neutral(engine, tmp_path):
+    """Unreferenced whispers are observable but do not become negative affinity."""
+    prompt = "How should we solve feedback collection?"
+    response = "We should first fix the database uniqueness key."
+    transcript_path = tmp_path / "neutral-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Graph rendering should use level of detail for large datasets.",
+        type="fact",
+        title="Large graph rendering performance",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="neutral-session",
+        prompt=prompt,
+    )
+
+    recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 1
+    signal = engine.db.conn.execute(
+        "SELECT * FROM signals WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert signal is not None
+    assert signal["signal_type"] == "whisper_unreferenced"
+    assert signal["polarity"] == 0
+
+    affinity = engine.db.conn.execute(
+        "SELECT * FROM affinity WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert affinity is None
 
 
 # --- Test 3: Min turns filter ---

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ormah.index.db import Database
 
+from ormah.text.tokens import IDENTITY_TOKENS, STOP_WORDS
+
 logger = logging.getLogger(__name__)
 
 
@@ -201,20 +203,8 @@ class GraphIndex:
         return [dict(r) for r in rows]
 
 
-_STOP_WORDS = frozenset({
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "dare", "ought",
-    "user", "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
-    "they", "them", "this", "that", "these", "those", "am", "not", "no",
-    "nor", "so", "if", "or", "and", "but", "for", "of", "to", "in",
-    "on", "at", "by", "with", "from", "as", "into", "about", "what",
-    "which", "who", "whom", "when", "where", "why", "how", "all", "any",
-    "each", "every", "both", "few", "more", "most", "other", "some",
-    "such", "than", "too", "very", "just", "because", "also",
-})
-
-_IDENTITY_TOKENS = frozenset({"user", "i", "me", "my", "we", "our", "you", "your"})
+_STOP_WORDS = STOP_WORDS
+_IDENTITY_TOKENS = IDENTITY_TOKENS
 
 
 def _sanitize_fts_query(query: str) -> list[str]:

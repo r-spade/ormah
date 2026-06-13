@@ -119,9 +119,40 @@ CREATE TABLE IF NOT EXISTS affinity (
     confirmed_at TEXT NOT NULL,
     space        TEXT,
     session_id   TEXT NOT NULL,
-    UNIQUE (node_id, session_id)
+    whisper_log_id INTEGER REFERENCES whisper_log(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_affinity_node ON affinity(node_id);
+CREATE INDEX IF NOT EXISTS idx_affinity_whisper_log ON affinity(whisper_log_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_affinity_node_whisper_log_unique
+    ON affinity(node_id, whisper_log_id)
+    WHERE whisper_log_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_affinity_node_session_legacy_unique
+    ON affinity(node_id, session_id)
+    WHERE whisper_log_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS signals (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    whisper_log_id INTEGER REFERENCES whisper_log(id) ON DELETE SET NULL,
+    node_id        TEXT NOT NULL,
+    signal_type    TEXT NOT NULL,
+    polarity       INTEGER NOT NULL,
+    strength       REAL NOT NULL DEFAULT 1.0,
+    source         TEXT NOT NULL,
+    session_id     TEXT,
+    agent_id       TEXT,
+    surface        TEXT,
+    space          TEXT,
+    prompt_hash    TEXT,
+    evidence       TEXT,
+    created        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_signals_node ON signals(node_id);
+CREATE INDEX IF NOT EXISTS idx_signals_session ON signals(session_id);
+CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created);
+CREATE INDEX IF NOT EXISTS idx_signals_whisper_log ON signals(whisper_log_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_whisper_type_source_unique
+    ON signals(whisper_log_id, signal_type, source)
+    WHERE whisper_log_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS review_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -150,26 +150,8 @@ class Database:
                     "CREATE INDEX IF NOT EXISTS idx_whisper_log_logged ON whisper_log(logged_at)"
                 )
 
-            if "affinity" not in existing_tables:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS affinity (
-                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                        prompt_vec   BLOB NOT NULL,
-                        prompt_text  TEXT,
-                        node_id      TEXT NOT NULL,
-                        signal       INTEGER NOT NULL,
-                        source       TEXT NOT NULL DEFAULT 'explicit',
-                        confirmed_at TEXT NOT NULL,
-                        space        TEXT,
-                        session_id   TEXT NOT NULL,
-                        UNIQUE (node_id, session_id)
-                    )
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_affinity_node ON affinity(node_id)"
-                )
+            self._migrate_affinity_schema(conn, existing_tables)
+            self._ensure_signals_schema(conn)
 
             if "review_log" not in existing_tables:
                 conn.execute(
@@ -189,6 +171,119 @@ class Database:
 
         # Migrate FTS table to porter stemmer if needed
         self._migrate_fts_tokenizer()
+
+    def _create_affinity_table(self, conn: sqlite3.Connection, table: str = "affinity") -> None:
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table} (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt_vec     BLOB NOT NULL,
+                prompt_text    TEXT,
+                node_id        TEXT NOT NULL,
+                signal         INTEGER NOT NULL,
+                source         TEXT NOT NULL DEFAULT 'explicit',
+                confirmed_at   TEXT NOT NULL,
+                space          TEXT,
+                session_id     TEXT NOT NULL,
+                whisper_log_id INTEGER REFERENCES whisper_log(id) ON DELETE SET NULL
+            )
+            """
+        )
+
+    def _ensure_affinity_indexes(self, conn: sqlite3.Connection) -> None:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_affinity_node ON affinity(node_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_affinity_whisper_log "
+            "ON affinity(whisper_log_id)"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_affinity_node_whisper_log_unique
+            ON affinity(node_id, whisper_log_id)
+            WHERE whisper_log_id IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_affinity_node_session_legacy_unique
+            ON affinity(node_id, session_id)
+            WHERE whisper_log_id IS NULL
+            """
+        )
+
+    def _migrate_affinity_schema(
+        self,
+        conn: sqlite3.Connection,
+        existing_tables: set[str],
+    ) -> None:
+        if "affinity" not in existing_tables:
+            self._create_affinity_table(conn)
+            self._ensure_affinity_indexes(conn)
+            return
+
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(affinity)").fetchall()]
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='affinity'"
+        ).fetchone()
+        create_sql = (row[0] or "").lower() if row else ""
+        has_session_unique = "unique (node_id, session_id)" in create_sql
+
+        if "whisper_log_id" not in cols or has_session_unique:
+            logger.info("Migrating affinity table to turn-level whisper_log_id keys")
+            conn.execute("DROP TABLE IF EXISTS affinity_new")
+            self._create_affinity_table(conn, "affinity_new")
+            conn.execute(
+                """
+                INSERT INTO affinity_new
+                    (
+                        id, prompt_vec, prompt_text, node_id, signal, source,
+                        confirmed_at, space, session_id, whisper_log_id
+                    )
+                SELECT
+                    id, prompt_vec, prompt_text, node_id, signal, source,
+                    confirmed_at, space, session_id, NULL
+                FROM affinity
+                """
+            )
+            conn.execute("DROP TABLE affinity")
+            conn.execute("ALTER TABLE affinity_new RENAME TO affinity")
+
+        self._ensure_affinity_indexes(conn)
+
+    def _ensure_signals_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signals (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                whisper_log_id INTEGER REFERENCES whisper_log(id) ON DELETE SET NULL,
+                node_id        TEXT NOT NULL,
+                signal_type    TEXT NOT NULL,
+                polarity       INTEGER NOT NULL,
+                strength       REAL NOT NULL DEFAULT 1.0,
+                source         TEXT NOT NULL,
+                session_id     TEXT,
+                agent_id       TEXT,
+                surface        TEXT,
+                space          TEXT,
+                prompt_hash    TEXT,
+                evidence       TEXT,
+                created        TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_node ON signals(node_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_session ON signals(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_signals_whisper_log ON signals(whisper_log_id)"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_whisper_type_source_unique
+            ON signals(whisper_log_id, signal_type, source)
+            WHERE whisper_log_id IS NOT NULL
+            """
+        )
 
     def _migrate_fts_tokenizer(self) -> None:
         """Recreate FTS table with porter stemmer if it uses the old tokenizer."""

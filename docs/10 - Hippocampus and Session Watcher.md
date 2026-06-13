@@ -5,7 +5,7 @@ Verified against the current repository state on 2026-04-13.
 These are two separate watcher systems:
 
 - **Hippocampus** watches configured markdown directories and ingests changed files
-- **Session watcher** watches transcript directories and ingests completed sessions
+- **Session watcher** watches agent transcript directories and ingests completed sessions
 
 They are separate from the node-store watcher in `src/ormah/store/watcher.py`, which is not started by the app runtime.
 
@@ -45,7 +45,7 @@ Ignored-path filtering is configurable through `hippocampus_ignore_patterns`.
 
 **Code**: `src/ormah/background/session_watcher.py`
 
-The session watcher ingests transcript JSONL files.
+The session watcher ingests normalized agent transcript JSONL files.
 
 ### Startup conditions
 
@@ -62,15 +62,17 @@ Current defaults:
 - `session_watcher_min_turns = 5`
 - `session_watcher_lookback_hours = 72`
 
-The current default watch directory is a concrete Claude Code path, not an auto-detected one.
+The current default watch directory remains the historical Claude Code path for compatibility.
+The parser and downstream ingestion path are agent-normalized; adding another client should
+mean adding a transcript source/adapter, not changing memory ingestion or signal mining.
 
 ### What it does
 
 1. scans for changed `.jsonl` files
 2. applies first-run lookback filtering
-3. parses transcripts into conversation text
+3. normalizes transcripts into source metadata, turns, and conversation text
 4. skips very short sessions
-5. derives space from encoded parent directory names
+5. derives space from the current source's strategy
 6. ingests the conversation through `engine.ingest_conversation(...)`
 7. stores `.session_watcher_state`
 8. starts a real-time observer
@@ -79,9 +81,19 @@ The current default watch directory is a concrete Claude Code path, not an auto-
 
 **Code**: `src/ormah/transcript/parser.py`
 
-The parser now supports **both Claude Code and Codex-style JSONL transcripts**.
+The parser normalizes supported agent transcript formats into a shared result:
 
-That parser support is broader than the session watcher's current default setup: the parser can normalize both formats, while the watcher's default directory and space-decoding logic are still Claude-Code-shaped.
+```python
+TranscriptResult(
+    session_id="...",
+    source="claude_code" | "codex" | "agent_jsonl",
+    turns=[TranscriptTurn(role="user", text="..."), ...],
+    conversation="User: ...\n\nAssistant: ...",
+)
+```
+
+That normalized boundary is what ingestion and signal mining consume. Agent-specific code
+should stay at the discovery/parsing edge.
 
 Supported normalized sources:
 
@@ -122,6 +134,10 @@ Session watcher example:
 4. parent directory name is decoded and the last path segment becomes `ormah`
 5. Ormah ingests the conversation as candidate memories
 6. state is updated so the same file is not reprocessed unnecessarily
+
+For future agents, add a source adapter that finds transcript files, assigns source metadata,
+and provides a space strategy. The rest of the pipeline should continue to consume
+`TranscriptResult`.
 
 ## Code Anchors
 

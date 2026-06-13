@@ -1,4 +1,4 @@
-"""Tests for the Claude Code JSONL transcript parser."""
+"""Tests for agent JSONL transcript normalization."""
 
 from __future__ import annotations
 
@@ -36,6 +36,11 @@ class TestParseTranscript:
         assert "Assistant: Hi! How can I help?" in result.conversation
         assert "tool_use" not in result.conversation
         assert result.user_turn_count == 1
+        assert result.source == "claude_code"
+        assert [(turn.role, turn.text) for turn in result.turns] == [
+            ("user", "Hello there"),
+            ("assistant", "Hi! How can I help?"),
+        ]
 
     def test_user_raw_string_content(self, tmp_path):
         lines = [
@@ -237,6 +242,11 @@ class TestParseTranscript:
         assert "User: How does whisper work?" in result.conversation
         assert "Assistant: It injects relevant memory context." in result.conversation
         assert result.user_turn_count == 1
+        assert result.source == "codex"
+        assert [(turn.role, turn.text) for turn in result.turns] == [
+            ("user", "How does whisper work?"),
+            ("assistant", "It injects relevant memory context."),
+        ]
 
     def test_codex_bootstrap_user_message_skipped(self, tmp_path):
         lines = [
