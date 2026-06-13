@@ -1,6 +1,6 @@
 # Setup and Installation
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-06-09.
 
 Ormah ships with an interactive setup flow that configures the server, supported client integrations, and optional transcript backfill.
 
@@ -63,6 +63,7 @@ Repository defaults in `config.py` are:
 - `llm_provider = none`
 - `llm_model = claude-haiku-4-5-20251001`
 - `llm_base_url = http://localhost:11434`
+- `llm_num_predict = 4096`
 - `llm_inherit_api_key = false`
 
 `ormah setup` can rewrite the persisted `.env` to:

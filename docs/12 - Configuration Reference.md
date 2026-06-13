@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Verified against the current repository state on 2026-04-26.
+Verified against the current repository state on 2026-06-09.
 
 All settings live in `src/ormah/config.py` and use the `ORMAH_` prefix.
 
@@ -59,10 +59,11 @@ for manual backup workflows.
 | `llm_model` | `claude-haiku-4-5-20251001` |
 | `llm_base_url` | `http://localhost:11434` |
 | `llm_timeout_seconds` | `60` |
+| `llm_num_predict` | `4096` |
 | `llm_api_key_env_var` | unset |
 | `llm_inherit_api_key` | `false` |
 
-Note: setup may persist different values in `.env`. For remote providers, Ormah stores only key policy, such as `ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY`; it does not store API key values.
+Note: setup may persist different values in `.env`. For remote providers, Ormah stores only key policy, such as `ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY`; it does not store API key values. `llm_num_predict` maps to Ollama's `options.num_predict` request field.
 
 ## Background Intervals
 

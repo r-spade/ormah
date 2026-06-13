@@ -28,6 +28,7 @@ def get_adapter(settings) -> LLMAdapter | None:
             model=settings.llm_model,
             base_url=settings.llm_base_url,
             timeout=timeout,
+            num_predict=getattr(settings, "llm_num_predict", 4096),
         )
 
     if provider == "litellm":

@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     llm_model: str = "claude-haiku-4-5-20251001"
     llm_base_url: str = "http://localhost:11434"
     llm_timeout_seconds: int = 60
+    llm_num_predict: int = 4096
     llm_api_key_env_var: str | None = None
     llm_inherit_api_key: bool = False
 
@@ -260,6 +261,13 @@ class Settings(BaseSettings):
     def _llm_timeout_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"llm_timeout_seconds must be >= 1, got {v}")
+        return v
+
+    @field_validator("llm_num_predict")
+    @classmethod
+    def _llm_num_predict_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"llm_num_predict must be >= 1, got {v}")
         return v
 
     @field_validator("embedding_dim")

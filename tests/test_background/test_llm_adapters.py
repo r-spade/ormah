@@ -14,6 +14,7 @@ class _FakeSettings:
     llm_provider: str = "ollama"
     llm_model: str = "llama3.2"
     llm_base_url: str = "http://localhost:11434"
+    llm_num_predict: int = 2048
 
 
 # --- OllamaAdapter ---
@@ -30,6 +31,23 @@ def test_ollama_adapter_success():
     assert result == '{"answer": 42}'
     call_kwargs = mock_post.call_args
     assert call_kwargs[1]["json"]["format"] == "json"
+    assert call_kwargs[1]["json"]["options"] == {"num_predict": 4096}
+
+
+def test_ollama_adapter_custom_num_predict():
+    adapter = OllamaAdapter(model="llama3.2", num_predict=1024)
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"response": '{"answer": 42}'}
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("httpx.post", return_value=mock_resp) as mock_post:
+        result = adapter.generate("test prompt", json_mode=False)
+
+    assert result == '{"answer": 42}'
+    call_kwargs = mock_post.call_args
+    payload = call_kwargs[1]["json"]
+    assert payload["options"] == {"num_predict": 1024}
+    assert "format" not in payload
 
 
 def test_ollama_adapter_timeout():
@@ -80,6 +98,7 @@ def test_get_adapter_ollama():
     settings.llm_provider = "ollama"
     adapter = get_adapter(settings)
     assert isinstance(adapter, OllamaAdapter)
+    assert adapter.num_predict == 2048
 
 
 def test_get_adapter_litellm():

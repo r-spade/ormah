@@ -62,7 +62,7 @@ Today, setup can wire up:
 - Codex
 - Claude Desktop (MCP)
 
-Local search, embeddings, storage, the graph UI, and whisper retrieval do not require an API key. If you want Ormah's LLM-backed features to run independently of your agent, setup can opt into a provider explicitly. Ormah stores only provider policy in `~/.config/ormah/.env`; it does not copy API key values into its config.
+Local search, embeddings, storage, the graph UI, and whisper retrieval do not require an API key. If you want Ormah's LLM-backed features to run independently of your agent, setup can opt into a provider explicitly. Ormah stores only provider policy in `~/.config/ormah/.env`; it does not copy API key values into its config. Local Ollama generation uses a configurable `ORMAH_LLM_NUM_PREDICT` token budget.
 
 ## Features
 

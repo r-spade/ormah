@@ -15,10 +15,12 @@ class OllamaAdapter(LLMAdapter):
         model: str,
         base_url: str = "http://localhost:11434",
         timeout: int = 60,
+        num_predict: int = 4096,
     ) -> None:
         self.model = model
         self.base_url = base_url
         self.timeout = timeout
+        self.num_predict = num_predict
 
     def generate(self, prompt: str, json_mode: bool = True) -> str | None:
         import httpx
@@ -27,6 +29,7 @@ class OllamaAdapter(LLMAdapter):
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "options": {"num_predict": self.num_predict},
         }
         if json_mode:
             payload["format"] = "json"

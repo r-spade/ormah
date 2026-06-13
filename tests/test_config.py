@@ -67,6 +67,22 @@ def test_timeout_zero():
         _settings(llm_timeout_seconds=0)
 
 
+def test_llm_num_predict_default():
+    s = _settings()
+    assert s.llm_num_predict == 4096
+
+
+def test_llm_num_predict_env(monkeypatch):
+    monkeypatch.setenv("ORMAH_LLM_NUM_PREDICT", "1024")
+    s = Settings(memory_dir="/tmp/ormah_test")
+    assert s.llm_num_predict == 1024
+
+
+def test_llm_num_predict_zero():
+    with pytest.raises(ValidationError, match="llm_num_predict must be >= 1"):
+        _settings(llm_num_predict=0)
+
+
 # --- Embedding dim ---
 
 def test_embedding_dim_zero():
