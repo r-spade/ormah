@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task 09: Lazy, atomic legacy `archived_at` file backfill</title>
+<!-- rich-doc-src-sha256:bd1bd1463e1c28abf13e3f80441436211eaa8465a5a89e1b3aba5ff6497572cc -->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body>
+<nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
+<div class="doc-title">Bounded forgetting</div>
+
+</nav>
+<main>
+<div class="eyebrow">Implementation plan</div>
+<h1 id="task-09-lazy-atomic-legacy-archived-at-file-backfill">Task 09: Lazy, atomic legacy <code>archived_at</code> file backfill</h1>
+<p><strong>Depends on:</strong> Tasks 02, 03, 05.</p>
+<p>Legacy archival nodes (demoted before <code>archived_at</code> existed) have no <code>archived_at</code> in their <strong>files</strong>. Task 02&#x27;s migration only backfilled the derived index — wiped on the next <code>full_rebuild</code>. This task durably stamps the <strong>source files</strong>, once, the safe way (council R2 C4):</p>
+<ul><li><strong>Lazy + one-time</strong>, guarded by a <code>meta</code> flag — runs at the top of <code>run_forgetting</code> only when</li></ul>
+<p>  the feature is enabled, never inside the SQLite migration transaction (avoids the #18   startup-contention class Cursor flagged).</p>
+<ul><li><strong>Atomic</strong> — reuses <code>file_store.save</code> (tmp + fsync + <code>os.replace</code>), never an in-place</li></ul>
+<p>  <code>Path.write_text</code>, so a crash/disk-full can never truncate a source memory.</p>
+<ul><li><strong>Fail-open, retry-safe</strong> — a per-file failure is logged and counted; the <code>done</code> flag is set</li></ul>
+<p>  only when zero files failed, so a transient error retries next run instead of being silently   marked complete.</p>
+<p>The one-time guard also defines the semantics for <code>remember(tier=archival)</code> (council L2): every archival file present at the *first* enabled run is treated as legacy and stamped; archival nodes created *after* that stay <code>archived_at=NULL</code> → protected. The first run is O(archival) file loads — acceptable for a one-time, opt-in pass; documented as such.</p>
+<p><strong>Files:</strong></p>
+<ul><li>Modify: <code>src/ormah/background/forgetting_manager.py</code></li><li>Test: <code>tests/test_background/test_legacy_backfill.py</code></li></ul>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing tests</strong></li></ul>
+<p>Create <code>tests/test_background/test_legacy_backfill.py</code>:</p>
+<pre><code class="lang-python">from __future__ import annotations
+
+from ormah.background.forgetting_manager import _BACKFILL_META_KEY, run_forgetting
+from ormah.models.node import CreateNodeRequest, NodeType, Tier
+
+
+def _legacy_archival(engine, content=&quot;legacy&quot;):
+    &quot;&quot;&quot;A node whose FILE lacks archived_at (remember(tier=archival) never stamps it).&quot;&quot;&quot;
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=content, type=NodeType.fact, tier=Tier.archival, title=content))
+    assert engine.file_store.load(node_id).archived_at is None
+    return node_id
+
+
+def _meta_done(engine):
+    row = engine.db.conn.execute(
+        &quot;SELECT value FROM meta WHERE key=?&quot;, (_BACKFILL_META_KEY,)).fetchone()
+    return row is not None
+
+
+def test_backfill_stamps_legacy_files_and_survives_rebuild(engine):
+    engine.settings.deletion_enabled = True
+    node_id = _legacy_archival(engine)
+
+    run_forgetting(engine)
+
+    assert engine.file_store.load(node_id).archived_at is not None  # file stamped (durable)
+    engine.builder.full_rebuild()
+    row = engine.db.conn.execute(
+        &quot;SELECT archived_at FROM nodes WHERE id=?&quot;, (node_id,)).fetchone()
+    assert row[&quot;archived_at&quot;] is not None  # survives rebuild
+    assert _meta_done(engine) is True
+
+
+def test_backfill_skipped_when_disabled(engine):
+    node_id = _legacy_archival(engine)
+    run_forgetting(engine)  # deletion_enabled defaults to False
+    assert engine.file_store.load(node_id).archived_at is None
+    assert _meta_done(engine) is False
+
+
+def test_backfill_write_failure_preserves_file_and_retries(engine, monkeypatch):
+    engine.settings.deletion_enabled = True
+    node_id = _legacy_archival(engine)
+    original = engine.file_store.load(node_id)
+
+    def boom(node):
+        raise OSError(&quot;disk full&quot;)
+    monkeypatch.setattr(engine.file_store, &quot;save&quot;, boom)
+
+    run_forgetting(engine)  # must not raise; file untouched; not marked done
+
+    reloaded = engine.file_store.load(node_id)
+    assert reloaded is not None and reloaded.archived_at is None  # original intact
+    assert _meta_done(engine) is False  # transient failure → retry next run</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run tests to verify they fail</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_legacy_backfill.py -v</code> Expected: FAIL (<code>_BACKFILL_META_KEY</code> / backfill not implemented).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Wire the backfill into <code>run_forgetting</code></strong></li></ul>
+<p>In <code>src/ormah/background/forgetting_manager.py</code>, inside <code>run_forgetting</code>, add the call right after <code>now = ...</code> and before <code>_run_gate_phase</code>:</p>
+<pre><code class="lang-python">        _backfill_legacy_archived_at(engine)</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 4: Implement the backfill</strong></li></ul>
+<p>Append to <code>forgetting_manager.py</code>:</p>
+<pre><code class="lang-python">_BACKFILL_META_KEY = &quot;archived_at_legacy_backfill_done&quot;
+
+
+def _backfill_legacy_archived_at(engine) -&gt; int:
+    &quot;&quot;&quot;One-time: stamp archived_at into legacy archival files lacking it (atomic via file_store).
+
+    Runs once (guarded by a meta flag), outside any migration transaction. Uses the atomic
+    file_store.save so a write failure can never truncate a source memory; the done-flag is set
+    only on a fully clean pass, so transient failures retry next run.
+    &quot;&quot;&quot;
+    done = engine.db.conn.execute(
+        &quot;SELECT 1 FROM meta WHERE key = ?&quot;, (_BACKFILL_META_KEY,)
+    ).fetchone()
+    if done:
+        return 0
+
+    stamped, skipped = 0, 0
+    # Enumerate the SOURCE FILES on disk, not the derived index (council R3 H8): an archival
+    # file absent from the index would otherwise be missed forever once `done` is set.
+    for node in engine.file_store.list_all():
+        if node.tier != Tier.archival:
+            continue
+        irow = engine.db.conn.execute(
+            &quot;SELECT archived_at FROM nodes WHERE id = ?&quot;, (node.id,)
+        ).fetchone()
+        index_has = irow is not None and irow[&quot;archived_at&quot;] is not None
+        if node.archived_at is not None and index_has:
+            continue  # file + index already consistent
+        try:
+            if node.archived_at is None:
+                node.archived_at = node.updated  # best proxy for the legacy demotion time
+                path = engine.file_store.save(node)   # atomic tmp + fsync + os.replace
+            else:
+                path = engine.file_store._find_file(node.id)  # file ok, index lagged
+            engine.builder.index_single(path)         # stamp/repair the index
+            stamped += 1
+        except Exception:
+            skipped += 1
+            logger.warning(&quot;archived_at backfill skipped node %s&quot;, node.id)
+
+    # Only mark done on a fully clean pass — a save-ok/index-fail node is re-checked next run
+    # (its file has archived_at but the index does not, so the loop re-indexes it).
+    if skipped == 0:
+        with engine.db.transaction() as conn:
+            conn.execute(
+                &quot;INSERT OR REPLACE INTO meta (key, value) VALUES (?, &#x27;1&#x27;)&quot;,
+                (_BACKFILL_META_KEY,),
+            )
+    if stamped or skipped:
+        logger.info(
+            &quot;Forgetting legacy backfill: stamped %d, skipped %d&quot;, stamped, skipped
+        )
+    return stamped</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 5: Run tests to verify they pass</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_legacy_backfill.py -v</code> Expected: PASS (3 tests).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 6: Regression — the rest of the forgetting suite still passes</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v</code> Expected: PASS. (Note: <code>_make_eligible</code>/<code>_make_archival_recent</code> set <code>archived_at</code> explicitly, so they remain eligible/scored after the backfill runs; the backfill only touches files where <code>archived_at</code> is None.)</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 7: Lint + commit</strong></li></ul>
+<pre><code class="lang-bash">.venv/bin/ruff check src/ormah/background/forgetting_manager.py tests/test_background/test_legacy_backfill.py
+git add src/ormah/background/forgetting_manager.py tests/test_background/test_legacy_backfill.py
+git commit -m &quot;feat(background): lazy atomic legacy archived_at file backfill (#28)&quot;</code></pre>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>
+<span class="role">Plan &middot; #28 &middot; 2026-06-15</span></div>
+</main></body></html>

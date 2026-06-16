@@ -73,3 +73,25 @@ CLAUDE.md
 .omx/
 .codex
 .codex/
+# >>> dev-council ephemerals (managed by /council-init — do not edit) >>>
+.council/project-map.md
+.council/current-plan.md
+.council/current-pr-diff.md
+.council/peer-prompt-*
+.council/round-*
+.council/council-result*
+.council/debug-*
+.council/claude-to-*
+.council/adversarial-focus*
+.council/cursor-findings*
+.council/codex-findings*
+.council/deduped-findings*
+.council/dedupe-diagnostics.json
+.council/delegate-*
+.council/repomix-snapshot.md
+.council/.cursor-*
+.council/.codex-*
+.council/.test-cache
+.council/.*-status.json
+.council/.*-stderr.log
+# <<< dev-council ephemerals <<<

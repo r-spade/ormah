@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task 03: Stamp `archived_at` on entering archival, clear on leaving</title>
+<!-- rich-doc-src-sha256:1f80eced098534deb940dc3b84aaed96e203e872b9d99c8ae0094eeaf43dd48d -->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body>
+<nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
+<div class="doc-title">Bounded forgetting</div>
+
+</nav>
+<main>
+<div class="eyebrow">Implementation plan</div>
+<h1 id="task-03-stamp-archived-at-on-entering-archival-clear-on-leaving">Task 03: Stamp <code>archived_at</code> on entering archival, clear on leaving</h1>
+<p><strong>Depends on:</strong> Task 02.</p>
+<p>The single chokepoint for tier changes is <code>MemoryEngine.update_node</code>. Stamp <code>archived_at</code> every time a node *enters* the archival tier (old != archival, new == archival), and <strong>clear</strong> it when the node *leaves* archival (promoted back to working/core). Stamping on the transition (not on <code>is None</code>) is what makes the graveyard clock honest across an archival→working→archival lifecycle — a re-archived node must not look months old (council R1, Codex H1).</p>
+<p><strong>Files:</strong></p>
+<ul><li>Modify: <code>src/ormah/engine/memory_engine.py</code> (<code>update_node</code>)</li><li>Test: <code>tests/test_engine/test_archived_at.py</code></li></ul>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing test</strong></li></ul>
+<p>Create <code>tests/test_engine/test_archived_at.py</code>:</p>
+<pre><code class="lang-python">from __future__ import annotations
+
+from ormah.models.node import CreateNodeRequest, NodeType, Tier, UpdateNodeRequest
+
+
+def _archived_at(engine, node_id):
+    row = engine.db.conn.execute(
+        &quot;SELECT archived_at FROM nodes WHERE id = ?&quot;, (node_id,)
+    ).fetchone()
+    return row[&quot;archived_at&quot;]
+
+
+def test_demotion_to_archival_stamps_archived_at(engine):
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;demote me&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;d&quot;))
+    assert _archived_at(engine, node_id) is None
+
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+
+    assert _archived_at(engine, node_id) is not None
+    assert engine.file_store.load(node_id).archived_at is not None  # source of truth
+
+
+def test_non_archival_update_does_not_stamp(engine):
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;rename me&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;r&quot;))
+    engine.update_node(node_id, UpdateNodeRequest(title=&quot;renamed&quot;))
+    assert _archived_at(engine, node_id) is None
+
+
+def test_metadata_edit_while_archival_keeps_archived_at(engine):
+    &quot;&quot;&quot;A metadata edit (no tier change) must not move the clock.&quot;&quot;&quot;
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;x&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;x&quot;))
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+    first = _archived_at(engine, node_id)
+    engine.update_node(node_id, UpdateNodeRequest(title=&quot;x2&quot;))  # no tier change
+    assert _archived_at(engine, node_id) == first
+
+
+def test_leaving_archival_clears_archived_at(engine):
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;y&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;y&quot;))
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+    assert _archived_at(engine, node_id) is not None
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.working))  # promoted out
+    assert _archived_at(engine, node_id) is None
+
+
+def test_re_entering_archival_restamps_fresh(engine):
+    &quot;&quot;&quot;archival → working → archival must reset the clock, not keep the old one.&quot;&quot;&quot;
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;z&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;z&quot;))
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.working))   # clears
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))  # re-stamps
+    assert _archived_at(engine, node_id) is not None</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run test to verify it fails</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_archived_at.py -v</code> Expected: FAIL (<code>archived_at</code> not stamped/cleared on tier transitions).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Implement the transition logic</strong></li></ul>
+<p>In <code>src/ormah/engine/memory_engine.py</code> <code>update_node</code>, replace the existing tier-apply line:</p>
+<pre><code class="lang-python">        if req.tier is not None:
+            node.tier = req.tier</code></pre>
+<p>with:</p>
+<pre><code class="lang-python">        if req.tier is not None:
+            old_tier = node.tier
+            node.tier = req.tier
+            if req.tier == Tier.archival and old_tier != Tier.archival:
+                node.archived_at = datetime.now(timezone.utc)  # entered the graveyard
+            elif req.tier != Tier.archival and old_tier == Tier.archival:
+                node.archived_at = None  # left archival → reset the graveyard clock</code></pre>
+<p><code>Tier</code> and <code>datetime</code>/<code>timezone</code> are already imported in this module (used in <code>update_node</code>). Verify <code>Tier</code> is in the <code>from ormah.models.node import ...</code> line; if missing, add it.</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 4: Run test to verify it passes</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_archived_at.py -v</code> Expected: PASS (5 tests).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 5: Regression — decay still works and now stamps</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_decay_manager.py -v</code> Expected: PASS (decay demotes via update_node; archived_at set as a side effect).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 6: Lint + commit</strong></li></ul>
+<pre><code class="lang-bash">.venv/bin/ruff check src/ormah/engine/memory_engine.py tests/test_engine/test_archived_at.py
+git add src/ormah/engine/memory_engine.py tests/test_engine/test_archived_at.py
+git commit -m &quot;feat(engine): stamp archived_at on entering archival, clear on leaving (#28)&quot;</code></pre>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>
+<span class="role">Plan &middot; #28 &middot; 2026-06-15</span></div>
+</main></body></html>

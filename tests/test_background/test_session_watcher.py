@@ -248,3 +248,94 @@ def test_nonexistent_watch_dir(engine, tmp_path):
 
     observers = start_session_watcher(engine)
     assert observers == []
+
+
+# --- Test 11: Incremental — only appended turns are re-ingested ---
+
+def test_incremental_only_new_turns(engine, tmp_path):
+    """After the first ingest, a later change feeds ONLY the appended turns to ingest."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    captured: list[str] = []
+    real_ingest = engine.ingest_conversation
+
+    def capture(content, **kwargs):
+        captured.append(content)
+        return real_ingest(content=content, **kwargs)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=capture):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        first_offset = state[str(jsonl.relative_to(watch_dir))]["end_offset"]
+        assert first_offset > 0
+
+        _make_jsonl(jsonl, user_turns=12)  # identical first 6 turns + 6 appended
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+
+    assert "User message 0 " not in captured[1]
+    assert "User message 6 " in captured[1]
+    assert state[str(jsonl.relative_to(watch_dir))]["end_offset"] > first_offset
+
+
+# --- Test 12: Incremental — too-few new turns defers ---
+
+def test_incremental_defers_small_append(engine, tmp_path):
+    """A change adding fewer than min_turns new turns does not trigger a second ingest."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    calls = 0
+    real_ingest = engine.ingest_conversation
+
+    def counting(content, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_ingest(content=content, **kwargs)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=counting):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        saved = dict(state[str(jsonl.relative_to(watch_dir))])
+
+        _make_jsonl(jsonl, user_turns=8)  # only 2 new turns < min_turns
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is False
+
+    assert calls == 1
+    assert state[str(jsonl.relative_to(watch_dir))] == saved
+
+
+# --- Test 13: Shrink resets the cursor ---
+
+def test_shrink_resets_cursor(engine, tmp_path):
+    """A file that shrinks below the stored offset is re-ingested from the start."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    _make_jsonl(jsonl, user_turns=10)
+
+    captured: list[str] = []
+    real_ingest = engine.ingest_conversation
+
+    def capture(content, **kwargs):
+        captured.append(content)
+        return real_ingest(content=content, **kwargs)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=capture):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+
+        _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+
+    assert "User message 0 " in captured[1]

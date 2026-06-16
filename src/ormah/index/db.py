@@ -110,10 +110,43 @@ class Database:
                 ("valid_until", "ALTER TABLE nodes ADD COLUMN valid_until TEXT"),
                 ("stability", "ALTER TABLE nodes ADD COLUMN stability REAL DEFAULT 1.0"),
                 ("last_review", "ALTER TABLE nodes ADD COLUMN last_review TEXT"),
+                ("archived_at", "ALTER TABLE nodes ADD COLUMN archived_at TEXT"),
             ]
             for col_name, ddl in enrichment_migrations:
                 if col_name not in node_cols:
                     conn.execute(ddl)
+
+            if "archived_at" not in node_cols and "updated" in node_cols:
+                # Newly added: seed existing archival rows with their `updated` time, the
+                # best proxy for when they were demoted. Non-archival rows stay NULL.
+                # INDEX-ONLY: this helps until the next full_rebuild. The durable, atomic
+                # backfill of the SOURCE files is Task 09 (lazy, out of this transaction).
+                # Guard on `updated`: a very old legacy schema may predate that column.
+                conn.execute(
+                    "UPDATE nodes SET archived_at = updated "
+                    "WHERE tier = 'archival' AND archived_at IS NULL"
+                )
+
+            if "seq" not in node_cols:
+                conn.execute("ALTER TABLE nodes ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
+                # Backfill existing rows: oldest (created ASC) gets the lowest seq,
+                # so the historical backlog drains oldest-first.
+                rows = conn.execute(
+                    "SELECT id FROM nodes ORDER BY created ASC, rowid ASC"
+                ).fetchall()
+                for i, row in enumerate(rows, start=1):
+                    conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (i, row[0]))
+                # Initialize the durable monotonic counter past the backfilled max,
+                # so future writes always allocate seq above any current watermark.
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+                    (str(len(rows) + 1),),
+                )
+
+            # Index created here (not in schema.sql): on a legacy DB schema.sql's
+            # executescript runs before the column exists. Unconditional so a fresh DB
+            # (which skips the block above) still gets the index.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq)")
 
             # Create new feedback/logging tables if missing
             existing_tables = {

@@ -1,5 +1,7 @@
 """Tests for markdown parsing and serialization."""
 
+from datetime import datetime, timezone
+
 from ormah.models.node import Connection, EdgeType, MemoryNode, NodeType, Tier
 from ormah.store.markdown import parse_node, serialize_node
 
@@ -50,3 +52,17 @@ This is a simple fact."""
     assert node.content == "This is a simple fact."
     assert node.tier == Tier.working  # default
     assert node.connections == []
+
+
+def test_archived_at_round_trips_through_frontmatter():
+    when = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    node = MemoryNode(type=NodeType.fact, tier=Tier.archival,
+                      content="x", archived_at=when)
+    parsed = parse_node(serialize_node(node))
+    assert parsed.archived_at == when
+
+
+def test_archived_at_absent_when_none():
+    node = MemoryNode(type=NodeType.fact, content="x")
+    assert "archived_at" not in serialize_node(node)
+    assert parse_node(serialize_node(node)).archived_at is None

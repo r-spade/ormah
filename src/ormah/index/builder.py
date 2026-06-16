@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -31,6 +30,10 @@ class IndexBuilder:
                 conn.execute("DELETE FROM node_vectors")
             except Exception:
                 pass  # table may not exist
+
+        # Mass reindex re-allocates seq from the durable counter; clear the watermark so the
+        # rebuilt store is reprocessed even if the counter was also reset (wiped meta).
+        self.db.conn.execute("DELETE FROM meta WHERE key = 'auto_link_watermark'")
 
         # Two-pass: nodes first, then edges (to satisfy FK constraints)
         paths = list(self.file_store.list_paths())
@@ -112,9 +115,9 @@ class IndexBuilder:
             INSERT OR REPLACE INTO nodes
             (id, type, tier, source, space, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
-             valid_until, stability, last_review, file_path, file_hash)
+             valid_until, stability, last_review, archived_at, file_path, file_hash)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?)
             """,
             (
                 node.id,
@@ -133,9 +136,23 @@ class IndexBuilder:
                 node.valid_until.isoformat() if node.valid_until else None,
                 node.stability,
                 node.last_review.isoformat() if node.last_review else None,
+                node.archived_at.isoformat() if node.archived_at else None,
                 str(path),
                 file_hash,
             ),
+        )
+
+        # Durable monotonic change-sequence (council v2 crit#1): allocate the next seq from
+        # meta.node_seq_next — never decreases, independent of current rows, unlike MAX(seq)+1
+        # which is non-monotonic across INSERT OR REPLACE. Every content (re)write lands the node
+        # at the head, so reindex/import/restore re-enter the delta regardless of frontmatter
+        # timestamps. Metadata-only UPDATEs elsewhere do not pass through here.
+        row = conn.execute("SELECT value FROM meta WHERE key = 'node_seq_next'").fetchone()
+        next_seq = int(row[0]) if row else 1
+        conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (next_seq, node.id))
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+            (str(next_seq + 1),),
         )
 
         # Tags

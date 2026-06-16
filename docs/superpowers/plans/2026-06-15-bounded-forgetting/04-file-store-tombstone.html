@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task 04: file_store tombstone — `deleted_at`, `list_deleted`, `purge`</title>
+<!-- rich-doc-src-sha256:2ce9174d2ee4e55dc8a9617f4dcb14f1f07b150a13be072c4ef208f554e0979c -->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body>
+<nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
+<div class="doc-title">Bounded forgetting</div>
+
+</nav>
+<main>
+<div class="eyebrow">Implementation plan</div>
+<h1 id="task-04-file-store-tombstone-deleted-at-list-deleted-purge">Task 04: file_store tombstone — <code>deleted_at</code>, <code>list_deleted</code>, <code>purge</code></h1>
+<p><code>soft_delete</code> already moves a node file to <code>deleted/</code>. Make it stamp <code>deleted_at</code> into the moved file&#x27;s frontmatter (self-contained purge clock), and add <code>list_deleted()</code> + <code>purge()</code> so Phase B can find and hard-remove expired tombstones.</p>
+<p><strong>Files:</strong></p>
+<ul><li>Modify: <code>src/ormah/store/file_store.py</code></li><li>Test: <code>tests/test_store/test_soft_delete_tombstone.py</code></li></ul>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing test</strong></li></ul>
+<p>Create <code>tests/test_store/test_soft_delete_tombstone.py</code>:</p>
+<pre><code class="lang-python">from __future__ import annotations
+
+import frontmatter
+
+from ormah.models.node import MemoryNode, NodeType
+from ormah.store.file_store import FileStore
+
+
+def _store(tmp_path):
+    return FileStore(tmp_path / &quot;nodes&quot;)
+
+
+def _make(store, content=&quot;x&quot;):
+    node = MemoryNode(type=NodeType.fact, content=content, title=content)
+    store.save(node)
+    return node
+
+
+def test_soft_delete_stamps_deleted_at(tmp_path):
+    store = _store(tmp_path)
+    node = _make(store)
+
+    assert store.soft_delete(node.id) is True
+
+    deleted_dir = tmp_path / &quot;deleted&quot;
+    files = list(deleted_dir.glob(&quot;*.md&quot;))
+    assert len(files) == 1
+    meta = frontmatter.loads(files[0].read_text(encoding=&quot;utf-8&quot;)).metadata
+    assert &quot;deleted_at&quot; in meta and meta[&quot;deleted_at&quot;]
+
+
+def test_list_deleted_returns_id_and_deleted_at(tmp_path):
+    store = _store(tmp_path)
+    node = _make(store)
+    store.soft_delete(node.id)
+
+    entries = store.list_deleted()
+    assert len(entries) == 1
+    node_id, deleted_at, path = entries[0]
+    assert node_id == node.id
+    assert deleted_at is not None
+    assert path.exists()
+
+
+def test_purge_removes_tombstone(tmp_path):
+    store = _store(tmp_path)
+    node = _make(store)
+    store.soft_delete(node.id)
+
+    assert store.purge(node.id) is True
+    assert store.list_deleted() == []
+    assert store.purge(node.id) is False  # idempotent: already gone</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run test to verify it fails</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_store/test_soft_delete_tombstone.py -v</code> Expected: FAIL (<code>deleted_at</code> not stamped; <code>list_deleted</code>/<code>purge</code> missing).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Implement in <code>file_store.py</code></strong></li></ul>
+<p>Add <code>import frontmatter</code> at the top (with the other imports). <code>os</code> and <code>tempfile</code> are already imported in <code>file_store.py</code>.</p>
+<p>Replace the existing <code>soft_delete</code> method body with an <strong>atomic</strong> tombstone write that mirrors <code>save()</code> (council R3 H6: the old <code>path.rename</code> was atomic; an in-place <code>write_text</code>+<code>unlink</code> is not — a crash mid-write could truncate the tombstone):</p>
+<pre><code class="lang-python">    def soft_delete(self, node_id: str) -&gt; bool:
+        &quot;&quot;&quot;Move a node file to the deleted/ directory, stamping deleted_at atomically.
+
+        The deleted_at tombstone in the moved file&#x27;s frontmatter is the purge
+        clock (#28): self-contained, so it survives backup/restore and mtime resets.
+        Written via tmp + fsync + os.replace so a crash never leaves a partial tombstone.
+        &quot;&quot;&quot;
+        path = self._find_file(node_id)
+        if path is None:
+            return False
+        deleted_dir = self.nodes_dir.parent / &quot;deleted&quot;
+        deleted_dir.mkdir(parents=True, exist_ok=True)
+
+        post = frontmatter.loads(path.read_text(encoding=&quot;utf-8&quot;))
+        post[&quot;deleted_at&quot;] = datetime.now(timezone.utc).isoformat().replace(&quot;+00:00&quot;, &quot;Z&quot;)
+        text = frontmatter.dumps(post)
+        dest = deleted_dir / path.name
+
+        fd, tmp = tempfile.mkstemp(dir=str(deleted_dir), suffix=&quot;.tmp&quot;, prefix=&quot;.ormah_&quot;)
+        closed = False
+        try:
+            data = text.encode(&quot;utf-8&quot;)
+            written = 0
+            while written &lt; len(data):     # write-all: os.write may short-write (council R4 H9)
+                written += os.write(fd, data[written:])
+            os.fsync(fd)
+            os.close(fd)
+            closed = True
+            os.replace(tmp, str(dest))   # atomic publish of the tombstone
+        except BaseException:
+            if not closed:
+                os.close(fd)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        path.unlink()                    # remove the original only after dest is durable
+
+        self._id_cache.pop(node_id, None)
+        return True</code></pre>
+<p>Add two new methods after <code>soft_delete</code>:</p>
+<pre><code class="lang-python">    def list_deleted(self) -&gt; list[tuple[str, str | None, Path]]:
+        &quot;&quot;&quot;List tombstones in deleted/ as (node_id, deleted_at, path).&quot;&quot;&quot;
+        deleted_dir = self.nodes_dir.parent / &quot;deleted&quot;
+        if not deleted_dir.exists():
+            return []
+        out: list[tuple[str, str | None, Path]] = []
+        for path in sorted(deleted_dir.glob(&quot;*.md&quot;)):
+            try:
+                meta = frontmatter.loads(path.read_text(encoding=&quot;utf-8&quot;)).metadata
+            except Exception:
+                continue  # skip unreadable tombstone
+            node_id = meta.get(&quot;id&quot;)
+            if node_id:
+                out.append((node_id, meta.get(&quot;deleted_at&quot;), path))
+        return out
+
+    def purge(self, node_id: str) -&gt; bool:
+        &quot;&quot;&quot;Hard-delete a tombstone from deleted/. Returns True if removed.&quot;&quot;&quot;
+        deleted_dir = self.nodes_dir.parent / &quot;deleted&quot;
+        if not deleted_dir.exists():
+            return False
+        for node_id_found, _deleted_at, path in self.list_deleted():
+            if node_id_found == node_id:
+                path.unlink()
+                return True
+        return False</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 4: Run test to verify it passes</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_store/test_soft_delete_tombstone.py -v</code> Expected: PASS (3 tests).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 5: Regression — manual delete path still works</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_engine -k delete -v</code> Expected: PASS (engine.delete_node calls soft_delete; the stamp is additive).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 6: Lint + commit</strong></li></ul>
+<pre><code class="lang-bash">.venv/bin/ruff check src/ormah/store/file_store.py tests/test_store/test_soft_delete_tombstone.py
+git add src/ormah/store/file_store.py tests/test_store/test_soft_delete_tombstone.py
+git commit -m &quot;feat(store): stamp deleted_at on soft_delete; add list_deleted/purge (#28)&quot;</code></pre>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>
+<span class="role">Plan &middot; #28 &middot; 2026-06-15</span></div>
+</main></body></html>

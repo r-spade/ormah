@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bounded Forgetting (#28) — Design</title><!-- rich-doc-src-sha256:227d9da3ed8c2233382836bf634a1814267472c94a46feb5fca1444f604d56bd --><style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body><nav class="toc"><div class="eyebrow">Ormah &middot; #28</div><div class="doc-title">Bounded forgetting</div>
+<a href="#problem" class="lvl-2">Problem</a>
+<a href="#design-constraint" class="lvl-2">Design constraint</a>
+<a href="#decisions-locked-during-brainstorming" class="lvl-2">Decisions (locked during brainstorming)</a>
+<a href="#architecture-one-new-background-job" class="lvl-2">Architecture: one new background job</a>
+<a href="#phase-a-gates-soft-delete-cap-backstop" class="lvl-3">Phase A — gates → soft-delete (+ cap backstop)</a>
+<a href="#phase-b-hard-purge" class="lvl-3">Phase B — hard-purge</a>
+<a href="#schema-change-one-migration" class="lvl-2">Schema change (one migration)</a>
+<a href="#file-store-changes" class="lvl-2">file_store changes</a>
+<a href="#1-eligibility-gates-delete-only-when-all-hold" class="lvl-2">§1 Eligibility gates (delete only when ALL hold)</a>
+<a href="#3-cap-backstop-forget-score" class="lvl-2">§3 Cap backstop (forget-score)</a>
+<a href="#config-new-fields-in-src-ormah-config-py-ormah-env-prefix" class="lvl-2">Config (new fields in `src/ormah/config.py`, `ORMAH_` env prefix)</a>
+<a href="#operation" class="lvl-2">Operation</a>
+<a href="#testing-tdd" class="lvl-2">Testing (TDD)</a>
+<a href="#known-limitation-deletion-mutation-race-accepted-tracked-separately" class="lvl-2">Known limitation: deletion/mutation race (accepted, tracked separately)</a>
+<a href="#out-of-scope" class="lvl-2">Out of scope</a></nav><main><div class="eyebrow">Design spec</div><h1 id="bounded-forgetting-28-design">Bounded Forgetting (#28) — Design</h1>
+<p><strong>Issue:</strong> #28 — <code>feat(background): bounded forgetting — delete dead-weight archival nodes</code> <strong>Branch:</strong> off <code>perf/auto-linker-incremental</code> (#26 not yet merged to main) <strong>Date:</strong> 2026-06-15</p>
+<h2 id="problem">Problem</h2>
+<p>Decay is a one-way ratchet. <code>decay_manager</code> demotes stale <code>working</code> nodes to <code>archival</code> (<code>src/ormah/background/decay_manager.py</code>) but nothing ever removes them. <code>archival</code> only grows. On André&#x27;s real store (8.355 nodes, 80% archival) that graveyard:</p>
+<ul><li>counts toward total node count (graph UI struggles),</li><li>is scanned by every background job (auto-linker is O(n²) over *all* nodes),</li><li>still surfaces in recall as noise (only down-ranked via <code>tier_boost_archival = -0.1</code>).</li></ul>
+<p>Decay reduces *priority*, not *cost* or *noise*. <strong>Deletion is the only lever that shrinks the store.</strong> Shrinking <code>n</code> is also a free multiplier for #26 (auto-linker) and #25 (vector search).</p>
+<h2 id="design-constraint">Design <em>constraint</em></h2>
+<p>Deletion is irreversible and memory lives on trust. A false negative — deleting something that later mattered — is unrecoverable. Therefore:</p>
+<div class="callout">Deletion never depends on a single signal. It acts only on the <code>archival</code> tail, requires the conjunction of several independent signals, and keeps a reversibility window before anything leaves disk. Every decision is explainable per node.</div>
+<h2 id="decisions-locked-during-brainstorming">Decisions (locked during <em>brainstorming)</em></h2>
+<table><thead><tr><th>Decision</th><th>Choice</th><th>Rationale</th></tr></thead><tbody><tr><td>Scope</td><td>Full issue: §1 gates + §2 soft→hard-purge + §3 cap backstop</td><td>André opted for the complete lifecycle in one delivery.</td></tr><tr><td>Default state</td><td>Opt-in, <strong>OFF</strong> (<code>deletion_enabled = False</code>)</td><td>Irreversible action in a trust-critical system → fail-closed default; user arms it explicitly.</td></tr><tr><td>Enablement surface</td><td><strong>Env / <code>.env</code> only, no UI toggle</strong></td><td>The web UI is too slow to open at André&#x27;s node count. All config is pydantic-settings (<code>ORMAH_</code> prefix), read from <code>~/.config/ormah/.env</code> and <code>./.env</code>.</td></tr><tr><td>Purge timing</td><td><code>deleted_at</code> stamped in the moved file&#x27;s <strong>frontmatter</strong></td><td>Self-contained: survives backup/restore and mtime/TCC-copy resets on this machine.</td></tr><tr><td>&quot;archived ≥ N days&quot; signal</td><td>Dedicated <strong><code>nodes.archived_at</code></strong> column</td><td>Only robust way to express graveyard age without coupling to unrelated <code>update_node</code> writes.</td></tr></tbody></table>
+<h2 id="architecture-one-new-background-job">Architecture: one new background <em>job</em></h2>
+<p>New module <code>src/ormah/background/forgetting_manager.py</code> → <code>run_forgetting(engine)</code>, registered in <code>src/ormah/background/scheduler.py</code> with its own interval. Each run has two phases, both guarded by the master switch <code>deletion_enabled</code> (when <code>False</code>, the job returns immediately — a no-op):</p>
+<h3 id="phase-a-gates-soft-delete-cap-backstop">Phase A — gates → soft-delete (+ cap backstop)</h3>
+<ol><li>Select <code>archival</code> candidates (SQL prefilter on cheap columns).</li><li>Apply the conjunction gates (§1). For each eligible node, call <code>engine.delete_node(id)</code>,</li></ol>
+<p>   which already does: index removal, <code>audit_log</code> (<code>operation=&#x27;delete&#x27;</code>), <code>auto_link_checked</code>    cleanup, and <code>file_store.soft_delete</code> (move to <code>deleted/</code>).</p>
+<ol><li>If <code>archival_soft_cap &gt; 0</code> and the surviving archival count still exceeds it, evict</li></ol>
+<p>   worst-first by forget-score (§3) down to the cap, <strong>respecting every protection in §1</strong>.</p>
+<h3 id="phase-b-hard-purge">Phase B — hard-purge</h3>
+<ol><li><code>file_store.list_deleted()</code> → iterate files in <code>deleted/</code>.</li><li>Parse <code>deleted_at</code> from each file&#x27;s frontmatter.</li><li>For files older than <code>deletion_retention_days</code>, <code>file_store.purge(node_id)</code> (remove from</li></ol>
+<p>   disk) and write <code>audit_log</code> (<code>operation=&#x27;purge&#x27;</code>).</p>
+<p>Reusing <code>engine.delete_node</code> for soft-delete keeps a single deletion path (index + audit + auto-link cleanup all handled), so the new job stays small.</p>
+<h2 id="schema-change-one-migration">Schema change (one <em>migration)</em></h2>
+<p>Add <code>nodes.archived_at TEXT</code> (nullable):</p>
+<ul><li>Set when a node is demoted to <code>archival</code> — in the <code>decay_manager</code> demotion path (and any</li></ul>
+<p>  other path that writes <code>tier = archival</code>).</p>
+<ul><li>Migration in <code>Database._migrate</code> adds the column and backfills existing <code>archival</code> rows</li></ul>
+<p>  with their current <code>updated</code> value (best available proxy for legacy data). The backfill   writes the <strong>source markdown files</strong>, not only the index: the index is derived, so an   index-only backfill is wiped by the next <code>full_rebuild</code>/restore (which re-parses   <code>archived_at=None</code>), permanently excluding legacy archival nodes from forgetting. A test   asserts the value survives a full rebuild.</p>
+<h2 id="file-store-changes">file_store <em>changes</em></h2>
+<ul><li><code>soft_delete(node_id)</code> — before/while moving to <code>deleted/</code>, stamp <code>deleted_at: &lt;iso&gt;</code> into</li></ul>
+<p>  the file&#x27;s frontmatter. Centralized here, so manual <code>delete_node</code> also gets a timed   reversibility window.</p>
+<ul><li><code>list_deleted()</code> — new: enumerate files currently in <code>deleted/</code>.</li><li><code>purge(node_id)</code> — new: hard-remove a file from <code>deleted/</code>.</li></ul>
+<h2 id="1-eligibility-gates-delete-only-when-all-hold">§1 Eligibility gates (delete only when ALL <em>hold)</em></h2>
+<p>Over <code>tier == archival</code> candidates; cheap predicates in SQL, FSRS <code>R</code> computed in Python (same formula as <code>decay_manager</code>: <code>R = exp(-days_since_anchor / stability)</code>).</p>
+<ol><li><code>tier == archival</code> — never <code>working</code>/<code>core</code>.</li><li><code>archived_at &lt;= now − deletion_min_archival_days</code> <strong>AND</strong></li></ol>
+<p>   <code>last_accessed &lt;= now − deletion_min_archival_days</code> — sustained staleness, not a point    reading.</p>
+<ol><li><code>R &lt; deletion_retrievability_floor</code> — retrievability below a hard floor (deeper than the</li></ol>
+<p>   decay demotion threshold).</p>
+<ol><li><code>importance &lt; decay_importance_threshold</code> — high importance never deletes.</li><li><code>NOT EXISTS (SELECT 1 FROM affinity WHERE node_id = ? AND signal &gt; 0)</code> — never positively</li></ol>
+<p>   useful (any <code>submit_feedback(+1)</code> or positive affinity ⇒ protected forever). Ties into #21.</p>
+<ol><li><code>degree &lt;= deletion_max_degree</code> <strong>AND</strong> no edge with <code>weight &gt;= deletion_strong_edge_weight</code></li></ol>
+<p>   — leaves are safe; never delete a bridge/hub.</p>
+<ol><li>Not the user/self node. (No &quot;pin&quot; concept exists in the schema today; protection is the</li></ol>
+<p>   self node. If a pin feature is added later, it must be respected here.)</p>
+<p>Each gate alone produces false positives; the conjunction only catches genuine dead weight: archival, unimportant, unused, never useful, weakly connected, old.</p>
+<p>The gates split into two kinds, sharing one <code>_is_protected(node)</code> predicate reused by Phase A and the §3 cap so they can never disagree:</p>
+<ul><li><strong>Protections (hard &quot;never delete&quot;):</strong> self node, <code>archived_at IS NULL</code>, high importance</li></ul>
+<p>  (#4), positive feedback (#5), hub/strong-edge or degree &gt; max (#6). <code>archived_at IS NULL</code>   covers nodes created directly as <code>archival</code> via <code>remember(tier=archival)</code> — un-aged, so   protected.</p>
+<ul><li><strong>Staleness signals (sustained dead weight):</strong> archived long enough (#2), not re-accessed</li></ul>
+<p>  (#2), <code>R</code> below the floor (#3). Phase A requires *not protected AND stale*.</p>
+<p><strong><code>archived_at</code> lifecycle:</strong> stamped on <strong>every</strong> transition into archival and <strong>cleared</strong> when the node leaves archival — so an <code>archival → working → archival</code> round-trip resets the clock instead of reusing a stale months-old timestamp.</p>
+<p><strong>Atomic delete-if-eligible:</strong> background jobs run concurrently, so eligibility is rechecked <strong>inside</strong> the <code>BEGIN IMMEDIATE</code> deletion transaction via <code>engine.delete_node_guarded(id, guard)</code>. The guard is <strong>hybrid</strong>: it reads the volatile protective fields (<code>tier</code>, <code>last_accessed</code>, <code>archived_at</code>) from the <strong>source markdown file</strong>, because mutators (<code>update_node</code>, <code>_touch_access</code>) write the file *before* the index — a guard reading only the index could act on stale state and delete a node mid-promotion. <code>importance</code>/affinity/edges stay index-authoritative and are serialized by the transaction. The deletion <strong>moves the file first, then removes the index row</strong> inside the same transaction, so a crash leaves at worst a dangling index row (healed on rebuild), never a resurrected node. No global lock around <code>recall</code> — that would reintroduce the #18/#19 contention PR#19 fixed. The soft-delete is reversible for <code>deletion_retention_days</code>, so even a missed race is recoverable, not irreversible.</p>
+<h2 id="3-cap-backstop-forget-score">§3 Cap backstop <em>(forget-score)</em></h2>
+<p>When <code>archival_soft_cap &gt; 0</code> and exceeded, evict worst-first by a composite forget-score:</p>
+<pre><code class="lang-">score = (1 − R) · (1 − importance) · age_days · 1/(1 + degree) · no_positive_feedback</code></pre>
+<p>where <code>age_days = now − archived_at</code>. The cap evaluates candidates through the <strong>same <code>_is_protected</code> predicate</strong> as Phase A, so protected nodes (self, null-<code>archived_at</code>, high importance, positive feedback, hub) are never evicted — the forget-score only orders the *unprotected* remainder. The cap deliberately ignores the staleness signals (it may evict a node younger than the graveyard window — that is the backstop&#x27;s purpose). Sort descending, evict down to the cap. If only protected nodes remain, the store stays above the cap — better to exceed the cap than delete a valuable memory.</p>
+<h2 id="config-new-fields-in-src-ormah-config-py-ormah-env-prefix">Config (new fields in <code>src/ormah/config.py</code>, <code>ORMAH_</code> env <em>prefix)</em></h2>
+<table><thead><tr><th>Field</th><th>Default</th><th>Env var</th></tr></thead><tbody><tr><td><code>deletion_enabled</code></td><td><code>False</code></td><td><code>ORMAH_DELETION_ENABLED</code></td></tr><tr><td><code>forgetting_interval_hours</code></td><td><code>24</code></td><td><code>ORMAH_FORGETTING_INTERVAL_HOURS</code></td></tr><tr><td><code>deletion_min_archival_days</code></td><td><code>90</code></td><td><code>ORMAH_DELETION_MIN_ARCHIVAL_DAYS</code></td></tr><tr><td><code>deletion_retrievability_floor</code></td><td><code>0.05</code></td><td><code>ORMAH_DELETION_RETRIEVABILITY_FLOOR</code></td></tr><tr><td><code>deletion_max_degree</code></td><td><code>2</code></td><td><code>ORMAH_DELETION_MAX_DEGREE</code></td></tr><tr><td><code>deletion_strong_edge_weight</code></td><td><code>0.7</code></td><td><code>ORMAH_DELETION_STRONG_EDGE_WEIGHT</code></td></tr><tr><td><code>deletion_retention_days</code></td><td><code>30</code></td><td><code>ORMAH_DELETION_RETENTION_DAYS</code></td></tr><tr><td><code>archival_soft_cap</code></td><td><code>0</code> (off)</td><td><code>ORMAH_ARCHIVAL_SOFT_CAP</code></td></tr></tbody></table>
+<p>Reuses existing <code>decay_importance_threshold</code> (0.5) for gate #4. Validators mirror the existing decay/threshold validators (positive intervals, <code>0..1</code> floors).</p>
+<h2 id="operation">Operation</h2>
+<p>Enablement and tuning are env-driven, no UI involvement. To activate on André&#x27;s machine: add <code>ORMAH_DELETION_ENABLED=true</code> (and any tuning overrides) to <code>~/.config/ormah/.env</code>, then restart the server. The slow web UI is never on the critical path.</p>
+<h2 id="testing-tdd">Testing <em>(TDD)</em></h2>
+<p>Unit tests (mock external boundaries, real SQLite index):</p>
+<ul><li><strong>Per gate, positive + negative:</strong> stale-enough vs too-recent (<code>archived_at</code>,</li></ul>
+<p>  <code>last_accessed</code>), <code>R</code> below vs above floor, importance below vs above threshold, positive   affinity present (protected) vs absent, degree/strong-edge below vs above limits, self node   skipped.</p>
+<ul><li><strong>Conjunction:</strong> a node failing exactly one gate is not deleted; a node passing all is</li></ul>
+<p>  soft-deleted.</p>
+<ul><li><strong>Master switch:</strong> <code>deletion_enabled = False</code> ⇒ zero deletions (no-op), even with eligible</li></ul>
+<p>  nodes.</p>
+<ul><li><strong><code>soft_delete</code> stamps <code>deleted_at</code></strong> in frontmatter; file lands in <code>deleted/</code>.</li><li><strong>Phase B purge:</strong> files past <code>deletion_retention_days</code> are removed; files inside the window</li></ul>
+<p>  survive; <code>audit_log</code> records <code>operation=&#x27;purge&#x27;</code>.</p>
+<ul><li><strong>Cap backstop:</strong> with <code>archival_soft_cap</code> set, worst-first eviction down to the cap;</li></ul>
+<p>  protected/feedback-positive/hub nodes never evicted even if it leaves the count above cap.</p>
+<ul><li><strong><code>archived_at</code>:</strong> set on demotion in <code>decay_manager</code>; migration backfills existing</li></ul>
+<p>  archival rows from <code>updated</code>.</p>
+<ul><li><strong>Idempotence:</strong> a second run with no newly-eligible nodes deletes nothing.</li></ul>
+<h2 id="known-limitation-deletion-mutation-race-accepted-tracked-separately">Known limitation: deletion/mutation race (accepted, tracked <em>separately)</em></h2>
+<p>Four council rounds converged on this: the engine&#x27;s mutators (<code>update_node</code>, <code>_touch_access</code>) write the markdown <strong>file before</strong> acquiring the index transaction, and file operations are not covered by <code>Database.transaction</code>&#x27;s lock. So a vanishingly small window remains: between the guard&#x27;s source-file read and <code>soft_delete</code>&#x27;s move, a concurrent recall/promotion could re-save the file, and the node would be soft-deleted anyway. The hybrid guard + move-first ordering narrow this to microseconds but cannot close it at the forgetting layer.</p>
+<p><strong>Why it is acceptable to ship:</strong> the feature is opt-in and OFF by default; deletion is <strong>soft</strong> and reversible for <code>deletion_retention_days</code> (30); and the precondition (a node untouched for 90+ days being recalled in the exact microsecond of a daily job) makes the race astronomically improbable and fully recoverable.</p>
+<p><strong>Root fix (separate issue — #29):</strong> reorder the elegibility-affecting mutators to acquire <code>db.transaction()</code> <strong>before</strong> <code>file_store.save()</code>, making the index/lock authoritative so the guard&#x27;s <code>BEGIN IMMEDIATE</code> serializes everything. This touches the recall hot path, so it is its own change with explicit sign-off — not gated inside #28 (a global recall lock is rejected: it reintroduces the #18/#19 contention PR#19 fixed).</p>
+<h2 id="out-of-scope">Out of <em>scope</em></h2>
+<ul><li>UI changes (the issue&#x27;s #22 active-graph-first is separate).</li><li>Restore-from-<code>deleted/</code> UX (the reversibility window exists; a restore command is not part</li></ul>
+<p>  of this slice).</p>
+<ul><li>#25 ANN / vector-search work (deferred per the perf roadmap).</li><li>The deletion/mutation race root fix (see Known limitation above) — separate engine issue.</li></ul>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span><span class="role">Design spec &middot; #28 &middot; 2026-06-15</span></div></main></body></html>

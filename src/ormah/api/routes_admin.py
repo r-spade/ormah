@@ -19,6 +19,7 @@ class BackupSettingsUpdate(BaseModel):
 _TASK_RUNNERS = {
     "auto_linker": ("ormah.background.auto_linker", "run_auto_linker"),
     "decay_manager": ("ormah.background.decay_manager", "run_decay"),
+    "forgetting_manager": ("ormah.background.forgetting_manager", "run_forgetting"),
     "conflict_detector": ("ormah.background.conflict_detector", "run_conflict_detection"),
     "duplicate_merger": ("ormah.background.duplicate_merger", "run_duplicate_detection"),
     "auto_cluster": ("ormah.background.auto_cluster", "run_auto_cluster"),
@@ -37,6 +38,7 @@ _TASK_DESCRIPTIONS = {
     "auto_cluster": "Groups memories into clusters based on semantic similarity and tags.",
     "consolidator": "Merges or summarizes redundant working-tier memories into consolidated entries.",
     "decay_manager": "Applies time-based decay to memory importance, demoting stale unused memories.",
+    "forgetting_manager": "Bounded forgetting (#28): soft-deletes dead-weight archival nodes and purges expired tombstones. No-op unless deletion_enabled is set.",
     "hippocampus": "Scans for structural patterns and promotes frequently accessed working memories to core.",
     "memory_backup": "Creates a local backup of memory source files when one is due.",
 }
@@ -51,6 +53,7 @@ _SLEEP_CYCLE_ORDER = [
     "auto_cluster",
     "consolidator",
     "decay_manager",
+    "forgetting_manager",
     "memory_backup",
 ]
 

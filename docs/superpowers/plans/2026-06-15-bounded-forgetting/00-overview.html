@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bounded Forgetting (#28) Implementation Plan — Overview</title>
+<!-- rich-doc-src-sha256:291fbbdf5082b9a02e37db29d7c939236abf4a72678f794d204b64298f4c43bc -->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body>
+<nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
+<div class="doc-title">Bounded forgetting</div>
+<a href="#conventions-for-every-task" class="lvl-2">Conventions for every task</a>
+<a href="#file-map" class="lvl-2">File map</a>
+<a href="#task-order-dependencies" class="lvl-2">Task order &amp; dependencies</a>
+<a href="#council-revisions-baked-in-r1-r2" class="lvl-2">Council revisions baked in (R1 + R2)</a>
+<a href="#definition-of-done" class="lvl-2">Definition of done</a>
+</nav>
+<main>
+<div class="eyebrow">Implementation plan</div>
+<h1 id="bounded-forgetting-28-implementation-plan-overview">Bounded Forgetting (#28) Implementation Plan — Overview</h1>
+<div class="callout"><strong>For agentic workers:</strong> REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Each subagent gets THIS overview + its own task file (<code>NN-*.md</code>). Steps use checkbox (<code>- [ ]</code>) syntax.</div>
+<p><strong>Goal:</strong> Add an opt-in background job that deletes dead-weight <code>archival</code> nodes through a conjunction of safety gates, with a reversible soft-delete → hard-purge lifecycle and a cap backstop.</p>
+<p><strong>Architecture:</strong> One new job <code>forgetting_manager.run_forgetting(engine)</code>, two phases (gates→soft-delete + cap, then hard-purge), both behind a master switch <code>deletion_enabled</code> (default OFF). <code>archived_at</code> becomes a first-class node timestamp (frontmatter → index, since the SQLite index is *derived* and rebuilt from files). <code>deleted_at</code> is a tombstone stamped into the moved file&#x27;s frontmatter, used to time the purge.</p>
+<p><strong>Tech Stack:</strong> Python 3.11, SQLite (<code>sqlite3</code> via <code>Database</code>), pydantic-settings, python-frontmatter, APScheduler, pytest (<code>asyncio_mode=auto</code>, default run excludes <code>integration</code>).</p>
+<p><strong>Spec:</strong> <code>docs/superpowers/specs/2026-06-15-bounded-forgetting-design.md</code></p>
+<h2 id="conventions-for-every-task">Conventions for every <em>task</em></h2>
+<ul><li>Run tests with the working-tree interpreter: <code>.venv/bin/python -m pytest &lt;path&gt; -v</code></li></ul>
+<p>  (per <code>[[ormah-dev-run-setup]]</code> — the global <code>uv</code>-tool ormah is a different version).</p>
+<ul><li>Lint touched files: <code>.venv/bin/ruff check src/ tests/</code> (line-length 100, py311).</li><li>The <code>engine</code> pytest fixture (<code>tests/conftest.py</code>) gives a live <code>MemoryEngine</code> with</li></ul>
+<p>  <code>engine.remember(CreateNodeRequest(...)) -&gt; (node_id, msg)</code>, <code>engine.db.conn</code>,   <code>engine.file_store</code>, <code>engine.builder</code>, <code>engine.update_node</code>, <code>engine.connect</code>,   <code>engine.user_node_id</code>.</p>
+<ul><li>Commit after each task with the message shown in its final step.</li></ul>
+<h2 id="file-map">File <em>map</em></h2>
+<table><thead><tr><th>File</th><th>Responsibility</th><th>Task</th></tr></thead><tbody><tr><td><code>src/ormah/config.py</code></td><td>8 new deletion settings + validators</td><td>01</td></tr><tr><td><code>src/ormah/models/node.py</code>, <code>store/markdown.py</code>, <code>index/schema.sql</code>, <code>index/db.py</code>, <code>index/builder.py</code></td><td><code>archived_at</code> plumbing (model→frontmatter→schema→migration→index)</td><td>02</td></tr><tr><td><code>src/ormah/engine/memory_engine.py</code></td><td>stamp <code>archived_at</code> on demotion to archival (<code>update_node</code> chokepoint)</td><td>03</td></tr><tr><td><code>src/ormah/store/file_store.py</code></td><td><code>soft_delete</code> stamps <code>deleted_at</code>; new <code>list_deleted()</code>, <code>purge()</code></td><td>04</td></tr><tr><td><code>src/ormah/background/forgetting_manager.py</code></td><td>Phase A: gates → soft-delete</td><td>05</td></tr><tr><td><code>src/ormah/background/forgetting_manager.py</code></td><td>§3 cap backstop (forget-score eviction)</td><td>06</td></tr><tr><td><code>src/ormah/engine/memory_engine.py</code></td><td><code>delete_node_guarded</code> — atomic delete-if-eligible (closes TOCTOU)</td><td>05</td></tr><tr><td><code>src/ormah/background/forgetting_manager.py</code></td><td>Phase B: hard-purge expired + audit</td><td>07</td></tr><tr><td><code>src/ormah/background/scheduler.py</code></td><td>register <code>forgetting_manager</code> job</td><td>08</td></tr><tr><td><code>src/ormah/background/forgetting_manager.py</code></td><td>lazy atomic legacy <code>archived_at</code> file backfill</td><td>09</td></tr></tbody></table>
+<h2 id="task-order-dependencies">Task order &amp; <em>dependencies</em></h2>
+<ol><li><strong>01 Config</strong> — no deps.</li><li><strong>02 archived_at plumbing</strong> — no deps (schema/model; index-only migration backfill).</li><li><strong>03 Stamp on demotion</strong> — needs 02 (stamp on entry, clear on exit).</li><li><strong>04 file_store tombstone</strong> — no deps (can parallel 01–03).</li><li><strong>05 Forgetting gates (Phase A) + <code>delete_node_guarded</code></strong> — needs 01, 02, 03, 04.</li><li><strong>06 Cap backstop</strong> — needs 05.</li><li><strong>07 Phase B purge</strong> — needs 04 (and 05&#x27;s module).</li><li><strong>08 Scheduler</strong> — needs 05 (run_forgetting exists).</li><li><strong>09 Legacy file backfill</strong> — needs 02, 03, 05 (durable file stamp for legacy nodes).</li></ol>
+<h2 id="council-revisions-baked-in-r1-r2">Council revisions baked in (R1 + <em>R2)</em></h2>
+<ul><li><strong>Cap reuses the protection set</strong> (<code>_evaluate_protection</code>) — never deletes a protected node;</li></ul>
+<p>  accepts overflow instead. Staleness is Phase-A-only.</p>
+<ul><li><strong>TOCTOU closed atomically</strong> — <code>delete_node_guarded</code> re-checks inside the <code>BEGIN IMMEDIATE</code></li></ul>
+<p>  deletion transaction (no global recall lock → no #18/#19 regression).</p>
+<ul><li><strong><code>archived_at</code> durable</strong> — stamped on every archival entry, cleared on exit; legacy files</li></ul>
+<p>  backfilled atomically once (Task 09), proven across <code>full_rebuild</code>.</p>
+<p><strong>Accepted known limitation (R4):</strong> a microscopic deletion/mutation race remains because the engine writes files before the index lock — see the spec&#x27;s &quot;Known limitation&quot; section. Accepted for ship (opt-in, OFF default, soft-delete reversible 30d); the root fix (mutators lock-before- save) is a separate engine issue, not gated inside #28.</p>
+<h2 id="definition-of-done">Definition of <em>done</em></h2>
+<ul><li>All new tests pass under <code>.venv/bin/python -m pytest tests/ -v</code>.</li><li><code>ruff check</code> clean on touched files.</li><li>With <code>deletion_enabled=False</code> (default), the job is a verified no-op.</li><li>Activation is env-only: <code>ORMAH_DELETION_ENABLED=true</code> in <code>~/.config/ormah/.env</code>.</li></ul>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>
+<span class="role">Plan &middot; #28 &middot; 2026-06-15</span></div>
+</main></body></html>

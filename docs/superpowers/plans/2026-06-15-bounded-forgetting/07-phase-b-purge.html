@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task 07: Phase B — hard-purge expired tombstones</title>
+<!-- rich-doc-src-sha256:80f1a839b627c07f1de77fb23f446553ca0d3b9fff6e7dffb4d42f656439252c -->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body>
+<nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
+<div class="doc-title">Bounded forgetting</div>
+
+</nav>
+<main>
+<div class="eyebrow">Implementation plan</div>
+<h1 id="task-07-phase-b-hard-purge-expired-tombstones">Task 07: Phase B — hard-purge expired tombstones</h1>
+<p><strong>Depends on:</strong> Tasks 04, 05.</p>
+<p>After the soft-delete phases, scan <code>deleted/</code> and hard-remove any tombstone whose <code>deleted_at</code> is older than <code>deletion_retention_days</code>, logging each purge to <code>audit_log</code> (<code>operation=&#x27;purge&#x27;</code>). Tombstones with no/unparseable <code>deleted_at</code> are kept (fail-safe).</p>
+<p><strong>Files:</strong></p>
+<ul><li>Modify: <code>src/ormah/background/forgetting_manager.py</code></li><li>Test: <code>tests/test_background/test_forgetting_manager.py</code> (append)</li></ul>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing tests</strong></li></ul>
+<p>Append to <code>tests/test_background/test_forgetting_manager.py</code>:</p>
+<pre><code class="lang-python">import frontmatter
+
+
+def _backdate_tombstone(engine, node_id, days):
+    when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace(&quot;+00:00&quot;, &quot;Z&quot;)
+    for nid, _da, path in engine.file_store.list_deleted():
+        if nid == node_id:
+            post = frontmatter.loads(path.read_text(encoding=&quot;utf-8&quot;))
+            post[&quot;deleted_at&quot;] = when
+            path.write_text(frontmatter.dumps(post), encoding=&quot;utf-8&quot;)
+            return
+    raise AssertionError(f&quot;tombstone for {node_id} not found&quot;)
+
+
+def _tombstone_ids(engine):
+    return {nid for nid, _da, _p in engine.file_store.list_deleted()}
+
+
+def test_expired_tombstone_is_purged_and_audited(engine):
+    _enable(engine)
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;bye&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;bye&quot;))
+    engine.delete_node(node_id)              # soft-delete → deleted/
+    _backdate_tombstone(engine, node_id, days=60)  # retention is 30
+
+    run_forgetting(engine)
+
+    assert node_id not in _tombstone_ids(engine)
+    audited = engine.db.conn.execute(
+        &quot;SELECT 1 FROM audit_log WHERE operation=&#x27;purge&#x27; AND node_id=?&quot;, (node_id,)
+    ).fetchone()
+    assert audited is not None
+
+
+def test_tombstone_within_window_is_kept(engine):
+    _enable(engine)
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;recent&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;recent&quot;))
+    engine.delete_node(node_id)
+    _backdate_tombstone(engine, node_id, days=5)  # inside the 30-day window
+
+    run_forgetting(engine)
+
+    assert node_id in _tombstone_ids(engine)
+
+
+def test_purge_skipped_when_disabled(engine):
+    # master switch OFF: even an old tombstone is not purged
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;keep&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;keep&quot;))
+    engine.delete_node(node_id)
+    _backdate_tombstone(engine, node_id, days=60)
+
+    run_forgetting(engine)  # deletion_enabled defaults to False
+
+    assert node_id in _tombstone_ids(engine)</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run tests to verify they fail</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -k purge -v</code> Expected: FAIL (<code>test_purge_skipped_when_disabled</code> passes already; the other two fail — expired tombstone survives).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Wire Phase B into <code>run_forgetting</code></strong></li></ul>
+<p>In <code>src/ormah/background/forgetting_manager.py</code>, replace the line:</p>
+<pre><code class="lang-python">        # Task 07 inserts Phase B (hard-purge) here.</code></pre>
+<p>with:</p>
+<pre><code class="lang-python">        _run_purge(engine, now)</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 4: Implement the purge</strong></li></ul>
+<p>Append to <code>forgetting_manager.py</code>:</p>
+<pre><code class="lang-python">def _run_purge(engine, now: datetime) -&gt; int:
+    &quot;&quot;&quot;Hard-purge tombstones whose deleted_at is past the retention window.&quot;&quot;&quot;
+    s = engine.settings
+    cutoff = now - timedelta(days=s.deletion_retention_days)
+    purged = 0
+    for node_id, deleted_at, _path in engine.file_store.list_deleted():
+        if not deleted_at:
+            continue  # no clock → keep (fail-safe)
+        try:
+            ts = datetime.fromisoformat(deleted_at)
+        except (ValueError, TypeError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts &gt; cutoff:
+            continue  # still inside the reversibility window
+        if engine.file_store.purge(node_id):
+            engine._write_audit_log(operation=&quot;purge&quot;, node_id=node_id)
+            purged += 1
+    if purged:
+        logger.info(&quot;Forgetting hard-purged %d expired tombstones&quot;, purged)
+    return purged</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 5: Run tests to verify they pass</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v</code> Expected: PASS (full suite for this module).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 6: Lint + commit</strong></li></ul>
+<pre><code class="lang-bash">.venv/bin/ruff check src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py
+git add src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py
+git commit -m &quot;feat(background): phase B hard-purge of expired tombstones (#28)&quot;</code></pre>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>
+<span class="role">Plan &middot; #28 &middot; 2026-06-15</span></div>
+</main></body></html>

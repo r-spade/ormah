@@ -779,7 +779,12 @@ class MemoryEngine:
         if req.type is not None:
             node.type = req.type
         if req.tier is not None:
+            old_tier = node.tier
             node.tier = req.tier
+            if req.tier == Tier.archival and old_tier != Tier.archival:
+                node.archived_at = datetime.now(timezone.utc)  # entered the graveyard
+            elif req.tier != Tier.archival and old_tier == Tier.archival:
+                node.archived_at = None  # left archival → reset the graveyard clock
         if req.space is not None:
             node.space = req.space
         if req.tags is not None:
@@ -855,6 +860,46 @@ class MemoryEngine:
         self.file_store.soft_delete(node_id)
 
         node_type = full_node.type.value if full_node else node.get("type", "unknown") if node else "unknown"
+        return f"Deleted [{node_type}]: {title}\nID: {node_id}"
+
+    def delete_node_guarded(self, node_id: str, guard) -> str | None:
+        """Soft-delete a node only if ``guard(conn)`` still holds inside the write txn.
+
+        ``Database.transaction`` is BEGIN IMMEDIATE and holds the cross-thread write lock for
+        its whole duration, so the guard's recheck and the index removal are atomic against any
+        concurrent feedback/connect/promotion — closing the forgetting TOCTOU race (#28) without
+        serializing the recall hot path.
+        """
+        if node_id == self.user_node_id:
+            return None
+        full_node = self.file_store.load(node_id)
+        if full_node is None:
+            return None
+        title = full_node.title or full_node.content[:60]
+        snapshot = json.dumps(full_node.model_dump(mode="json"))
+        node_type = full_node.type.value
+
+        with self.db.transaction() as conn:
+            if not guard(conn):
+                return None  # state changed since selection — abort atomically
+            # Move the file FIRST (atomic), then remove from the index — both inside the txn
+            # (council R3 H7). If we crash after the move but before COMMIT, the index still
+            # references a now-missing file: load() returns None and the next full_rebuild drops
+            # the dangling row. The reverse order would resurrect the node on rebuild.
+            if not self.file_store.soft_delete(node_id):
+                return None  # file already gone — index untouched, nothing to do
+            self.builder._remove_node(node_id)
+            conn.execute(
+                "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
+                (node_id, node_id),
+            )
+            conn.execute(
+                "INSERT INTO audit_log (operation, node_id, node_snapshot, detail, performed_at) "
+                "VALUES ('delete', ?, ?, ?, ?)",
+                (node_id, snapshot, json.dumps({"reason": "bounded_forgetting"}),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+
         return f"Deleted [{node_type}]: {title}\nID: {node_id}"
 
     def connect(self, req: ConnectRequest) -> str:

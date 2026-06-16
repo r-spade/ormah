@@ -214,3 +214,34 @@ def test_affinity_defaults():
     assert s.affinity_max_boost == 0.15
     assert s.affinity_implicit_weight == 0.8
     assert s.whisper_exploration_enabled is True
+
+
+# --- Bounded forgetting (deletion) ---
+
+def test_deletion_defaults_are_off_and_conservative():
+    from ormah.config import Settings
+    s = Settings()
+    assert s.deletion_enabled is False
+    assert s.forgetting_interval_hours == 24
+    assert s.deletion_min_archival_days == 90
+    assert s.deletion_retrievability_floor == 0.05
+    assert s.deletion_max_degree == 2
+    assert s.deletion_strong_edge_weight == 0.7
+    assert s.deletion_retention_days == 30
+    assert s.archival_soft_cap == 0
+
+
+def test_deletion_enabled_from_env(monkeypatch):
+    from ormah.config import Settings
+    monkeypatch.setenv("ORMAH_DELETION_ENABLED", "true")
+    monkeypatch.setenv("ORMAH_DELETION_RETENTION_DAYS", "7")
+    s = Settings()
+    assert s.deletion_enabled is True
+    assert s.deletion_retention_days == 7
+
+
+def test_deletion_retrievability_floor_must_be_unit_range():
+    import pytest
+    from ormah.config import Settings
+    with pytest.raises(ValueError):
+        Settings(deletion_retrievability_floor=1.5)

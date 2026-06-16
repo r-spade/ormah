@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import frontmatter
 from slugify import slugify
 
 from ormah.models.node import MemoryNode
@@ -80,16 +81,81 @@ class FileStore:
         return True
 
     def soft_delete(self, node_id: str) -> bool:
-        """Move a node file to the deleted/ directory. Returns True if moved."""
+        """Move a node file to the deleted/ directory, stamping deleted_at atomically.
+
+        The deleted_at tombstone in the moved file's frontmatter is the purge
+        clock (#28): self-contained, so it survives backup/restore and mtime resets.
+        Written via tmp + fsync + os.replace so a crash never leaves a partial tombstone.
+        """
         path = self._find_file(node_id)
         if path is None:
             return False
         deleted_dir = self.nodes_dir.parent / "deleted"
         deleted_dir.mkdir(parents=True, exist_ok=True)
+
+        post = frontmatter.loads(path.read_text(encoding="utf-8"))
+        post["deleted_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        text = frontmatter.dumps(post)
         dest = deleted_dir / path.name
-        path.rename(dest)
+
+        fd, tmp = tempfile.mkstemp(dir=str(deleted_dir), suffix=".tmp", prefix=".ormah_")
+        closed = False
+        try:
+            data = text.encode("utf-8")
+            written = 0
+            while written < len(data):     # write-all: os.write may short-write (council R4 H9)
+                written += os.write(fd, data[written:])
+            os.fsync(fd)
+            os.close(fd)
+            closed = True
+            os.replace(tmp, str(dest))   # atomic publish of the tombstone
+        except BaseException:
+            if not closed:
+                os.close(fd)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        path.unlink()                    # remove the original only after dest is durable
+
         self._id_cache.pop(node_id, None)
         return True
+
+    def list_deleted(self) -> list[tuple[str, str | None, Path]]:
+        """List tombstones in deleted/ as (node_id, deleted_at, path)."""
+        deleted_dir = self.nodes_dir.parent / "deleted"
+        if not deleted_dir.exists():
+            return []
+        out: list[tuple[str, str | None, Path]] = []
+        for path in sorted(deleted_dir.glob("*.md")):
+            try:
+                meta = frontmatter.loads(path.read_text(encoding="utf-8")).metadata
+            except Exception:
+                continue  # skip unreadable tombstone
+            node_id = meta.get("id")
+            if node_id:
+                out.append((node_id, meta.get("deleted_at"), path))
+        return out
+
+    def purge(self, node_id: str, path: Path | None = None) -> bool:
+        """Hard-delete a tombstone from deleted/. Returns True if removed.
+
+        Pass ``path`` (from a prior ``list_deleted()``) to skip re-globbing the directory.
+        """
+        if path is not None:
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
+        deleted_dir = self.nodes_dir.parent / "deleted"
+        if not deleted_dir.exists():
+            return False
+        for node_id_found, _deleted_at, found_path in self.list_deleted():
+            if node_id_found == node_id:
+                found_path.unlink()
+                return True
+        return False
 
     def list_all(self) -> list[MemoryNode]:
         """Load all nodes from disk."""

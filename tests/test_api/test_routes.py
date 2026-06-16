@@ -289,3 +289,35 @@ def test_maintenance_phase2_apply_completes_via_routes(client):
     finally:
         app.state.engine.get_maintenance_batches = original_batches
         app.state.engine.apply_maintenance_results = original_apply
+
+
+def test_forgetting_manager_wired_into_sleep_cycle():
+    """Bounded forgetting (#28) runs in the sleep-cycle pass, gated by the
+    existing deletion_enabled flag inside run_forgetting — not only on the
+    in-process timer that frequent restarts reset."""
+    from ormah.api.routes_admin import (
+        _SLEEP_CYCLE_ORDER,
+        _TASK_DESCRIPTIONS,
+        _TASK_RUNNERS,
+    )
+
+    assert _TASK_RUNNERS["forgetting_manager"] == (
+        "ormah.background.forgetting_manager",
+        "run_forgetting",
+    )
+    assert "forgetting_manager" in _TASK_DESCRIPTIONS
+    assert "forgetting_manager" in _SLEEP_CYCLE_ORDER
+    # Runs after decay (acts on freshly-demoted archival) and before backup
+    # (so the nightly snapshot reflects the post-forgetting state).
+    order = _SLEEP_CYCLE_ORDER
+    assert order.index("decay_manager") < order.index("forgetting_manager")
+    assert order.index("forgetting_manager") < order.index("memory_backup")
+
+
+def test_run_all_includes_forgetting_manager(client):
+    """run-all reports forgetting_manager; with deletion_enabled=False (default)
+    it no-ops safely rather than being absent from the cycle."""
+    resp = client.post("/admin/tasks/run-all")
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert results["forgetting_manager"] == "ok"

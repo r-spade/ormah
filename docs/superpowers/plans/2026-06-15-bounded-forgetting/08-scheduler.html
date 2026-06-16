@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task 08: Register the forgetting job in the scheduler</title>
+<!-- rich-doc-src-sha256:643e8ce3d987273598db7a61a5ba2cc26e2861d93be0a6dbb582c3d51481858a -->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body>
+<nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
+<div class="doc-title">Bounded forgetting</div>
+<a href="#final-verification-after-all-tasks" class="lvl-2">Final verification (after all tasks)</a>
+</nav>
+<main>
+<div class="eyebrow">Implementation plan</div>
+<h1 id="task-08-register-the-forgetting-job-in-the-scheduler">Task 08: Register the forgetting job in the scheduler</h1>
+<p><strong>Depends on:</strong> Task 05 (<code>run_forgetting</code> exists).</p>
+<p>Register <code>run_forgetting</code> as a tracked interval job, following the exact pattern of the other background jobs in <code>start_scheduler</code>. The job runs on every interval regardless of the master switch; <code>run_forgetting</code> itself short-circuits to a no-op when <code>deletion_enabled=False</code>.</p>
+<p><strong>Files:</strong></p>
+<ul><li>Modify: <code>src/ormah/background/scheduler.py</code></li><li>Test: <code>tests/test_background/test_scheduler.py</code></li></ul>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing test</strong></li></ul>
+<p>Create <code>tests/test_background/test_scheduler.py</code> (or append if it exists):</p>
+<pre><code class="lang-python">from __future__ import annotations
+
+from ormah.background.scheduler import start_scheduler
+
+
+def test_forgetting_job_is_registered(engine):
+    scheduler, _tracker = start_scheduler(engine)
+    try:
+        job_ids = {job.id for job in scheduler.get_jobs()}
+        assert &quot;forgetting_manager&quot; in job_ids
+    finally:
+        scheduler.shutdown(wait=False)</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run test to verify it fails</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_scheduler.py -v</code> Expected: FAIL (<code>forgetting_manager</code> job not registered).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Register the job</strong></li></ul>
+<p>In <code>src/ormah/background/scheduler.py</code>, add this block after the <code>decay_manager</code> registration (it is the conceptual sibling of decay):</p>
+<pre><code class="lang-python">    from ormah.background.forgetting_manager import run_forgetting
+
+    scheduler.add_job(
+        tracked(tracker, &quot;forgetting_manager&quot;, run_forgetting, engine),
+        &quot;interval&quot;,
+        hours=s.forgetting_interval_hours,
+        id=&quot;forgetting_manager&quot;,
+        name=&quot;Forgetting manager&quot;,
+        misfire_grace_time=_MISFIRE_GRACE,
+    )</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 4: Run test to verify it passes</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_scheduler.py -v</code> Expected: PASS.</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 5: Full suite + lint</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/ -v</code> Expected: PASS (whole suite green; default run excludes <code>integration</code>).</p>
+<p>Run: <code>.venv/bin/ruff check src/ tests/</code> Expected: no errors.</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 6: Commit</strong></li></ul>
+<pre><code class="lang-bash">git add src/ormah/background/scheduler.py tests/test_background/test_scheduler.py
+git commit -m &quot;feat(background): register forgetting manager job (#28)&quot;</code></pre>
+<h2 id="final-verification-after-all-tasks">Final verification (after all <em>tasks)</em></h2>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <code>.venv/bin/python -m pytest tests/ -v</code> — whole suite green</li><li><span style="color:var(--accent)">&#9744;</span> <code>.venv/bin/ruff check src/ tests/</code> — clean</li><li><span style="color:var(--accent)">&#9744;</span> Confirm no-op default: with <code>deletion_enabled=False</code>, <code>run_forgetting</code> returns before any</li></ul>
+<p>      deletion (covered by <code>test_master_switch_off_is_noop</code> and <code>test_purge_skipped_when_disabled</code>).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> Update issue #28 / open the PR against the base branch.</li></ul>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>
+<span class="role">Plan &middot; #28 &middot; 2026-06-15</span></div>
+</main></body></html>

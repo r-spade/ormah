@@ -58,6 +58,7 @@ class MemoryNode(BaseModel):
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     stability: float = Field(default=1.0, ge=0.0)  # FSRS: days until ~37% retrievability
     last_review: datetime | None = None  # last stability update (distinct from last_accessed)
+    archived_at: datetime | None = None  # when the node entered the archival tier (#28)
     valid_until: datetime | None = None
     space: str | None = None
     tags: list[str] = Field(default_factory=list)

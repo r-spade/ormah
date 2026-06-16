@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:335b3ab51d87052c69506576d05bae70156a17fa1af4a85ad81b07126c5fbe77 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-linker incremental cursor (#26)</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ DESIGN SPEC ]</div>
+  <div class="doc-title">Auto-linker incremental cursor</div>
+  <a href="#problem">The problem</a>
+  <a href="#approach">The approach</a>
+  <a href="#state" class="lvl-3">State &amp; config</a>
+  <a href="#flow" class="lvl-3">Write-to-watermark flow</a>
+  <a href="#queries" class="lvl-3">The two consumers</a>
+  <a href="#correctness">Correctness</a>
+  <a href="#testing">Testing</a>
+  <a href="#scope">Out of scope</a>
+</nav>
+<main>
+
+  <div class="eyebrow">Ormah · upstream #26 · perf</div>
+  <p class="meta">2026-06-15 · branch perf/auto-linker-incremental (off 0.11.0) · status: revised after council review (v2), pending re-review</p>
+
+  <p class="statement">A monotonic change-sequence turns the auto-linker from an O(n&sup2;) full-table re-scan into a forward-only cursor — bounded per run, lossless across writes.</p>
+
+  <div class="metrics">
+    <div class="metric"><div class="big">O(n&sup2;)&rarr;O(b&middot;n)</div><div class="label">per-run cost</div></div>
+    <div class="metric"><div class="big">8,355</div><div class="label">nodes on the real store</div></div>
+    <div class="metric"><div class="big">500</div><div class="label">default nodes per run</div></div>
+  </div>
+
+  <p>This spec replaces the auto-linker's full-table scan with an internal change-sequence cursor. The <a href="#problem">problem</a> is quadratic cost repeated every 24&nbsp;h; the <a href="#approach">approach</a> is a durable <code>seq</code> counter plus a watermark, serving both backfill and incremental modes through one mechanism. The hard parts — transient vs. poison LLM failures, durable allocation, and bounded recall — are isolated in <a href="#correctness">correctness</a>.</p>
+
+  <h2 id="problem">The <em>problem</em> <a class="backlink" href="#problem">&uarr;</a></h2>
+
+  <p><code>run_auto_linker</code> (<code>src/ormah/background/auto_linker.py</code>) scans <strong>every</strong> node each run and, per node, re-encodes its text, runs a brute-force <code>vec_store.search</code> (itself O(n)), and calls the LLM per surviving candidate. Total cost is <strong>O(n&sup2;)</strong> compute + O(candidates) LLM calls, repeated every <code>auto_link_interval_minutes</code> (default 1440 = 24&nbsp;h). <code>_find_link_candidates</code> — the maintenance-protocol preview, reached via <code>get_maintenance_batches</code> &rarr; <code>maintenance_manager</code> — has the <strong>same shape</strong>, and additionally sorts with <code>ORDER BY RANDOM()</code>.</p>
+
+  <p><code>auto_link_checked</code> already skips already-evaluated pairs, but only <em>after</em> the expensive encode + search — so the scan cost stays unbounded in <code>n</code> regardless. On the real store (8,355 nodes) most of each run is spent re-encoding and re-searching nodes that yield nothing: 4,776 nodes (57%) have never produced an evaluated pair.</p>
+
+  <h2 id="approach">The <em>approach</em> <a class="backlink" href="#approach">&uarr;</a></h2>
+
+  <p>An internal change-sequence cursor. A single mechanism serves both <strong>backfill</strong> (drain the historical backlog) and <strong>incremental</strong> (only new or changed nodes), differing only in the watermark's initial value.</p>
+
+  <div class="callout">
+    <span class="label">Council change · crit. #2</span>
+    An earlier draft used a <code>(updated, id)</code> watermark over the domain timestamp. But <code>created</code> / <code>updated</code> come from the markdown frontmatter (<code>builder.py:128</code>), so historical imports, restores, and index rebuilds insert rows with timestamps <strong>behind</strong> the watermark — permanently invisible to the scan. Replaced with an internal monotonic change-sequence, bumped wherever node <em>content</em> is (re)written.
+  </div>
+
+  <h3 id="state">State &amp; config <a class="backlink" href="#state">&uarr;</a></h3>
+
+  <table>
+    <thead><tr><th>Mechanism</th><th>What it is</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>nodes.seq</code></td>
+        <td>New column <code>INTEGER NOT NULL DEFAULT 0</code> + index <code>idx_nodes_seq</code>. A monotonic change-sequence, <strong>not</strong> a domain timestamp.</td>
+        <td>schema</td>
+      </tr>
+      <tr>
+        <td><code>meta.node_seq_next</code></td>
+        <td>Durable monotonic counter that <code>seq</code> is allocated from — never decreases, independent of current rows. After <code>INSERT OR REPLACE INTO nodes</code>, read + bump the counter and set the node's <code>seq</code> to it. Every (re)write lands the node at the <strong>head</strong> of the sequence, above any watermark.</td>
+        <td><code>builder.py:103</code></td>
+      </tr>
+      <tr>
+        <td><code>meta.auto_link_watermark</code></td>
+        <td>The integer <code>seq</code> of the last fully-processed node, stored as text. Absent &rArr; <code>0</code> &rArr; backlog drains from the lowest seq. (<code>meta</code> already holds <code>last_maintenance_run</code>.)</td>
+        <td><code>meta</code></td>
+      </tr>
+      <tr>
+        <td><code>auto_link_max_nodes_per_run</code></td>
+        <td>New setting, default <code>500</code> — bounds the scan (outer loop). <code>auto_link_max_edges_per_run</code> (500) stays as a secondary write guard.</td>
+        <td>settings</td>
+      </tr>
+      <tr>
+        <td>Migration</td>
+        <td>Idempotent <code>ALTER TABLE</code> in <code>Database._migrate()</code> (same pattern as <code>edges.reason</code> at <code>db.py:100</code>): add column + index, then backfill <code>seq = row_number ordered by created ASC</code> (oldest = lowest seq, so backlog drains oldest-first).</td>
+        <td><code>db.py</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>The single content-write site <code>Builder._index_file_nodes_only</code> is the funnel through which <code>remember</code>, the file-watcher, <strong>and</strong> reindex/import all pass — so allocating <code>seq</code> there covers every path by construction. Metadata-only <code>UPDATE nodes SET ...</code> (access_count, importance, tier) deliberately do <strong>not</strong> bump <code>seq</code>: they don't change the embedding, so they must not trigger re-linking.</p>
+
+  <div class="callout warn">
+    <span class="label">Council v2 · crit. #1</span>
+    An earlier draft used <code>MAX(seq)+1</code>, which is <strong>not</strong> monotonic across <code>INSERT OR REPLACE</code> — the deleted row's seq gets recomputed and can collide. A durable counter (<code>meta.node_seq_next</code>) fixes this: it only ever increases, regardless of which rows currently exist.
+  </div>
+
+  <p><code>full_rebuild()</code> resets the watermark to <code>0</code> (<code>builder.py:23</code> — the single point all rebuild paths funnel through: startup FTS migration, <code>rebuild_index</code> / <code>POST /rebuild</code>, restore). Defensive: the durable counter already keeps rebuilt nodes above the watermark, but the reset also covers a wiped-meta rebuild. See the <code>full_rebuild()</code> branch in the <a href="#flow">flow</a> below. (Council v2.)</p>
+
+  <h3 id="flow">Write-to-watermark flow <a class="backlink" href="#flow">&uarr;</a></h3>
+
+  <p>A content write allocates a <code>seq</code> from the durable counter; the cursor then drains everything above the watermark, one node at a time, advancing the watermark only past <strong>fully-resolved</strong> nodes. The three LLM branches — see <a href="#correctness">correctness</a> — decide whether a node is resolved.</p>
+
+  <figure>
+    <svg id="my-svg" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 841.129px; background-color: transparent;" viewBox="10.72265625 0 841.12939453125 1786.5625" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#my-svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;fill:#141413;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#my-svg .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#my-svg .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#my-svg .error-icon{fill:#f1f4ec;}#my-svg .error-text{fill:#0e0b13;stroke:#0e0b13;}#my-svg .edge-thickness-normal{stroke-width:1px;}#my-svg .edge-thickness-thick{stroke-width:3.5px;}#my-svg .edge-pattern-solid{stroke-dasharray:0;}#my-svg .edge-thickness-invisible{stroke-width:0;fill:none;}#my-svg .edge-pattern-dashed{stroke-dasharray:3;}#my-svg .edge-pattern-dotted{stroke-dasharray:2;}#my-svg .marker{fill:#b0aea5;stroke:#b0aea5;}#my-svg .marker.cross{stroke:#b0aea5;}#my-svg svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;}#my-svg p{margin:0;}#my-svg .label{font-family:Arial,Helvetica,sans-serif;color:#141413;}#my-svg .cluster-label text{fill:#0e0b13;}#my-svg .cluster-label span{color:#0e0b13;}#my-svg .cluster-label span p{background-color:transparent;}#my-svg .label text,#my-svg span{fill:#141413;color:#141413;}#my-svg .node rect,#my-svg .node circle,#my-svg .node ellipse,#my-svg .node polygon,#my-svg .node path{fill:#fdf0eb;stroke:#d97757;stroke-width:1px;}#my-svg .rough-node .label text,#my-svg .node .label text,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-anchor:middle;}#my-svg .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#my-svg .rough-node .label,#my-svg .node .label,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-align:center;}#my-svg .node.clickable{cursor:pointer;}#my-svg .root .anchor path{fill:#b0aea5!important;stroke-width:0;stroke:#b0aea5;}#my-svg .arrowheadPath{fill:#05060a;}#my-svg .edgePath .path{stroke:#b0aea5;stroke-width:1px;}#my-svg .flowchart-link{stroke:#b0aea5;fill:none;}#my-svg .edgeLabel{background-color:#eef4fa;text-align:center;}#my-svg .edgeLabel p{background-color:#eef4fa;}#my-svg .edgeLabel rect{opacity:0.5;background-color:#eef4fa;fill:#eef4fa;}#my-svg .labelBkg{background-color:rgba(238, 244, 250, 0.5);}#my-svg .cluster rect{fill:#f1f4ec;stroke:hsl(82.5, 0%, 84.1176470588%);stroke-width:1px;}#my-svg .cluster text{fill:#0e0b13;}#my-svg .cluster span{color:#0e0b13;}#my-svg div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Arial,Helvetica,sans-serif;font-size:12px;background:#f1f4ec;border:1px solid hsl(82.5, 0%, 84.1176470588%);border-radius:2px;pointer-events:none;z-index:100;}#my-svg .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#141413;}#my-svg rect.text{fill:none;stroke-width:0;}#my-svg .icon-shape,#my-svg .image-shape{background-color:#eef4fa;text-align:center;}#my-svg .icon-shape p,#my-svg .image-shape p{background-color:#eef4fa;padding:2px;}#my-svg .icon-shape .label rect,#my-svg .image-shape .label rect{opacity:0.5;background-color:#eef4fa;fill:#eef4fa;}#my-svg .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#my-svg .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#my-svg .node .neo-node{stroke:#d97757;}#my-svg [data-look="neo"].node rect,#my-svg [data-look="neo"].cluster rect,#my-svg [data-look="neo"].node polygon{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node path{stroke:url(#my-svg-gradient);stroke-width:1px;}#my-svg [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node .neo-line path{stroke:#d97757;filter:none;}#my-svg [data-look="neo"].node circle{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node circle .state-start{fill:#000000;}#my-svg [data-look="neo"].icon-shape .icon{fill:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].icon-shape .icon-neo path{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g><marker id="my-svg_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5;"/></marker><marker id="my-svg_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"/><g class="edgePaths"><path d="M366.91,110L366.91,114.167C366.91,118.333,366.91,126.667,366.91,134.333C366.91,142,366.91,149,366.91,152.5L366.91,156" id="my-svg-L_A_B_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_A_B_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M366.91,262L366.91,266.167C366.91,270.333,366.91,278.667,366.91,286.333C366.91,294,366.91,301,366.91,304.5L366.91,308" id="my-svg-L_B_C_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_B_C_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M366.91,438L366.91,444.167C366.91,450.333,366.91,462.667,373.846,474.575C380.782,486.483,394.655,497.966,401.591,503.708L408.527,509.449" id="my-svg-L_C_D_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_C_D_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M458.723,590L458.723,594.167C458.723,598.333,458.723,606.667,458.723,614.333C458.723,622,458.723,629,458.723,632.5L458.723,636" id="my-svg-L_D_E_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_D_E_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M465.174,742L465.701,746.167C466.228,750.333,467.282,758.667,467.809,766.333C468.336,774,468.336,781,468.336,784.5L468.336,788" id="my-svg-L_E_F_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_E_F_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M468.336,918L468.336,924.167C468.336,930.333,468.336,942.667,468.336,954.333C468.336,966,468.336,977,468.336,982.5L468.336,988" id="my-svg-L_F_G_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_F_G_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M416.045,1077.303L362.562,1094.184C309.079,1111.066,202.114,1144.83,152.25,1169.277C102.386,1193.724,109.624,1208.855,113.242,1216.42L116.861,1223.985" id="my-svg-L_G_H_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_G_H_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M463.145,1124.403L462.408,1133.435C461.671,1142.467,460.197,1160.53,459.46,1179.062C458.723,1197.594,458.723,1216.594,458.723,1226.094L458.723,1235.594" id="my-svg-L_G_I_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_G_I_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M515.137,1082.792L549.111,1098.759C583.085,1114.726,651.033,1146.66,685.007,1174.127C718.98,1201.594,718.98,1224.594,718.98,1236.094L718.98,1247.594" id="my-svg-L_G_J_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_G_J_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M458.723,1341.594L458.723,1347.76C458.723,1353.927,458.723,1366.26,469.458,1384.061C480.194,1401.862,501.665,1425.13,512.401,1436.764L523.137,1448.398" id="my-svg-L_I_K_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_I_K_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M718.98,1329.594L718.98,1337.76C718.98,1345.927,718.98,1362.26,704.188,1383.093C689.396,1403.925,659.812,1429.256,645.019,1441.922L630.227,1454.587" id="my-svg-L_J_K_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_J_K_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M178.858,1227.594L182.765,1219.427C186.671,1211.26,194.484,1194.927,198.39,1167.128C202.297,1139.328,202.297,1100.063,202.297,1062.797C202.297,1025.531,202.297,990.266,202.297,955.966C202.297,921.667,202.297,888.333,202.297,857C202.297,825.667,202.297,796.333,222.729,775.611C243.16,754.889,284.024,742.778,304.456,736.722L324.888,730.666" id="my-svg-L_H_E_0" class="edge-thickness-normal edge-pattern-dotted edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_H_E_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M573.594,1602.563L573.594,1608.729C573.594,1614.896,573.594,1627.229,578.919,1639.076C584.244,1650.923,594.895,1662.284,600.22,1667.964L605.545,1673.644" id="my-svg-L_K_L_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_K_L_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M764.908,1676.563L778.065,1670.396C791.222,1664.229,817.537,1651.896,830.694,1622.982C843.852,1594.068,843.852,1548.573,843.852,1505.078C843.852,1461.583,843.852,1420.089,843.852,1384.674C843.852,1349.26,843.852,1319.927,843.852,1286.594C843.852,1253.26,843.852,1215.927,843.852,1177.628C843.852,1139.328,843.852,1100.063,843.852,1062.797C843.852,1025.531,843.852,990.266,843.852,955.966C843.852,921.667,843.852,888.333,843.852,857C843.852,825.667,843.852,796.333,801.984,773.405C760.117,750.476,676.382,733.952,634.514,725.69L592.647,717.428" id="my-svg-L_L_E_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_L_E_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M620.934,402L620.934,414.167C620.934,426.333,620.934,450.667,608.375,468.717C595.817,486.768,570.701,498.535,558.143,504.419L545.585,510.303" id="my-svg-L_M_D_0" class="edge-thickness-normal edge-pattern-dotted edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_M_D_0" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" data-id="L_A_B_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_B_C_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_C_D_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_D_E_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_E_F_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_F_G_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(229.69755, 1136.12324)"><g class="label" data-id="L_G_H_0" transform="translate(-87.1484375, -24)"><foreignObject width="174.296875" height="48"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>raw is None<br />(transient, Ollama down)</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(458.72265625, 1178.59375)"><g class="label" data-id="L_G_I_0" transform="translate(-77.9765625, -24)"><foreignObject width="155.953125" height="48"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>invalid output<br />result='error' recorded</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(718.98046875, 1178.59375)"><g class="label" data-id="L_G_J_0" transform="translate(-8.453125, -12)"><foreignObject width="16.90625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>ok</p></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_I_K_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_J_K_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(202.296875, 955)"><g class="label" data-id="L_H_E_0" transform="translate(-8.8984375, -12)"><foreignObject width="17.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>no</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(573.59375, 1639.5625)"><g class="label" data-id="L_K_L_0" transform="translate(-70.9296875, -12)"><foreignObject width="141.859375" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>yes = last_complete</p></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_L_E_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(620.93359375, 475)"><g class="label" data-id="L_M_D_0" transform="translate(-76.9140625, -12)"><foreignObject width="153.828125" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>resets watermark to 0</p></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default" id="my-svg-flowchart-A-0" data-look="classic" transform="translate(366.91015625, 59)"><rect class="basic label-container" style="" x="-130" y="-51" width="260" height="102"/><g class="label" style="" transform="translate(-100, -36)"><rect/><foreignObject width="200" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Content write<br />remember / file-watcher / reindex</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-B-1" data-look="classic" transform="translate(366.91015625, 211)"><rect class="basic label-container" style="" x="-140.3046875" y="-51" width="280.609375" height="102"/><g class="label" style="" transform="translate(-110.3046875, -36)"><rect/><foreignObject width="220.609375" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Builder._index_file_nodes_only<br />INSERT OR REPLACE INTO nodes</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-C-3" data-look="classic" transform="translate(366.91015625, 375)"><rect class="basic label-container" style="" x="-130" y="-63" width="260" height="126"/><g class="label" style="" transform="translate(-100, -48)"><rect/><foreignObject width="200" height="96"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Allocate seq from durable counter<br />meta.node_seq_next (read + bump)</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-D-5" data-look="classic" transform="translate(458.72265625, 551)"><rect class="basic label-container" style="" x="-130" y="-39" width="260" height="78"/><g class="label" style="" transform="translate(-100, -24)"><rect/><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Cursor reads meta.auto_link_watermark</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-E-7" data-look="classic" transform="translate(458.72265625, 691)"><rect class="basic label-container" style="" x="-130" y="-51" width="260" height="102"/><g class="label" style="" transform="translate(-100, -36)"><rect/><foreignObject width="200" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>SELECT seq &gt; watermark<br />ORDER BY seq ASC LIMIT batch</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-F-9" data-look="classic" transform="translate(468.3359375, 855)"><rect class="basic label-container" style="" x="-130" y="-63" width="260" height="126"/><g class="label" style="" transform="translate(-100, -48)"><rect/><foreignObject width="200" height="96"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>For each node:<br />encode → vec_store.search<br />→ filters → _llm_classify_link</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-G-11" data-look="classic" transform="translate(468.3359375, 1060.796875)"><polygon points="68.796875,0 137.59375,-68.796875 68.796875,-137.59375 0,-68.796875" class="label-container" transform="translate(-68.296875, 68.796875)"/><g class="label" style="" transform="translate(-41.796875, -12)"><rect/><foreignObject width="83.59375" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>LLM result?</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-H-13" data-look="classic" transform="translate(148.72265625, 1290.59375)"><rect class="basic label-container" style="" x="-130" y="-63" width="260" height="126"/><g class="label" style="" transform="translate(-100, -48)"><rect/><foreignObject width="200" height="96"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Node unresolved<br />watermark does NOT advance<br />next run retries</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-I-15" data-look="classic" transform="translate(458.72265625, 1290.59375)"><rect class="basic label-container" style="" x="-130" y="-51" width="260" height="102"/><g class="label" style="" transform="translate(-100, -36)"><rect/><foreignObject width="200" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Edge skipped, node resolved<br />watermark advances</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-J-17" data-look="classic" transform="translate(718.98046875, 1290.59375)"><rect class="basic label-container" style="" x="-80.2578125" y="-39" width="160.515625" height="78"/><g class="label" style="" transform="translate(-50.2578125, -24)"><rect/><foreignObject width="100.515625" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>_apply_edge<br />node resolved</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-K-19" data-look="classic" transform="translate(573.59375, 1503.078125)"><polygon points="99.484375,0 198.96875,-99.484375 99.484375,-198.96875 0,-99.484375" class="label-container" transform="translate(-98.984375, 99.484375)"/><g class="label" style="" transform="translate(-72.484375, -12)"><rect/><foreignObject width="144.96875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Node fully resolved?</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-L-25" data-look="classic" transform="translate(656.09375, 1727.5625)"><rect class="basic label-container" style="" x="-130" y="-51" width="260" height="102"/><g class="label" style="" transform="translate(-100, -36)"><rect/><foreignObject width="200" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Set meta.auto_link_watermark = seq</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-M-28" data-look="classic" transform="translate(620.93359375, 375)"><rect class="basic label-container" style="" x="-74.0234375" y="-27" width="148.046875" height="54"/><g class="label" style="" transform="translate(-44.0234375, -12)"><rect/><foreignObject width="88.046875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>full_rebuild()</p></span></div></foreignObject></g></g></g></g></g><defs><filter id="my-svg-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="my-svg-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><linearGradient id="my-svg-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#d97757" stop-opacity="1"/><stop offset="100%" stop-color="hsl(210, 14.5454545455%, 85.6862745098%)" stop-opacity="1"/></linearGradient></svg>
+    <figcaption>Content write &rarr; durable seq allocation &rarr; cursor drains seq &gt; watermark &rarr; per-node LLM branch decides resolution &rarr; watermark advances only past resolved nodes</figcaption>
+  </figure>
+
+  <h3 id="queries">The two consumers <a class="backlink" href="#queries">&uarr;</a></h3>
+
+  <p>Both consumers share the same incremental select. The difference is whether they advance the watermark — only <code>run_auto_linker</code> does.</p>
+
+  <table>
+    <thead><tr><th>Consumer</th><th>Select</th><th>Watermark</th><th>Cost</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>run_auto_linker</code></td>
+        <td><code>seq &gt; :watermark ORDER BY seq ASC LIMIT :max_nodes_per_run</code></td>
+        <td><span class="yes">advances</span> to the <code>seq</code> of the last fully-resolved node</td>
+        <td>O(batch &middot; n)</td>
+      </tr>
+      <tr>
+        <td><code>_find_link_candidates</code></td>
+        <td>same incremental select; replaces <code>ORDER BY RANDOM()</code></td>
+        <td><span class="no">reads only</span> — side-effect-free preview, never advances</td>
+        <td>O(batch &middot; n)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>The inner match logic is unchanged: <code>encode</code> &rarr; <code>vec_store.search</code> &rarr; cross-space penalty &rarr; threshold &rarr; <code>auto_link_checked</code>/existing-edge skip &rarr; <code>_llm_classify_link</code> &rarr; <code>_apply_edge</code>. Only the outer driver — what rows it iterates — changed.</p>
+
+  <details>
+    <summary>The replaced select, in full</summary>
+    <pre><code>SELECT id, content, title, type, space, seq FROM nodes
+WHERE seq &gt; :watermark ORDER BY seq ASC LIMIT :max_nodes_per_run</code></pre>
+    <p>This replaces <code>SELECT ... FROM nodes</code> (all rows). The watermark advances to the <code>seq</code> of the last fully-resolved node — see <a href="#correctness">correctness</a> for what "fully-resolved" means across the three LLM branches.</p>
+  </details>
+
+  <h2 id="correctness">Correctness <a class="backlink" href="#correctness">&uarr;</a></h2>
+
+  <p>Five properties hold. The three load-bearing ones — the LLM <code>None</code>/<code>error</code> split, the durable counter, and bounded recall — are called out below.</p>
+
+  <div class="callout">
+    <span class="label">New &amp; changed nodes both re-enter &Delta; · crit. #2 fixed</span>
+    Every content write bumps <code>seq</code> past the watermark via the single builder site, so reindex / import / restore are covered <strong>by construction</strong> — independent of markdown timestamps. A node update also deletes the node's <code>auto_link_checked</code> rows (<code>memory_engine.py</code> :806 / :850 / :1201 / :1206), so its pairs are re-evaluated.
+  </div>
+
+  <div class="callout warn">
+    <span class="label">Transient LLM failure retries; poison node never deadlocks · crit. #1 v1 + crit. #2 v2</span>
+    <code>_llm_classify_link</code> distinguishes two failure cases — see the <a href="#flow">flow diagram</a> branches.
+    <strong>LLM unavailable</strong> (<code>raw is None</code>) &rarr; returns <code>None</code> &rarr; the node is left unresolved and the watermark does not pass it (next run retries). This is the transient case (Ollama down) and does not deadlock: when the LLM is down, <em>every</em> node is unresolved, so the whole run simply waits — no single node blocks others.
+    <strong>Invalid / unexpected output</strong> (malformed JSON or missing <code>relationship</code>) &rarr; returns <code>{"relationship": "error"}</code> &rarr; <code>_apply_edge</code> records <code>result='error'</code> in <code>auto_link_checked</code> (no edge) and the node is treated as resolved, so the watermark advances. A content-specific "poison" pair therefore never blocks later nodes. (An <code>error</code> pair is re-tried only if the node's content changes — which bumps <code>seq</code> and clears its <code>auto_link_checked</code> rows.)
+  </div>
+
+  <div class="callout warn">
+    <span class="label">Bounded recall, stated honestly · importante #3</span>
+    <code>vec_store.search(limit=6)</code> returns only the top-6 neighbours, and top-k membership is <strong>not</strong> symmetric — a pair where neither node is in the other's top-6 is never evaluated. This is a pre-existing limit of the full scan too; the cursor additionally removes the re-scan "second chance". Accepted as bounded recall (not lossless); revisiting strategies are <a href="#scope">out of scope</a> for this perf fix.
+  </div>
+
+  <table>
+    <thead><tr><th>Property</th><th>Why it holds</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Partial run / crash / <code>max_edges</code> hit mid-node</td>
+        <td>The watermark only advances to the last fully-resolved node; reprocessing is idempotent (checked pairs skipped, no duplicate edges).</td>
+      </tr>
+      <tr>
+        <td>No ties</td>
+        <td><code>seq</code> is unique and monotonic, so the cursor is a single integer — no composite comparison needed.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="testing">Testing <a class="backlink" href="#testing">&uarr;</a></h2>
+
+  <p class="statement">TDD — tests first. Eleven cases pin the cursor's contract before a line of implementation lands.</p>
+
+  <table>
+    <thead><tr><th>#</th><th>Test</th><th>Pins</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>seq</code> bumped on content write (insert and re-write via the builder) and monotonic.</td><td><a href="#state">seq allocation</a></td></tr>
+      <tr><td>2</td><td>Metadata-only updates (e.g. access_count) do <strong>not</strong> bump <code>seq</code>.</td><td><a href="#state">embedding invariant</a></td></tr>
+      <tr><td>3</td><td>Run processes only <code>seq &gt; watermark</code>, never the full table; respects the batch limit.</td><td><a href="#queries">incremental select</a></td></tr>
+      <tr><td>4</td><td>Watermark advances to the last fully-resolved node's <code>seq</code>; never past unprocessed nodes.</td><td><a href="#flow">watermark advance</a></td></tr>
+      <tr><td>5</td><td><strong>LLM <code>None</code></strong> (crit. #1): run 1 returns <code>None</code> &rarr; watermark does not pass the node &rarr; run 2 re-evaluates it.</td><td><a href="#correctness">transient branch</a></td></tr>
+      <tr><td>6</td><td><strong><code>max_edges</code> mid-node</strong> (importante #4): &ge;3 linkable nodes, <code>max_nodes</code>/<code>max_edges=1</code>, LLM always creates an edge &rarr; after run 1 watermark sits on the 1st node; run 2 processes the 2nd.</td><td><a href="#correctness">partial run</a></td></tr>
+      <tr><td>7</td><td><strong>Reindex / import</strong> (crit. #2): re-indexing an old markdown file bumps its <code>seq</code> so it re-enters &Delta; even though its <code>updated</code> timestamp is behind the watermark.</td><td><a href="#approach">timestamp fix</a></td></tr>
+      <tr><td>8</td><td>Backlog drains across multiple runs; once &Delta; is empty a run is cheap.</td><td>backfill mode</td></tr>
+      <tr><td>9</td><td>Absent watermark &rArr; 0; empty store &rArr; no-op.</td><td>boundary</td></tr>
+      <tr><td>10</td><td><code>_find_link_candidates</code> returns only the seq-window, without advancing the watermark.</td><td><a href="#queries">preview consumer</a></td></tr>
+      <tr><td>11</td><td>Existing <code>auto_link_checked</code> tests stay green (no re-check, invalidation on update).</td><td>regression</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="scope">Out of scope <a class="backlink" href="#scope">&uarr;</a></h2>
+
+  <table>
+    <thead><tr><th>Excluded</th><th>Reason</th></tr></thead>
+    <tbody>
+      <tr><td>LLM edge-quality</td><td>local gemma3:4b classifies ~90% of pairs as <code>supports</code>, ~16.7k edges — a separate concern.</td></tr>
+      <tr><td>ANN for the vector search itself</td><td>upstream #25 — benefit compounds once added.</td></tr>
+      <tr><td>Revisiting the <a href="#correctness">bounded-recall</a> limit</td><td>symmetric candidate generation — separate concern.</td></tr>
+      <tr><td>Reusing stored embeddings</td><td>instead of re-encoding each &Delta; node — possible later optimization.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">Auto-linker incremental cursor · #26</div>
+    <div class="role">ormah design spec · rich-doc companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>

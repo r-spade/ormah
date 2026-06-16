@@ -78,14 +78,24 @@ def _ingest_session(
     if existing and existing.get("hash") == h:
         return False
 
+    # Incremental: only parse the turns appended since the last ingest.
+    prev_offset = existing.get("end_offset", 0) if existing else 0
     try:
-        result = parse_transcript(path)
+        size = path.stat().st_size
+    except OSError as e:
+        logger.warning("Cannot stat %s: %s", path, e)
+        return False
+    if prev_offset > size:
+        prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
+
+    try:
+        result = parse_transcript(path, start_offset=prev_offset)
     except Exception as e:
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return False
 
     if result.user_turn_count < min_turns:
-        return False
+        return False  # too few NEW turns; offset unchanged so they're reconsidered later
 
     # Detect space from parent directory encoding
     space = _space_from_encoded_dir(path.parent.name)
@@ -107,19 +117,22 @@ def _ingest_session(
 
     new_node_ids = [m["node_id"] for m in ingested] if isinstance(ingested, list) else []
     prev_node_ids = existing.get("node_ids", []) if existing else []
+    # prev_offset == 0 means a fresh/whole re-ingest; don't carry stale cumulative turns.
+    prev_turns = existing.get("user_turns", 0) if (existing and prev_offset > 0) else 0
 
     state[rel] = {
         "hash": h,
+        "end_offset": result.end_offset,
         "last_ingested": datetime.now(timezone.utc).isoformat(),
         "session_id": result.session_id,
         "space": space,
-        "user_turns": result.user_turn_count,
+        "user_turns": prev_turns + result.user_turn_count,
         "node_ids": prev_node_ids + new_node_ids,
     }
     _save_state(watch_dir, state)
 
     logger.info(
-        "Session watcher ingested %s (%d turns, %d memories extracted)",
+        "Session watcher ingested %s (%d new turns, %d memories extracted)",
         rel, result.user_turn_count, count,
     )
     return True

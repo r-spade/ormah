@@ -49,6 +49,17 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.forgetting_manager import run_forgetting
+
+    scheduler.add_job(
+        tracked(tracker, "forgetting_manager", run_forgetting, engine),
+        "interval",
+        hours=s.forgetting_interval_hours,
+        id="forgetting_manager",
+        name="Forgetting manager",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     from ormah.background.conflict_detector import run_conflict_detection
 
     scheduler.add_job(

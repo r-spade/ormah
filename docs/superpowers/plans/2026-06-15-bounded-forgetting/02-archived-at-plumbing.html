@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task 02: `archived_at` plumbing</title>
+<!-- rich-doc-src-sha256:b41e6de8cf7db1bb135ba824a337a52fbefa8a99571ee341d38c9fd3bd794b1d -->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body>
+<nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
+<div class="doc-title">Bounded forgetting</div>
+
+</nav>
+<main>
+<div class="eyebrow">Implementation plan</div>
+<h1 id="task-02-archived-at-plumbing">Task 02: <code>archived_at</code> plumbing</h1>
+<p><code>archived_at</code> is a node timestamp: when a node entered the <code>archival</code> tier. The SQLite index is *derived* from the markdown files and rebuilt on restore, so the value must live in the frontmatter (source of truth) and be mirrored into a <code>nodes.archived_at</code> column.</p>
+<div class="callout"><strong>Council R1 → R2:</strong> an index-only backfill is lost on the next <code>full_rebuild</code>/restore (the files are the source of truth). R1 fixed this by writing the files *inside the migration* — but R2 (Codex critical + Cursor) showed that path is unsafe: non-atomic in-place writes can corrupt source memories on crash/disk-full, and running heavy file I/O inside the SQLite migration transaction reintroduces the #18 startup-contention class. <strong>Resolution:</strong> this task keeps only the cheap <strong>SQL index backfill</strong> (helps until a rebuild). The durable, atomic <strong>file</strong> backfill for legacy nodes moves to a lazy, one-time, guarded job — see Task 09. The live demote→stamp→rebuild path is covered by the durability test below.</div>
+<p><strong>Files:</strong></p>
+<ul><li>Modify: <code>src/ormah/models/node.py</code> (add field)</li><li>Modify: <code>src/ormah/store/markdown.py</code> (serialize/parse)</li><li>Modify: <code>src/ormah/index/schema.sql</code> (column for fresh DBs)</li><li>Modify: <code>src/ormah/index/db.py</code> (migration for legacy DBs)</li><li>Modify: <code>src/ormah/index/builder.py</code> (index the column)</li><li>Test: <code>tests/test_store/test_markdown.py</code>, <code>tests/test_index/test_migrations.py</code></li></ul>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing tests</strong></li></ul>
+<p>Append to <code>tests/test_store/test_markdown.py</code> (create the file if absent, with the imports from the sibling tests):</p>
+<pre><code class="lang-python">from datetime import datetime, timezone
+
+from ormah.models.node import MemoryNode, NodeType, Tier
+from ormah.store.markdown import parse_node, serialize_node
+
+
+def test_archived_at_round_trips_through_frontmatter():
+    when = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    node = MemoryNode(type=NodeType.fact, tier=Tier.archival,
+                      content=&quot;x&quot;, archived_at=when)
+    parsed = parse_node(serialize_node(node))
+    assert parsed.archived_at == when
+
+
+def test_archived_at_absent_when_none():
+    node = MemoryNode(type=NodeType.fact, content=&quot;x&quot;)
+    assert &quot;archived_at&quot; not in serialize_node(node)
+    assert parse_node(serialize_node(node)).archived_at is None</code></pre>
+<p>Create <code>tests/test_index/test_migrations.py</code>:</p>
+<pre><code class="lang-python">from ormah.index.db import Database
+
+
+def test_migrate_adds_archived_at_and_backfills(tmp_path):
+    # Build a legacy-shaped DB: nodes table without archived_at, one archival row.
+    db = Database(tmp_path / &quot;index.db&quot;)
+    db.init_schema()
+    db.conn.execute(&quot;ALTER TABLE nodes DROP COLUMN archived_at&quot;)
+    db.conn.execute(
+        &quot;INSERT INTO nodes (id, type, tier, source, created, updated, last_accessed, &quot;
+        &quot;file_path, file_hash) VALUES &quot;
+        &quot;(&#x27;n1&#x27;,&#x27;fact&#x27;,&#x27;archival&#x27;,&#x27;agent:test&#x27;,&#x27;2026-01-01T00:00:00Z&#x27;,&#x27;2026-02-01T00:00:00Z&#x27;,&quot;
+        &quot;&#x27;2026-02-01T00:00:00Z&#x27;,&#x27;/x.md&#x27;,&#x27;abc&#x27;)&quot;
+    )
+    db.conn.commit()
+
+    db._migrate()
+
+    cols = [r[1] for r in db.conn.execute(&quot;PRAGMA table_info(nodes)&quot;).fetchall()]
+    assert &quot;archived_at&quot; in cols
+    row = db.conn.execute(&quot;SELECT archived_at FROM nodes WHERE id=&#x27;n1&#x27;&quot;).fetchone()
+    assert row[&quot;archived_at&quot;] == &quot;2026-02-01T00:00:00Z&quot;  # backfilled from updated
+    db.close()</code></pre>
+<p>Also create <code>tests/test_index/test_archived_at_durability.py</code> (proves the value survives a full rebuild from files — the council&#x27;s core durability invariant):</p>
+<pre><code class="lang-python">from ormah.models.node import CreateNodeRequest, NodeType, Tier, UpdateNodeRequest
+
+
+def test_archived_at_survives_full_rebuild(engine):
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;durable&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;durable&quot;))
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+    stamped = engine.file_store.load(node_id).archived_at
+    assert stamped is not None
+
+    engine.builder.full_rebuild()  # re-parse all files into a fresh index
+
+    row = engine.db.conn.execute(
+        &quot;SELECT archived_at FROM nodes WHERE id = ?&quot;, (node_id,)
+    ).fetchone()
+    assert row[&quot;archived_at&quot;] is not None  # not wiped by the rebuild</code></pre>
+<p>(This test depends on Task 03&#x27;s stamping; if running Task 02 in isolation, mark it <code>xfail</code> until Task 03 lands, then remove the marker.)</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run tests to verify they fail</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_store/test_markdown.py tests/test_index/test_migrations.py tests/test_index/test_archived_at_durability.py -v</code> Expected: FAIL (<code>archived_at</code> not a field / column).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Add the model field</strong></li></ul>
+<p>In <code>src/ormah/models/node.py</code>, inside <code>MemoryNode</code>, add right after the <code>last_review</code> line:</p>
+<pre><code class="lang-python">    archived_at: datetime | None = None  # when the node entered the archival tier (#28)</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 4: Serialize/parse the frontmatter</strong></li></ul>
+<p>In <code>src/ormah/store/markdown.py</code>:</p>
+<p>In <code>parse_node</code>, add to the <code>MemoryNode(...)</code> constructor args (next to <code>last_review</code>):</p>
+<pre><code class="lang-python">        archived_at=_parse_dt(meta[&quot;archived_at&quot;]) if meta.get(&quot;archived_at&quot;) else None,</code></pre>
+<p>In <code>serialize_node</code>, add after the <code>last_review</code> block:</p>
+<pre><code class="lang-python">    if node.archived_at is not None:
+        meta[&quot;archived_at&quot;] = _format_dt(node.archived_at)</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 5: Add the schema column (fresh DBs)</strong></li></ul>
+<p>In <code>src/ormah/index/schema.sql</code>, add to the <code>nodes</code> table after <code>last_review TEXT,</code>:</p>
+<pre><code class="lang-sql">    archived_at TEXT,</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 6: Add the migration (legacy DBs)</strong></li></ul>
+<p>In <code>src/ormah/index/db.py</code> <code>_migrate</code>, add to the <code>enrichment_migrations</code> list:</p>
+<pre><code class="lang-python">                (&quot;archived_at&quot;, &quot;ALTER TABLE nodes ADD COLUMN archived_at TEXT&quot;),</code></pre>
+<p>Then, immediately after the <code>for col_name, ddl in enrichment_migrations:</code> loop, backfill:</p>
+<pre><code class="lang-python">            if &quot;archived_at&quot; not in node_cols:
+                # Newly added: seed existing archival rows with their `updated` time, the
+                # best proxy for when they were demoted. Non-archival rows stay NULL.
+                # INDEX-ONLY: this helps until the next full_rebuild. The durable, atomic
+                # backfill of the SOURCE files is Task 09 (lazy, out of this transaction).
+                conn.execute(
+                    &quot;UPDATE nodes SET archived_at = updated &quot;
+                    &quot;WHERE tier = &#x27;archival&#x27; AND archived_at IS NULL&quot;
+                )</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 7: Index the column</strong></li></ul>
+<p>In <code>src/ormah/index/builder.py</code> <code>_index_file_nodes_only</code>, update the INSERT:</p>
+<p>Column list — change <code>... last_review, file_path, file_hash)</code> to <code>... last_review, archived_at, file_path, file_hash)</code> and add one <code>?</code> to the VALUES tuple.</p>
+<p>Add this value right before <code>str(path),</code>:</p>
+<pre><code class="lang-python">                node.archived_at.isoformat() if node.archived_at else None,</code></pre>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 8: Run tests to verify they pass</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_store/test_markdown.py tests/test_index/test_migrations.py -v</code> Expected: PASS.</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 9: Full regression on touched subsystems</strong></li></ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_index tests/test_store -v</code> Expected: PASS (no regressions from the new column).</p>
+<ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 10: Lint + commit</strong></li></ul>
+<pre><code class="lang-bash">.venv/bin/ruff check src/ormah/models/node.py src/ormah/store/markdown.py src/ormah/index/db.py src/ormah/index/builder.py
+git add src/ormah/models/node.py src/ormah/store/markdown.py src/ormah/index/schema.sql src/ormah/index/db.py src/ormah/index/builder.py tests/test_store/test_markdown.py tests/test_index/test_migrations.py tests/test_index/test_archived_at_durability.py
+git commit -m &quot;feat(index): add durable archived_at timestamp to nodes (#28)&quot;</code></pre>
+<div class="callout"><strong>Note for executor:</strong> if <code>ALTER TABLE ... DROP COLUMN</code> is unsupported on the installed SQLite, replace Step 1&#x27;s <code>DROP COLUMN</code> setup by creating the DB, then asserting the column exists after <code>init_schema()</code> (fresh DBs get it from schema.sql) and testing backfill by inserting an archival row with NULL <code>archived_at</code> and calling the backfill UPDATE directly.</div>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>
+<span class="role">Plan &middot; #28 &middot; 2026-06-15</span></div>
+</main></body></html>

@@ -121,6 +121,7 @@ class Settings(BaseSettings):
     auto_link_similarity_threshold: float = 0.65
     auto_link_cross_space_penalty: float = 0.1  # subtracted from similarity for cross-space pairs
     auto_link_max_edges_per_run: int = 500
+    auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run
 
     # Auto-merge
     auto_merge_threshold: float = 0.85
@@ -140,6 +141,17 @@ class Settings(BaseSettings):
 
     # Decay: skip nodes above this importance
     decay_importance_threshold: float = 0.5
+
+    # Bounded forgetting (#28). Master switch OFF by default — deletion is
+    # irreversible, so it must be armed explicitly via ORMAH_DELETION_ENABLED.
+    deletion_enabled: bool = False
+    forgetting_interval_hours: int = 24
+    deletion_min_archival_days: int = 90       # graveyard age before eligible
+    deletion_retrievability_floor: float = 0.05  # FSRS R must be below this
+    deletion_max_degree: int = 2               # only weakly-connected leaves
+    deletion_strong_edge_weight: float = 0.7   # any edge >= this protects the node
+    deletion_retention_days: int = 30          # soft-delete reversibility window
+    archival_soft_cap: int = 0                 # 0 = disabled; >0 = evict worst-first to cap
 
     # Whisper-out (involuntary storage on compaction / session end)
     whisper_out_enabled: bool = True
@@ -392,6 +404,27 @@ class Settings(BaseSettings):
     def _decay_threshold_range(cls, v: float) -> float:
         if not 0 <= v <= 1:
             raise ValueError(f"threshold must be 0–1, got {v}")
+        return v
+
+    @field_validator("forgetting_interval_hours", "deletion_min_archival_days", "deletion_retention_days")
+    @classmethod
+    def _deletion_days_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+    @field_validator("deletion_retrievability_floor", "deletion_strong_edge_weight")
+    @classmethod
+    def _deletion_unit_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("deletion_max_degree", "archival_soft_cap")
+    @classmethod
+    def _deletion_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"must be >= 0, got {v}")
         return v
 
     @field_validator("fsrs_initial_stability", "fsrs_stability_growth")

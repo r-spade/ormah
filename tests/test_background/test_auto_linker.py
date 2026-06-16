@@ -207,6 +207,133 @@ def test_checked_pairs_recorded_for_none(engine):
     assert row["result"] == "none"
 
 
+def test_max_nodes_per_run_default(engine):
+    assert engine.settings.auto_link_max_nodes_per_run == 500
+
+
+def test_seq_bumped_on_rewrite(engine):
+    """Re-writing a node's content bumps its seq to the head (crit#2 mechanism)."""
+    from ormah.models.node import UpdateNodeRequest
+    id_a, id_b = _create_pair(engine)
+    seq_before = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    max_before = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+    engine.update_node(id_a, UpdateNodeRequest(content="rewritten content"))
+    seq_after = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    assert seq_after > seq_before
+    assert seq_after > max_before  # landed at the head
+
+
+def test_metadata_update_does_not_bump_seq(engine):
+    """A direct metadata UPDATE (not via the builder) must not change seq."""
+    id_a, _ = _create_pair(engine)
+    before = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET access_count = access_count + 1 WHERE id=?", (id_a,))
+    after = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    assert after == before
+
+
+def test_watermark_roundtrip(engine):
+    from ormah.background.auto_linker import _get_watermark, _set_watermark
+    assert _get_watermark(engine.db.conn) == 0
+    _set_watermark(engine, 42)
+    assert _get_watermark(engine.db.conn) == 42
+
+
+def test_select_nodes_after_seq(engine):
+    from ormah.background.auto_linker import _select_nodes_after
+    id_a, id_b = _create_pair(engine)
+    rows = _select_nodes_after(engine.db.conn, 0, limit=10)
+    assert {id_a, id_b} <= {r["id"] for r in rows}
+    last = rows[-1]
+    rows2 = _select_nodes_after(engine.db.conn, last["seq"], limit=10)
+    assert all(r["id"] != last["id"] for r in rows2)
+    assert len(_select_nodes_after(engine.db.conn, 0, limit=1)) == 1
+
+
+def test_run_advances_watermark(engine):
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
+    _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
+        run_auto_linker(engine)
+    last = _select_nodes_after(engine.db.conn, 0, limit=100)[-1]
+    assert _get_watermark(engine.db.conn) == last["seq"]
+
+
+def test_llm_none_does_not_advance_past_node(engine):
+    """crit#1: a transient None must not let the watermark pass the node."""
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark
+    _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=None):
+        run_auto_linker(engine)
+    # No node fully resolved → watermark stays at 0
+    assert _get_watermark(engine.db.conn) == 0
+    # Next run with the LLM healthy re-evaluates the pair
+    mock_llm = MagicMock(return_value=json.dumps({"relationship": "supports", "reason": "x"}))
+    with patch(_LLM_PATCH, mock_llm):
+        run_auto_linker(engine)
+    assert mock_llm.call_count >= 1
+
+
+def test_max_edges_does_not_skip_interrupted_node(engine):
+    """imp#4: max_edges mid-run must not advance the watermark past unprocessed nodes."""
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
+    # three mutually-similar nodes
+    _create_pair(engine, title_a="A", content_a="shared topic alpha", title_b="B", content_b="shared topic alpha beta")
+    _create_pair(engine, title_a="C", content_a="shared topic alpha gamma", title_b="D", content_b="shared topic alpha delta")
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.auto_link_max_edges_per_run = 1
+    _reset_adapter()
+    rows = _select_nodes_after(engine.db.conn, 0, limit=100)
+    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "supports", "reason": "x"})):
+        run_auto_linker(engine)
+    wm = _get_watermark(engine.db.conn)
+    assert wm < rows[-1]["seq"]  # did not reach the last node
+
+
+def test_full_rebuild_resets_watermark(engine):
+    """A mass reindex must not leave a stale watermark hiding the whole store."""
+    from ormah.background.auto_linker import _set_watermark, _get_watermark
+    _create_pair(engine)
+    _set_watermark(engine, 99999)
+    engine.builder.full_rebuild()
+    assert _get_watermark(engine.db.conn) == 0
+
+
+def test_find_candidates_uses_window_without_advancing(engine):
+    from ormah.background.auto_linker import _find_link_candidates, _get_watermark
+    _create_pair(engine)
+    engine.settings.auto_link_similarity_threshold = 0.0
+    before = _get_watermark(engine.db.conn)
+    cands = _find_link_candidates(engine, limit=8)
+    assert all("node_a" in c and "node_b" in c and "similarity" in c for c in cands)
+    assert _get_watermark(engine.db.conn) == before  # preview never advances the cursor
+
+
+def test_invalid_llm_output_records_error_not_none(engine):
+    """Malformed LLM JSON → recorded as result='error' (no edge), so the node resolves."""
+    id_a, id_b = _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value="not valid json"):
+        from ormah.background.auto_linker import run_auto_linker
+        run_auto_linker(engine)
+    assert len(_edges_between(engine, id_a, id_b)) == 0  # no edge
+    pair = tuple(sorted([id_a, id_b]))
+    row = engine.db.conn.execute(
+        "SELECT result FROM auto_link_checked WHERE node_a=? AND node_b=?", pair
+    ).fetchone()
+    assert row is not None and row["result"] == "error"
+
+
 def test_checked_pairs_invalidated_on_update(engine):
     """Updating a node's content should clear its checked pairs so it gets re-evaluated."""
     from ormah.models.node import UpdateNodeRequest
