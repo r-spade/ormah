@@ -44,14 +44,13 @@ Rules:
 - Use "irrelevant" only when the memory is plainly off-topic for the user's prompt and answer.
 - Prefer "uncertain" when the judgment is ambiguous.
 
-Return strict JSON:
+Return strict JSON matching this shape:
 {
   "verdicts": [
     {
       "whisper_log_id": 123,
       "verdict": "used|irrelevant|uncertain",
-      "confidence": 0.0,
-      "reason": "short concrete reason"
+      "confidence": 0.0
     }
   ]
 }
@@ -185,6 +184,40 @@ def _confidence(raw: object) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _llm_feedback_judge_response_format() -> dict:
+    """Return the compact structured-output schema for whisper feedback judgments."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "whisper_feedback_verdicts",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "verdicts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "whisper_log_id": {"type": "integer"},
+                                "verdict": {
+                                    "type": "string",
+                                    "enum": ["used", "irrelevant", "uncertain"],
+                                },
+                                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                            },
+                            "required": ["whisper_log_id", "verdict", "confidence"],
+                        },
+                    },
+                },
+                "required": ["verdicts"],
+            },
+        },
+    }
+
+
 def _feedback_llm_judge_enabled(engine: MemoryEngine) -> bool:
     settings = engine.settings
     return bool(
@@ -225,7 +258,23 @@ def _llm_judge_whisper_usage(
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
-    raw = llm_generate(engine.settings, prompt, json_mode=True)
+    raw = llm_generate(
+        engine.settings,
+        prompt,
+        json_mode=True,
+        response_format=_llm_feedback_judge_response_format(),
+        temperature=0,
+        max_tokens=512,
+    )
+    if raw is None:
+        logger.info("LLM feedback judge schema call failed; falling back to JSON object mode")
+        raw = llm_generate(
+            engine.settings,
+            prompt,
+            json_mode=True,
+            temperature=0,
+            max_tokens=512,
+        )
     if raw is None:
         return {}
 

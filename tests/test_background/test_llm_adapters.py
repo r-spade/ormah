@@ -86,6 +86,37 @@ def test_litellm_adapter_success():
     assert call_kwargs["response_format"] == {"type": "json_object"}
 
 
+def test_litellm_adapter_structured_response_options():
+    adapter = LiteLLMAdapter(model="nvidia_nim/meta/llama-4-maverick-17b-128e-instruct")
+    mock_choice = MagicMock()
+    mock_choice.message.content = '{"result": "ok"}'
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "test_schema",
+            "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    }
+
+    mock_litellm = MagicMock()
+    mock_litellm.completion.return_value = mock_response
+    with patch.dict(sys.modules, {"litellm": mock_litellm}):
+        result = adapter.generate(
+            "test prompt",
+            response_format=response_format,
+            temperature=0,
+            max_tokens=512,
+        )
+
+    assert result == '{"result": "ok"}'
+    call_kwargs = mock_litellm.completion.call_args[1]
+    assert call_kwargs["response_format"] == response_format
+    assert call_kwargs["temperature"] == 0
+    assert call_kwargs["max_tokens"] == 512
+
+
 def test_litellm_adapter_failure():
     adapter = LiteLLMAdapter(model="claude-sonnet-4-20250514")
 

@@ -84,7 +84,8 @@ signals. The free/local heuristic path records clear references as positive sign
 non-references as neutral observations. If `feedback_llm_judge_enabled` is true and
 `llm_provider` is not `none`, ambiguous rows are sent to the configured LLM for a
 `used` / `irrelevant` / `uncertain` verdict. Only confident `used` and `irrelevant`
-verdicts affect affinity.
+verdicts affect affinity. The LLM judge requests compact JSON Schema output when the
+configured provider supports it, with a JSON-object fallback for providers that do not.
 
 ## Transcript Parser
 

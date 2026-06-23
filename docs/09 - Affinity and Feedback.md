@@ -98,7 +98,9 @@ remain observational.
 
 If the optional LLM judge is enabled, those ambiguous unreferenced rows are grouped by
 prompt/response and sent to the configured LLM. The judge returns `used`, `irrelevant`, or
-`uncertain` with confidence. Ormah records the judge output in `signals` and promotes only
+`uncertain` with confidence. For LiteLLM-compatible providers, Ormah first requests a
+compact JSON Schema response and falls back to JSON-object mode if the provider rejects
+schema output. Ormah records the judge output in `signals` and promotes only
 high-confidence verdicts:
 
 - `whisper_judged_used` with polarity `+1` becomes positive affinity

@@ -114,7 +114,9 @@ The session watcher always records free/local heuristic feedback signals for inj
 whispers. When `feedback_llm_judge_enabled` is true and `llm_provider != "none"`, it also
 asks the configured LLM to judge ambiguous turns. Confident `used` verdicts become positive
 affinity; confident `irrelevant` verdicts become negative affinity; uncertain or
-low-confidence verdicts remain observational `signals` rows only.
+low-confidence verdicts remain observational `signals` rows only. The judge requests
+compact JSON Schema output when available and falls back to JSON-object mode for providers
+that reject schema output.
 
 ## Search
 

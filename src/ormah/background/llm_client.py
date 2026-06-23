@@ -32,9 +32,23 @@ def _get_or_create_adapter(settings) -> LLMAdapter | None:
     return _cached_adapter
 
 
-def llm_generate(settings, prompt: str, json_mode: bool = True) -> str | None:
+def llm_generate(
+    settings,
+    prompt: str,
+    json_mode: bool = True,
+    *,
+    response_format: dict | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str | None:
     """Call configured LLM. Returns raw response text, or None on failure."""
     adapter = _get_or_create_adapter(settings)
     if adapter is None:
         return None
-    return adapter.generate(prompt, json_mode=json_mode)
+    return adapter.generate(
+        prompt,
+        json_mode=json_mode,
+        response_format=response_format,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )

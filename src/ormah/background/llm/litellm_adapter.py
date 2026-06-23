@@ -14,7 +14,15 @@ class LiteLLMAdapter(LLMAdapter):
         self.model = model
         self.timeout = timeout
 
-    def generate(self, prompt: str, json_mode: bool = True) -> str | None:
+    def generate(
+        self,
+        prompt: str,
+        json_mode: bool = True,
+        *,
+        response_format: dict | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str | None:
         try:
             import litellm  # lazy import
         except ImportError:
@@ -29,8 +37,14 @@ class LiteLLMAdapter(LLMAdapter):
             "messages": messages,
             "timeout": self.timeout,
         }
-        if json_mode:
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        elif json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
 
         try:
             response = litellm.completion(**kwargs)
