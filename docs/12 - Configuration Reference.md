@@ -65,6 +65,10 @@ for manual backup workflows.
 
 Note: setup may persist different values in `.env`. For remote providers, Ormah stores only key policy, such as `ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY`; it does not store API key values. `llm_num_predict` maps to Ollama's `options.num_predict` request field.
 
+Cheap JSON-capable models are usually enough for classification-style background jobs such
+as feedback judging. Good starting points are local `llama3.2` through Ollama, or remote
+low-cost models such as `gpt-4o-mini` or Claude Haiku through LiteLLM.
+
 ## Background Intervals
 
 | Setting | Default |
@@ -98,6 +102,19 @@ Operational note: default-enabled does not mean active without configured watch 
 | `session_watcher_debounce_seconds` | `60.0` |
 | `session_watcher_min_turns` | `5` |
 | `session_watcher_lookback_hours` | `72` |
+
+### Feedback signal mining
+
+| Setting | Default |
+|---|---|
+| `feedback_llm_judge_enabled` | `false` |
+| `feedback_llm_judge_min_confidence` | `0.75` |
+
+The session watcher always records free/local heuristic feedback signals for injected
+whispers. When `feedback_llm_judge_enabled` is true and `llm_provider != "none"`, it also
+asks the configured LLM to judge ambiguous turns. Confident `used` verdicts become positive
+affinity; confident `irrelevant` verdicts become negative affinity; uncertain or
+low-confidence verdicts remain observational `signals` rows only.
 
 ## Search
 

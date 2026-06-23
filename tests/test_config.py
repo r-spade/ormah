@@ -214,3 +214,10 @@ def test_affinity_defaults():
     assert s.affinity_max_boost == 0.15
     assert s.affinity_implicit_weight == 0.8
     assert s.whisper_exploration_enabled is True
+    assert s.feedback_llm_judge_enabled is False
+    assert s.feedback_llm_judge_min_confidence == 0.75
+
+
+def test_feedback_llm_judge_min_confidence_range():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(feedback_llm_judge_min_confidence=1.5)

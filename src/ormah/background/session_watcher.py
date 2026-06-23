@@ -21,6 +21,41 @@ from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_tran
 logger = logging.getLogger(__name__)
 
 _STATE_FILENAME = ".session_watcher_state"
+_HEURISTIC_SOURCE = "transcript_watcher_heuristic"
+_LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
+_HEURISTIC_AFFINITY_SOURCE = "auto_heuristic"
+_LLM_JUDGE_AFFINITY_SOURCE = "auto_llm_judge"
+_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
+
+_LLM_FEEDBACK_JUDGE_PROMPT = """\
+You are judging retrieval feedback for Ormah, a memory system.
+
+Given a user prompt, the assistant response, and memories that Ormah injected before the
+assistant answered, decide whether each memory was actually useful retrieval context.
+
+Verdicts:
+- "used": the assistant response materially uses, cites, paraphrases, or relies on the memory.
+- "irrelevant": the memory is clearly unrelated/noisy for this prompt and response.
+- "uncertain": there is not enough evidence either way. Silence alone is uncertain, not irrelevant.
+
+Rules:
+- Do not mark a memory "used" just because it shares generic words with the response.
+- Do not mark a memory "irrelevant" just because the assistant omitted it.
+- Use "irrelevant" only when the memory is plainly off-topic for the user's prompt and answer.
+- Prefer "uncertain" when the judgment is ambiguous.
+
+Return strict JSON:
+{
+  "verdicts": [
+    {
+      "whisper_log_id": 123,
+      "verdict": "used|irrelevant|uncertain",
+      "confidence": 0.0,
+      "reason": "short concrete reason"
+    }
+  ]
+}
+"""
 
 
 def _normalise_text(text: str) -> str:
@@ -105,98 +140,364 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     }
 
 
+def _extract_json(raw: str) -> str:
+    """Extract JSON from an LLM response that may contain fences or prose."""
+    stripped = raw.strip()
+    if stripped.startswith(("{", "[")):
+        return stripped
+
+    match = _FENCE_RE.search(raw)
+    if match:
+        return match.group(1).strip()
+
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
+        start = raw.find(start_char)
+        end = raw.rfind(end_char)
+        if start != -1 and end > start:
+            return raw[start : end + 1]
+
+    return stripped
+
+
+def _normalise_judge_verdict(raw: object) -> str:
+    """Map loose LLM verdict labels to the canonical feedback verdicts."""
+    value = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if value in {"used", "useful", "referenced", "positive", "relevant"}:
+        return "used"
+    if value in {
+        "irrelevant",
+        "clearly_irrelevant",
+        "not_useful",
+        "negative",
+        "noisy",
+        "noise",
+    }:
+        return "irrelevant"
+    return "uncertain"
+
+
+def _confidence(raw: object) -> float:
+    """Parse and clamp an LLM confidence value into [0.0, 1.0]."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, value))
+
+
+def _feedback_llm_judge_enabled(engine: MemoryEngine) -> bool:
+    settings = engine.settings
+    return bool(
+        getattr(settings, "feedback_llm_judge_enabled", False)
+        and getattr(settings, "llm_enabled", False)
+    )
+
+
+def _llm_judge_whisper_usage(
+    engine: MemoryEngine,
+    prompt_text: str,
+    response_text: str,
+    rows: list,
+) -> dict[int, dict]:
+    """Ask the configured LLM to judge ambiguous whisper usage for one turn."""
+    if not rows:
+        return {}
+
+    from ormah.background.llm_client import llm_generate
+
+    candidates = [
+        {
+            "whisper_log_id": row["id"],
+            "node_id": (row["node_id"] or "")[:8],
+            "title": row["title"] or "",
+            "content": (row["content"] or "")[:1200],
+        }
+        for row in rows
+    ]
+    payload = {
+        "user_prompt": (prompt_text or "")[:2500],
+        "assistant_response": response_text[:5000],
+        "memories": candidates,
+    }
+    prompt = (
+        _LLM_FEEDBACK_JUDGE_PROMPT
+        + "\n\nInput JSON:\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+
+    raw = llm_generate(engine.settings, prompt, json_mode=True)
+    if raw is None:
+        return {}
+
+    try:
+        parsed = json.loads(_extract_json(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        logger.warning("LLM returned invalid JSON for feedback judgment")
+        return {}
+
+    verdicts = parsed.get("verdicts") if isinstance(parsed, dict) else parsed
+    if not isinstance(verdicts, list):
+        return {}
+
+    judgments: dict[int, dict] = {}
+    valid_ids = {int(row["id"]) for row in rows}
+    for item in verdicts:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("whisper_log_id", item.get("id"))
+        try:
+            whisper_log_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if whisper_log_id not in valid_ids:
+            continue
+
+        verdict = _normalise_judge_verdict(item.get("verdict"))
+        confidence = _confidence(item.get("confidence"))
+        judgments[whisper_log_id] = {
+            "verdict": verdict,
+            "confidence": confidence,
+            "reason": str(item.get("reason") or "")[:500],
+        }
+
+    return judgments
+
+
+def _insert_usage_signal(
+    conn,
+    row,
+    transcript: TranscriptResult,
+    *,
+    signal_type: str,
+    polarity: int,
+    strength: float,
+    source: str,
+    evidence: dict,
+    created: str,
+) -> int:
+    conn.execute(
+        """
+        INSERT INTO signals
+            (
+                whisper_log_id, node_id, signal_type, polarity, strength,
+                source, session_id, agent_id, surface, space, prompt_hash,
+                evidence, created
+            )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
+        """,
+        (
+            row["id"],
+            row["node_id"],
+            signal_type,
+            polarity,
+            strength,
+            source,
+            row["session_id"],
+            transcript.source,
+            "transcript_watcher",
+            row["space"],
+            row["prompt_hash"],
+            json.dumps(evidence, sort_keys=True),
+            created,
+        ),
+    )
+    return conn.execute("SELECT changes()").fetchone()[0]
+
+
+def _insert_affinity(
+    conn,
+    row,
+    *,
+    signal: int,
+    source: str,
+    confirmed_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO affinity
+            (
+                prompt_vec, prompt_text, node_id, signal, source,
+                confirmed_at, space, session_id, whisper_log_id
+            )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
+        """,
+        (
+            row["prompt_vec"],
+            row["prompt_text"],
+            row["node_id"],
+            signal,
+            source,
+            confirmed_at,
+            row["space"],
+            row["session_id"],
+            row["id"],
+        ),
+    )
+
+
 def _record_whisper_usage_signals(
     engine: MemoryEngine,
     transcript: TranscriptResult,
 ) -> int:
     """Mine transcript responses for clear usage of injected whisper memories."""
+    llm_judge_enabled = _feedback_llm_judge_enabled(engine)
     rows = engine.db.conn.execute(
         """
         SELECT
             wl.id, wl.node_id, wl.prompt_text, wl.prompt_hash, wl.prompt_vec,
-            wl.session_id, wl.space, n.title, n.content
+            wl.session_id, wl.space, n.title, n.content,
+            (
+                SELECT s.polarity FROM signals s
+                WHERE s.whisper_log_id = wl.id
+                  AND s.source = ?
+                ORDER BY s.id DESC
+                LIMIT 1
+            ) AS heuristic_polarity,
+            EXISTS (
+                SELECT 1 FROM signals s
+                WHERE s.whisper_log_id = wl.id
+                  AND s.source = ?
+            ) AS has_llm_judge
         FROM whisper_log wl
         JOIN nodes n ON n.id = wl.node_id
         WHERE wl.session_id = ?
           AND wl.was_injected = 1
-          AND NOT EXISTS (
-              SELECT 1 FROM signals s
-              WHERE s.whisper_log_id = wl.id
-                AND s.source = 'transcript_watcher_heuristic'
-          )
         ORDER BY wl.logged_at ASC, wl.id ASC
         """,
-        (transcript.session_id,),
+        (_HEURISTIC_SOURCE, _LLM_JUDGE_SOURCE, transcript.session_id),
     ).fetchall()
     if not rows:
         return 0
 
     now_iso = datetime.now(timezone.utc).isoformat()
     recorded = 0
-    with engine.db.transaction() as conn:
-        for row in rows:
-            response = _assistant_response_after_prompt(transcript.turns, row["prompt_text"])
-            if response is None:
-                continue
 
+    heuristic_records: list[dict] = []
+    llm_groups: dict[tuple[str, str], list] = {}
+    response_cache: dict[str, str | None] = {}
+    for row in rows:
+        prompt_text = row["prompt_text"] or ""
+        if prompt_text not in response_cache:
+            response_cache[prompt_text] = _assistant_response_after_prompt(
+                transcript.turns,
+                prompt_text,
+            )
+        response = response_cache[prompt_text]
+        if response is None:
+            continue
+
+        heuristic_polarity = row["heuristic_polarity"]
+        has_heuristic = heuristic_polarity is not None
+        has_llm_judge = bool(row["has_llm_judge"])
+
+        referenced = False
+        if not has_heuristic:
             referenced, strength, evidence = _node_usage_evidence(row, response)
             signal_type = "whisper_referenced" if referenced else "whisper_unreferenced"
             polarity = 1 if referenced else 0
-            evidence = {
-                **evidence,
-                "detector": "transcript_watcher_heuristic",
-                "response_chars": len(response),
-            }
-            conn.execute(
-                """
-                INSERT INTO signals
-                    (
-                        whisper_log_id, node_id, signal_type, polarity, strength,
-                        source, session_id, agent_id, surface, space, prompt_hash,
-                        evidence, created
-                    )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT DO NOTHING
-                """,
-                (
-                    row["id"],
-                    row["node_id"],
-                    signal_type,
-                    polarity,
-                    strength,
-                    "transcript_watcher_heuristic",
-                    row["session_id"],
-                    transcript.source,
-                    "transcript_watcher",
-                    row["space"],
-                    row["prompt_hash"],
-                    json.dumps(evidence, sort_keys=True),
-                    now_iso,
-                ),
-            )
-            recorded += conn.execute("SELECT changes()").fetchone()[0]
+            heuristic_records.append({
+                "row": row,
+                "signal_type": signal_type,
+                "polarity": polarity,
+                "strength": strength,
+                "evidence": {
+                    **evidence,
+                    "detector": _HEURISTIC_SOURCE,
+                    "response_chars": len(response),
+                },
+            })
+        else:
+            referenced = int(heuristic_polarity) == 1
 
-            if referenced:
-                conn.execute(
-                    """
-                    INSERT INTO affinity
-                        (
-                            prompt_vec, prompt_text, node_id, signal, source,
-                            confirmed_at, space, session_id, whisper_log_id
-                        )
-                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    (
-                        row["prompt_vec"],
-                        row["prompt_text"],
-                        row["node_id"],
-                        "auto_heuristic",
-                        now_iso,
-                        row["space"],
-                        row["session_id"],
-                        row["id"],
-                    ),
+        if llm_judge_enabled and not has_llm_judge and not referenced:
+            llm_groups.setdefault((prompt_text, response), []).append(row)
+
+    with engine.db.transaction() as conn:
+        for record in heuristic_records:
+            row = record["row"]
+            recorded += _insert_usage_signal(
+                conn,
+                row,
+                transcript,
+                signal_type=record["signal_type"],
+                polarity=record["polarity"],
+                strength=record["strength"],
+                source=_HEURISTIC_SOURCE,
+                evidence=record["evidence"],
+                created=now_iso,
+            )
+            if record["polarity"] == 1:
+                _insert_affinity(
+                    conn,
+                    row,
+                    signal=1,
+                    source=_HEURISTIC_AFFINITY_SOURCE,
+                    confirmed_at=now_iso,
+                )
+
+    if not llm_groups:
+        return recorded
+
+    judge_records: list[dict] = []
+    min_confidence = getattr(engine.settings, "feedback_llm_judge_min_confidence", 0.75)
+    for (prompt_text, response), group_rows in llm_groups.items():
+        judgments = _llm_judge_whisper_usage(engine, prompt_text, response, group_rows)
+        for row in group_rows:
+            judgment = judgments.get(int(row["id"]))
+            if judgment is None:
+                continue
+
+            verdict = judgment["verdict"]
+            confidence = judgment["confidence"]
+            promoted = confidence >= min_confidence and verdict in {"used", "irrelevant"}
+            polarity = 0
+            signal_type = "whisper_judged_uncertain"
+            if promoted and verdict == "used":
+                polarity = 1
+                signal_type = "whisper_judged_used"
+            elif promoted and verdict == "irrelevant":
+                polarity = -1
+                signal_type = "whisper_judged_irrelevant"
+
+            judge_records.append({
+                "row": row,
+                "signal_type": signal_type,
+                "polarity": polarity,
+                "strength": confidence,
+                "evidence": {
+                    "detector": _LLM_JUDGE_SOURCE,
+                    "verdict": verdict,
+                    "confidence": confidence,
+                    "min_confidence": min_confidence,
+                    "reason": judgment["reason"],
+                    "promoted": promoted,
+                    "response_chars": len(response),
+                },
+            })
+
+    with engine.db.transaction() as conn:
+        for record in judge_records:
+            row = record["row"]
+            recorded += _insert_usage_signal(
+                conn,
+                row,
+                transcript,
+                signal_type=record["signal_type"],
+                polarity=record["polarity"],
+                strength=record["strength"],
+                source=_LLM_JUDGE_SOURCE,
+                evidence=record["evidence"],
+                created=now_iso,
+            )
+            if record["polarity"] in (1, -1):
+                _insert_affinity(
+                    conn,
+                    row,
+                    signal=record["polarity"],
+                    source=_LLM_JUDGE_AFFINITY_SOURCE,
+                    confirmed_at=now_iso,
                 )
 
     return recorded

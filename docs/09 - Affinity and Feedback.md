@@ -20,7 +20,10 @@ applied.
 
 Ormah does not infer negative feedback from silence alone. Session-watcher heuristics may
 record neutral `whisper_unreferenced` signals for observability, but only clear positive
-references are promoted into affinity rows.
+references are promoted into affinity rows. If `feedback_llm_judge_enabled` is on and an
+LLM provider is configured, the session watcher can ask the LLM to judge ambiguous turns;
+only confident `used` / `irrelevant` verdicts are promoted into positive / negative
+affinity.
 
 ## Where Feedback Comes From
 
@@ -93,6 +96,18 @@ heuristics record:
 Only `whisper_referenced` heuristic signals are promoted to `affinity`; unreferenced signals
 remain observational.
 
+If the optional LLM judge is enabled, those ambiguous unreferenced rows are grouped by
+prompt/response and sent to the configured LLM. The judge returns `used`, `irrelevant`, or
+`uncertain` with confidence. Ormah records the judge output in `signals` and promotes only
+high-confidence verdicts:
+
+- `whisper_judged_used` with polarity `+1` becomes positive affinity
+- `whisper_judged_irrelevant` with polarity `-1` becomes negative affinity
+- `whisper_judged_uncertain` with polarity `0` remains observational
+
+Low-confidence judge verdicts are normalized to `whisper_judged_uncertain` so they do not
+change ranking.
+
 That is why the system needs `whisper_log` first: affinity rows are learned from previously logged whisper candidates.
 
 ## Stored Fields
@@ -147,6 +162,8 @@ For each candidate node:
 | `affinity_half_life_days` | `30.0` |
 | `affinity_max_boost` | `0.15` |
 | `affinity_implicit_weight` | `0.8` |
+| `feedback_llm_judge_enabled` | `false` |
+| `feedback_llm_judge_min_confidence` | `0.75` |
 
 ## Math
 
@@ -203,6 +220,9 @@ The review candidate is selected from recent `whisper_log` rows where:
 3. Ormah records a signal tied to the exact `whisper_log` row
 4. trusted positive judgments create an affinity row tied to that same prompt vector
 5. on a future prompt with similar wording, that node can receive a small positive score boost
+
+With the optional LLM judge enabled, a clearly off-topic memory can instead receive a
+trusted negative affinity row when the judge returns a confident `irrelevant` verdict.
 
 ## Code Anchors
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -203,6 +203,264 @@ def test_record_whisper_usage_signal_keeps_unreferenced_neutral(engine, tmp_path
         "SELECT * FROM affinity WHERE whisper_log_id = ?", (whisper_log_id,)
     ).fetchone()
     assert affinity is None
+
+
+def test_llm_judge_disabled_by_default(engine, tmp_path):
+    """The transcript watcher does not call the LLM unless the judge is enabled."""
+    prompt = "How should we solve feedback collection?"
+    response = "We should first fix the database uniqueness key."
+    transcript_path = tmp_path / "judge-disabled-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Graph rendering should use level of detail for large datasets.",
+        type="fact",
+        title="Large graph rendering performance",
+    ))
+    _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="judge-disabled-session",
+        prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+
+    mock_llm = MagicMock(return_value=json.dumps({"verdicts": []}))
+    with patch(_LLM_PATCH, mock_llm):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 1
+    mock_llm.assert_not_called()
+
+
+def test_llm_judge_promotes_used_verdict(engine, tmp_path):
+    """A confident LLM 'used' verdict creates positive affinity for an ambiguous row."""
+    prompt = "What deployment marker should we use?"
+    response = "That guidance is the right one for the rollout."
+    transcript_path = tmp_path / "judge-used-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Use blue deployment markers when rollback plans need quick visual checks.",
+        type="fact",
+        title="Blue deployment rollback marker",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="judge-used-session",
+        prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    llm_response = json.dumps({
+        "verdicts": [{
+            "whisper_log_id": whisper_log_id,
+            "verdict": "used",
+            "confidence": 0.88,
+            "reason": "The answer endorses the injected deployment guidance.",
+        }]
+    })
+    with patch(_LLM_PATCH, return_value=llm_response):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 2
+    judge_signal = engine.db.conn.execute(
+        "SELECT * FROM signals WHERE whisper_log_id = ? "
+        "AND source = 'transcript_watcher_llm_judge'",
+        (whisper_log_id,),
+    ).fetchone()
+    assert judge_signal is not None
+    assert judge_signal["signal_type"] == "whisper_judged_used"
+    assert judge_signal["polarity"] == 1
+    assert judge_signal["strength"] == 0.88
+
+    affinity = engine.db.conn.execute(
+        "SELECT * FROM affinity WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert affinity is not None
+    assert affinity["signal"] == 1
+    assert affinity["source"] == "auto_llm_judge"
+
+
+def test_llm_judge_promotes_irrelevant_verdict_as_negative(engine, tmp_path):
+    """A confident LLM irrelevant verdict is the automatic negative-feedback path."""
+    prompt = "How should we solve feedback collection?"
+    response = "We should first fix the database uniqueness key."
+    transcript_path = tmp_path / "judge-negative-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Graph rendering should use level of detail for large datasets.",
+        type="fact",
+        title="Large graph rendering performance",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="judge-negative-session",
+        prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    llm_response = json.dumps({
+        "verdicts": [{
+            "whisper_log_id": whisper_log_id,
+            "verdict": "irrelevant",
+            "confidence": 0.91,
+            "reason": "The memory is about graph UI rendering, not feedback schema work.",
+        }]
+    })
+    with patch(_LLM_PATCH, return_value=llm_response):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 2
+    judge_signal = engine.db.conn.execute(
+        "SELECT * FROM signals WHERE whisper_log_id = ? "
+        "AND source = 'transcript_watcher_llm_judge'",
+        (whisper_log_id,),
+    ).fetchone()
+    assert judge_signal is not None
+    assert judge_signal["signal_type"] == "whisper_judged_irrelevant"
+    assert judge_signal["polarity"] == -1
+
+    affinity = engine.db.conn.execute(
+        "SELECT * FROM affinity WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert affinity is not None
+    assert affinity["signal"] == -1
+    assert affinity["source"] == "auto_llm_judge"
+
+
+def test_llm_judge_low_confidence_records_uncertain_without_affinity(engine, tmp_path):
+    """Low-confidence LLM verdicts remain observable but do not affect ranking."""
+    prompt = "How should we solve feedback collection?"
+    response = "We should first fix the database uniqueness key."
+    transcript_path = tmp_path / "judge-low-confidence-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Graph rendering should use level of detail for large datasets.",
+        type="fact",
+        title="Large graph rendering performance",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="judge-low-confidence-session",
+        prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    llm_response = json.dumps({
+        "verdicts": [{
+            "whisper_log_id": whisper_log_id,
+            "verdict": "irrelevant",
+            "confidence": 0.4,
+            "reason": "Maybe unrelated, but confidence is low.",
+        }]
+    })
+    with patch(_LLM_PATCH, return_value=llm_response):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 2
+    judge_signal = engine.db.conn.execute(
+        "SELECT * FROM signals WHERE whisper_log_id = ? "
+        "AND source = 'transcript_watcher_llm_judge'",
+        (whisper_log_id,),
+    ).fetchone()
+    assert judge_signal is not None
+    assert judge_signal["signal_type"] == "whisper_judged_uncertain"
+    assert judge_signal["polarity"] == 0
+
+    affinity = engine.db.conn.execute(
+        "SELECT * FROM affinity WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert affinity is None
+
+
+def test_llm_judge_skips_clear_heuristic_positive(engine, tmp_path):
+    """The optional judge does not spend an LLM call on clear heuristic positives."""
+    prompt = "How should we solve feedback collection?"
+    response = "The right fix is the transcript watcher mines feedback usage approach."
+    transcript_path = tmp_path / "judge-skip-positive-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="The transcript watcher mines feedback usage from completed transcripts.",
+        type="fact",
+        title="Transcript watcher mines feedback usage",
+    ))
+    _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="judge-skip-positive-session",
+        prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    mock_llm = MagicMock(return_value=json.dumps({"verdicts": []}))
+    with patch(_LLM_PATCH, mock_llm):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 1
+    mock_llm.assert_not_called()
+
+
+def test_llm_judge_is_idempotent(engine, tmp_path):
+    """Once a judge signal exists, the same whisper row is not judged again."""
+    prompt = "How should we solve feedback collection?"
+    response = "We should first fix the database uniqueness key."
+    transcript_path = tmp_path / "judge-idempotent-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Graph rendering should use level of detail for large datasets.",
+        type="fact",
+        title="Large graph rendering performance",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="judge-idempotent-session",
+        prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    mock_llm = MagicMock(return_value=json.dumps({
+        "verdicts": [{
+            "whisper_log_id": whisper_log_id,
+            "verdict": "irrelevant",
+            "confidence": 0.91,
+            "reason": "The memory is about graph UI rendering.",
+        }]
+    }))
+    with patch(_LLM_PATCH, mock_llm):
+        assert _record_whisper_usage_signals(engine, transcript) == 2
+        assert _record_whisper_usage_signals(engine, transcript) == 0
+
+    assert mock_llm.call_count == 1
+    signal_count = engine.db.conn.execute(
+        "SELECT COUNT(*) AS count FROM signals WHERE whisper_log_id = ?",
+        (whisper_log_id,),
+    ).fetchone()["count"]
+    affinity_count = engine.db.conn.execute(
+        "SELECT COUNT(*) AS count FROM affinity WHERE whisper_log_id = ?",
+        (whisper_log_id,),
+    ).fetchone()["count"]
+    assert signal_count == 2
+    assert affinity_count == 1
 
 
 # --- Test 3: Min turns filter ---

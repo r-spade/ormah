@@ -61,6 +61,8 @@ Current defaults:
 - `session_watcher_debounce_seconds = 60`
 - `session_watcher_min_turns = 5`
 - `session_watcher_lookback_hours = 72`
+- `feedback_llm_judge_enabled = false`
+- `feedback_llm_judge_min_confidence = 0.75`
 
 The current default watch directory remains the historical Claude Code path for compatibility.
 The parser and downstream ingestion path are agent-normalized; adding another client should
@@ -76,6 +78,13 @@ mean adding a transcript source/adapter, not changing memory ingestion or signal
 6. ingests the conversation through `engine.ingest_conversation(...)`
 7. stores `.session_watcher_state`
 8. starts a real-time observer
+
+During transcript processing, the watcher also mines injected whisper rows for feedback
+signals. The free/local heuristic path records clear references as positive signals and
+non-references as neutral observations. If `feedback_llm_judge_enabled` is true and
+`llm_provider` is not `none`, ambiguous rows are sent to the configured LLM for a
+`used` / `irrelevant` / `uncertain` verdict. Only confident `used` and `irrelevant`
+verdicts affect affinity.
 
 ## Transcript Parser
 
