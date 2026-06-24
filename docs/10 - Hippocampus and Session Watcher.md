@@ -52,21 +52,25 @@ The session watcher ingests normalized agent transcript JSONL files.
 It only starts when:
 
 - `session_watcher_enabled == True`
-- the configured watch dir exists
+- at least one effective watch dir exists
 
 Current defaults:
 
 - `session_watcher_enabled = False`
 - `session_watcher_dir = ~/.claude/projects`
+- existing Codex sessions under `~/.codex/sessions` are also watched when the primary
+  directory is left at the default
 - `session_watcher_debounce_seconds = 60`
 - `session_watcher_min_turns = 5`
 - `session_watcher_lookback_hours = 72`
 - `feedback_llm_judge_enabled = false`
 - `feedback_llm_judge_min_confidence = 0.75`
 
-The current default watch directory remains the historical Claude Code path for compatibility.
-The parser and downstream ingestion path are agent-normalized; adding another client should
-mean adding a transcript source/adapter, not changing memory ingestion or signal mining.
+The primary default watch directory remains the historical Claude Code path for compatibility.
+When that primary is unchanged, the watcher also starts on Codex's default session directory
+if it exists. The parser and downstream ingestion path are agent-normalized; adding another
+client should mean adding a transcript source/adapter, not changing memory ingestion or
+signal mining.
 
 ### What it does
 
@@ -74,7 +78,7 @@ mean adding a transcript source/adapter, not changing memory ingestion or signal
 2. applies first-run lookback filtering
 3. normalizes transcripts into source metadata, turns, and conversation text
 4. skips very short sessions
-5. derives space from the current source's strategy
+5. resolves source-specific session metadata
 6. ingests the conversation through `engine.ingest_conversation(...)`
 7. stores `.session_watcher_state`
 8. starts a real-time observer
@@ -86,6 +90,12 @@ non-references as neutral observations. If `feedback_llm_judge_enabled` is true 
 `used` / `irrelevant` / `uncertain` verdict. Only confident `used` and `irrelevant`
 verdicts affect affinity. The LLM judge requests compact JSON Schema output when the
 configured provider supports it, with a JSON-object fallback for providers that do not.
+
+Claude Code transcript filenames are already the hook session id, and Claude project folders
+encode the project space. Codex rollout filenames can include the hook session id inside a
+longer filename, and the parent directories are usually date folders. For Codex, the watcher
+therefore resolves the session id and space from matching `whisper_log` rows written during
+whisper injection instead of deriving them from the path.
 
 ## Transcript Parser
 

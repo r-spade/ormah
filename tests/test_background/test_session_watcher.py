@@ -70,19 +70,42 @@ def _write_turn_jsonl(path: Path, prompt: str, response: str) -> None:
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
 
 
+def _write_codex_turn_jsonl(path: Path, prompt: str, response: str) -> None:
+    lines = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": response}],
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
 def _insert_injected_whisper_log(
     engine: MemoryEngine,
     *,
     node_id: str,
     session_id: str,
     prompt: str,
+    space: str = "myproject",
 ) -> int:
     cursor = engine.db.conn.execute(
         "INSERT INTO whisper_log "
         "(session_id, space, prompt_hash, prompt_text, prompt_vec, node_id, score, "
         "was_injected, logged_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-        (session_id, "myproject", "hash-abc", prompt, b"\x00" * 4, node_id, 0.9, 1),
+        (session_id, space, "hash-abc", prompt, b"\x00" * 4, node_id, 0.9, 1),
     )
     engine.db.conn.commit()
     return cursor.lastrowid
@@ -125,6 +148,70 @@ def test_ingest_session_basic(engine, tmp_path):
     assert entry["space"] == "myproject"
     assert entry["user_turns"] == 6
     assert len(entry["node_ids"]) == 1
+
+
+def test_ingest_codex_session_resolves_rollout_session_id_and_space(engine, tmp_path):
+    """Codex rollout filenames are matched back to the whisper_log hook session id."""
+    watch_dir = tmp_path / ".codex" / "sessions"
+    transcript_dir = watch_dir / "2026" / "06" / "24"
+    transcript_dir.mkdir(parents=True)
+    jsonl = transcript_dir / "rollout-2026-06-24T12-00-00-sess-456.jsonl"
+
+    prompt = "Why is the Codex watcher less polished?"
+    response = (
+        "The Codex watcher should resolve rollout filenames through whisper_log session ids "
+        "instead of trusting the transcript filename stem."
+    )
+    _write_codex_turn_jsonl(jsonl, prompt, response)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Codex watcher rollout filenames should be resolved through whisper_log session ids.",
+        type="fact",
+        title="Codex watcher session id resolution",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine,
+        node_id=node_id,
+        session_id="sess-456",
+        prompt=prompt,
+        space="ormah",
+    )
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+
+    rel = str(jsonl.relative_to(watch_dir))
+    entry = state[rel]
+    assert entry["session_id"] == "sess-456"
+    assert entry["source"] == "codex"
+    assert entry["space"] == "ormah"
+    assert entry["signals_recorded"] == 1
+
+    signal = engine.db.conn.execute(
+        "SELECT * FROM signals WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert signal is not None
+    assert signal["session_id"] == "sess-456"
+    assert signal["agent_id"] == "codex"
+    assert signal["polarity"] == 1
+
+
+def test_ingest_codex_session_without_whisper_log_does_not_infer_date_space(engine, tmp_path):
+    """Codex date folders are storage layout, not project space."""
+    watch_dir = tmp_path / ".codex" / "sessions"
+    transcript_dir = watch_dir / "2026" / "06" / "24"
+    transcript_dir.mkdir(parents=True)
+    jsonl = transcript_dir / "rollout-2026-06-24T12-00-00-no-log.jsonl"
+    _write_codex_turn_jsonl(jsonl, "Prompt with enough content", "Response with enough content")
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+
+    entry = state[str(jsonl.relative_to(watch_dir))]
+    assert entry["source"] == "codex"
+    assert entry["space"] is None
 
 
 def test_record_whisper_usage_signal_promotes_clear_reference(engine, tmp_path):
@@ -637,6 +724,31 @@ def test_lifecycle_start_stop(engine, tmp_path):
     # Give observer thread a moment to stop
     time.sleep(0.1)
     assert not observers[0].is_alive()
+
+
+def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
+    engine,
+    tmp_path,
+    monkeypatch,
+):
+    """Default watcher setup starts observers for existing Claude and Codex session dirs."""
+    home = tmp_path / "home"
+    claude_dir = home / ".claude" / "projects"
+    codex_dir = home / ".codex" / "sessions"
+    claude_dir.mkdir(parents=True)
+    codex_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = Path("~/.claude/projects")
+    engine.settings.session_watcher_debounce_seconds = 10.0
+
+    observers = start_session_watcher(engine)
+    try:
+        assert len(observers) == 2
+        assert all(observer.is_alive() for observer in observers)
+    finally:
+        stop_session_watcher(observers)
 
 
 # --- Test 8: Disabled returns empty ---

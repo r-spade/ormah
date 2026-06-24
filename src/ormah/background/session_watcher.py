@@ -26,6 +26,8 @@ _LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
 _HEURISTIC_AFFINITY_SOURCE = "auto_heuristic"
 _LLM_JUDGE_AFFINITY_SOURCE = "auto_llm_judge"
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
+_DEFAULT_SESSION_WATCHER_DIR = Path("~/.claude/projects")
+_CODEX_SESSION_WATCHER_DIR = Path("~/.codex/sessions")
 
 _LLM_FEEDBACK_JUDGE_PROMPT = """\
 You are judging retrieval feedback for Ormah, a memory system.
@@ -568,6 +570,102 @@ def _space_from_encoded_dir(dirname: str) -> str | None:
     return parts[-1] if parts else None
 
 
+def _resolve_transcript_session_id(
+    engine: MemoryEngine,
+    path: Path,
+    parsed_session_id: str,
+    source: str,
+) -> str:
+    """Resolve source-specific transcript filenames back to hook session ids.
+
+    Claude Code transcript filenames are the session id. Codex rollout filenames can embed
+    the hook session id inside a longer filename, so use recent whisper_log rows to recover
+    the id that was used when whispers were injected.
+    """
+    if not parsed_session_id:
+        return parsed_session_id
+
+    exact = engine.db.conn.execute(
+        "SELECT 1 FROM whisper_log WHERE session_id = ? LIMIT 1",
+        (parsed_session_id,),
+    ).fetchone()
+    if exact is not None:
+        return parsed_session_id
+
+    if source != "codex":
+        return parsed_session_id
+
+    row = engine.db.conn.execute(
+        """
+        SELECT session_id
+        FROM whisper_log
+        WHERE session_id IS NOT NULL
+          AND session_id != ''
+          AND length(session_id) >= 6
+          AND ? LIKE '%' || session_id || '%'
+        ORDER BY length(session_id) DESC, logged_at DESC, id DESC
+        LIMIT 1
+        """,
+        (path.name,),
+    ).fetchone()
+    return row["session_id"] if row is not None else parsed_session_id
+
+
+def _space_from_whisper_log(engine: MemoryEngine, session_id: str) -> str | None:
+    """Return the most recent non-empty space logged for a whisper session."""
+    if not session_id:
+        return None
+
+    row = engine.db.conn.execute(
+        """
+        SELECT space
+        FROM whisper_log
+        WHERE session_id = ?
+          AND space IS NOT NULL
+          AND space != ''
+        ORDER BY logged_at DESC, id DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    ).fetchone()
+    return row["space"] if row is not None else None
+
+
+def _space_for_transcript(
+    engine: MemoryEngine,
+    path: Path,
+    result: TranscriptResult,
+) -> str | None:
+    """Choose the project space for a parsed transcript."""
+    logged_space = _space_from_whisper_log(engine, result.session_id)
+    if logged_space:
+        return logged_space
+
+    if result.source == "claude_code":
+        return _space_from_encoded_dir(path.parent.name)
+
+    return None
+
+
+def _expand_watch_dir(path: Path) -> Path:
+    return Path(path).expanduser().resolve()
+
+
+def _session_watch_dirs(settings) -> list[Path]:
+    """Return existing transcript watch directories for the current settings."""
+    primary = _expand_watch_dir(settings.session_watcher_dir)
+    candidates = [primary]
+
+    if primary == _expand_watch_dir(_DEFAULT_SESSION_WATCHER_DIR):
+        candidates.append(_expand_watch_dir(_CODEX_SESSION_WATCHER_DIR))
+
+    watch_dirs: list[Path] = []
+    for candidate in candidates:
+        if candidate.exists() and candidate not in watch_dirs:
+            watch_dirs.append(candidate)
+    return watch_dirs
+
+
 def _file_hash(path: Path) -> str:
     """Return SHA-256 hex digest of a file's contents."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -619,8 +717,13 @@ def _ingest_session(
     if result.user_turn_count < min_turns:
         return False
 
-    # Detect space from parent directory encoding
-    space = _space_from_encoded_dir(path.parent.name)
+    result.session_id = _resolve_transcript_session_id(
+        engine,
+        path,
+        result.session_id,
+        result.source,
+    )
+    space = _space_for_transcript(engine, path, result)
     signals_recorded = _record_whisper_usage_signals(engine, result)
 
     try:
@@ -763,28 +866,31 @@ def start_session_watcher(engine: MemoryEngine) -> list[Observer]:
     if not s.session_watcher_enabled:
         return []
 
-    watch_dir = Path(s.session_watcher_dir).expanduser().resolve()
-    if not watch_dir.exists():
-        logger.warning("Session watcher dir does not exist: %s", watch_dir)
+    watch_dirs = _session_watch_dirs(s)
+    if not watch_dirs:
+        logger.warning("Session watcher dir does not exist: %s", _expand_watch_dir(s.session_watcher_dir))
         return []
 
-    # Catch-up scan
-    ingested = _scan_sessions(
-        engine, watch_dir, s.session_watcher_min_turns, s.session_watcher_lookback_hours,
-    )
-    if ingested:
-        logger.info("Session watcher catch-up: ingested %d sessions from %s", ingested, watch_dir)
+    observers: list[Observer] = []
+    for watch_dir in watch_dirs:
+        # Catch-up scan
+        ingested = _scan_sessions(
+            engine, watch_dir, s.session_watcher_min_turns, s.session_watcher_lookback_hours,
+        )
+        if ingested:
+            logger.info("Session watcher catch-up: ingested %d sessions from %s", ingested, watch_dir)
 
-    # Start real-time watcher
-    handler = SessionHandler(
-        engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
-    )
-    observer = Observer()
-    observer.schedule(handler, str(watch_dir), recursive=True)
-    observer.start()
-    logger.info("Session watcher started on %s", watch_dir)
+        # Start real-time watcher
+        handler = SessionHandler(
+            engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
+        )
+        observer = Observer()
+        observer.schedule(handler, str(watch_dir), recursive=True)
+        observer.start()
+        observers.append(observer)
+        logger.info("Session watcher started on %s", watch_dir)
 
-    return [observer]
+    return observers
 
 
 def stop_session_watcher(observers: list[Observer]) -> None:
