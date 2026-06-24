@@ -45,7 +45,7 @@ clean: ## Remove build artifacts
 logs: ## Tail the server logs (if running in background)
 	@echo "Server runs with stdout logging. Use 'make server' in foreground to see logs."
 
-release: ## Build and publish the wheel to PyPI (fresh UI build, no sdist upload)
+release: ## Local fallback: build and publish the wheel to PyPI (fresh UI build, no sdist upload)
 	rm -rf dist/
 	cd ui && npm ci && npm run build
 	uv build --wheel --out-dir dist
