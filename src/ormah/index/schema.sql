@@ -122,13 +122,13 @@ CREATE TABLE IF NOT EXISTS affinity (
     whisper_log_id INTEGER REFERENCES whisper_log(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_affinity_node ON affinity(node_id);
-CREATE INDEX IF NOT EXISTS idx_affinity_whisper_log ON affinity(whisper_log_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_affinity_node_whisper_log_unique
-    ON affinity(node_id, whisper_log_id)
-    WHERE whisper_log_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_affinity_node_session_legacy_unique
-    ON affinity(node_id, session_id)
-    WHERE whisper_log_id IS NULL;
+-- Indexes on affinity.whisper_log_id are created by the migration code
+-- (_ensure_affinity_indexes), NOT here. On a pre-feedback DB the affinity table
+-- already exists without whisper_log_id, so "CREATE TABLE IF NOT EXISTS affinity"
+-- above is a no-op and the column is missing. executescript() runs this file
+-- before _migrate() adds the column, so creating these indexes here would crash
+-- with "no such column: whisper_log_id". _migrate_affinity_schema() rebuilds the
+-- legacy table and then creates these indexes, which is the correct ordering.
 
 CREATE TABLE IF NOT EXISTS signals (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
