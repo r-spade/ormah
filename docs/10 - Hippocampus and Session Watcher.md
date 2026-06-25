@@ -63,6 +63,7 @@ Current defaults:
 - `session_watcher_debounce_seconds = 60`
 - `session_watcher_min_turns = 5`
 - `session_watcher_lookback_hours = 72`
+- `session_watcher_idle_threshold = 30.0`
 - `feedback_llm_judge_enabled = false`
 - `feedback_llm_judge_min_confidence = 0.75`
 

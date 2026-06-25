@@ -102,6 +102,7 @@ Operational note: default-enabled does not mean active without configured watch 
 | `session_watcher_debounce_seconds` | `60.0` |
 | `session_watcher_min_turns` | `5` |
 | `session_watcher_lookback_hours` | `72` |
+| `session_watcher_idle_threshold` | `30.0` |
 
 `session_watcher_dir` is the primary watch directory and remains the historical Claude Code
 default. When it is left at the default, Ormah also watches `~/.codex/sessions` if that
