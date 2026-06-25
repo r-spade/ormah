@@ -17,21 +17,27 @@ def _init_db(tmp_path):
 
 def test_each_thread_gets_distinct_connection(tmp_path):
     db = _init_db(tmp_path)
-    conns: dict[int, int] = {}
+    conns: list[int | None] = [None] * 4
+    start = threading.Barrier(4)
+    release = threading.Event()
 
-    def grab():
-        conns[threading.get_ident()] = id(db.conn)
+    def grab(index: int):
+        start.wait(timeout=5)
+        conns[index] = id(db.conn)
+        release.wait(timeout=5)
 
-    threads = [threading.Thread(target=grab) for _ in range(4)]
+    threads = [threading.Thread(target=grab, args=(i,)) for i in range(4)]
     for t in threads:
         t.start()
+    release.set()
     for t in threads:
         t.join()
 
     # main thread connection is distinct from every worker's
     main_id = id(db.conn)
-    assert len(set(conns.values())) == 4
-    assert main_id not in conns.values()
+    assert None not in conns
+    assert len(set(conns)) == 4
+    assert main_id not in conns
     db.close()
 
 
