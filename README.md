@@ -7,6 +7,7 @@
   <a href="https://pypi.org/project/ormah/"><img src="https://img.shields.io/pypi/pyversions/ormah.svg" alt="Python versions"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://www.ormah.me/docs/getting-started/quickstart"><img src="https://img.shields.io/badge/docs-ormah.me-orange.svg" alt="Docs"></a>
+  <a href="https://discord.gg/guBU6XweBu"><img src="https://img.shields.io/discord/1487837267719356416?label=discord&logo=discord&color=5865F2" alt="Discord"></a>
 </p>
 
 **The collective, self-maintaining memory layer all your agents can tap into.**
@@ -163,6 +164,10 @@ Main integration surfaces:
 - HTTP API — `/agent/*`, `/admin/*`, `/ingest/*`, `/ui/*`
 
 Read more: [Installation](https://www.ormah.me/docs/getting-started/installation), [Setup](https://www.ormah.me/docs/getting-started/setup), [MCP and Adapters](https://www.ormah.me/docs/integrations/mcp-and-adapters), [API Surface](https://www.ormah.me/docs/reference/api-surface), [Configuration Reference](https://www.ormah.me/docs/operations/configuration-reference)
+
+## Community
+
+Join the [Ormah Discord](https://discord.gg/guBU6XweBu) for help, feature discussion, and updates.
 
 ## Development
 
