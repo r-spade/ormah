@@ -1,7 +1,7 @@
 {
   "name": "ormah",
   "description": "Local-first persistent memory system with automatic context injection and durable memory tools.",
-  "version": "0.12.4",
+  "version": "0.13.0",
   "author": {
     "name": "r-spade"
   },
