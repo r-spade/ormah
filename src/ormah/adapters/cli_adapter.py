@@ -208,18 +208,17 @@ def cmd_outdated(args):
 def cmd_stats(args):
     def call():
         with _client() as c:
-            r = c.get("/admin/stats")
+            r = c.get("/stats")
             r.raise_for_status()
             data = r.json()
-            u = c.get("/agent/stats")
-            u.raise_for_status()
-            usage = u.json()
+            usage = data.get("usage", {})
+            store = data.get("store", {})
             if args.json:
-                print(json.dumps({**data, "usage": usage}, indent=2))
+                print(json.dumps(data, indent=2))
             else:
-                total = data.get("total_nodes", 0)
-                edges = data.get("total_edges", 0)
-                by_tier = data.get("by_tier", {})
+                total = store.get("total_nodes", 0)
+                edges = store.get("total_edges", 0)
+                by_tier = store.get("by_tier", {})
                 week = usage.get("whispers_used_this_week", 0)
                 used_total = usage.get("whispers_used_total", 0)
                 print(f"Whispers used: {week} this week  ({used_total} total)")

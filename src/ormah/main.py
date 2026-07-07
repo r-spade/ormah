@@ -16,6 +16,7 @@ from ormah.api.middleware import AgentMiddleware
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
 from ormah.api.routes_ingest import router as ingest_router
+from ormah.api.routes_stats import router as stats_router
 from ormah.api.routes_ui import router as ui_router
 from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.config import settings
@@ -30,7 +31,7 @@ setup_logging(
 )
 logger = logging.getLogger(__name__)
 
-_RESERVED_API_PREFIXES = {"agent", "admin", "ingest", "ui"}
+_RESERVED_API_PREFIXES = {"agent", "admin", "ingest", "stats", "ui"}
 _LOCAL_CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 
 
@@ -124,6 +125,7 @@ app.add_middleware(AgentMiddleware)
 
 app.include_router(agent_router)
 app.include_router(admin_router)
+app.include_router(stats_router)
 app.include_router(ui_router)
 app.include_router(ingest_router)
 

@@ -111,7 +111,7 @@ pub fn build(app: &App) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    // Poll /agent/stats + health every 60s; updates tray title, menu counters,
+    // Poll /stats + health every 60s; updates tray title, menu counters,
     // and server status items.
     stats::spawn_poller(
         handle.clone(),

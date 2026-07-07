@@ -166,8 +166,8 @@ def test_seven_day_cutoff():
 
 def test_stats_exposes_whisper_health(engine):
     out = engine.stats()
-    assert "whisper_health" in out
-    wh = out["whisper_health"]
+    assert "feedback_health" in out["whisper"]
+    wh = out["whisper"]["feedback_health"]
     assert set(wh) == {"all_time", "last_7d"}
     assert set(wh["last_7d"]) == {
         "injected", "feedback_rows", "coverage",
@@ -199,7 +199,7 @@ def test_stats_whisper_health_seeded(engine):
         "VALUES (X'00', 'n1', 1, 'explicit', datetime('now'), 's1', ?)",
         (wid,),
     )
-    wh = engine.stats()["whisper_health"]["all_time"]
+    wh = engine.stats()["whisper"]["feedback_health"]["all_time"]
     assert wh["injected"] == 1
     assert wh["feedback_rows"] == 1
     assert wh["coverage"] == 1.0

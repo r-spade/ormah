@@ -1062,18 +1062,79 @@ class MemoryEngine:
         except Exception as e:
             logger.warning("Failed to reindex embeddings: %s", e)
 
-    def stats(self) -> dict:
-        """Get memory store statistics."""
+    def _usage_stats(
+        self,
+        now: datetime,
+        days: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return tray-facing usage counters and their window metadata."""
+        conn = self.db.conn
+        if days is None:
+            window_days = now.weekday() + 1  # days elapsed in this calendar week
+            cutoff = (now - timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
+            window_kind = "calendar_week"
+        else:
+            window_days = days
+            cutoff = (now - timedelta(days=days)).isoformat()
+            window_kind = "rolling"
+
+        used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
+        whispers_total = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log WHERE was_injected = 1"
+        ).fetchone()[0]
+        whispers_window = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log "
+            "WHERE was_injected = 1 AND logged_at >= ?",
+            (cutoff,),
+        ).fetchone()[0]
+
+        # Exclude system-seeded bootstrap nodes (e.g. the "Self" node) so a
+        # fresh install honestly reads zero memories in the tray.
+        not_system = "source NOT LIKE 'system:%'"
+        memories_total = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system}"
+        ).fetchone()[0]
+        memories_window = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system} AND created >= ?", (cutoff,)
+        ).fetchone()[0]
+
+        usage = {
+            "whispers_used_this_week": whispers_window,
+            "whispers_used_total": whispers_total,
+            "memories_this_week": memories_window,
+            "memories_total": memories_total,
+        }
+        window = {
+            "kind": window_kind,
+            "days": window_days,
+            "cutoff": cutoff,
+        }
+        return usage, window
+
+    def stats(self, days: int | None = None) -> dict[str, Any]:
+        """Return the canonical stats payload for tray, CLI, UI, and diagnostics."""
+        now = datetime.now(timezone.utc)
         tier_counts = self.graph.count_by_tier()
         total = sum(tier_counts.values())
         edge_count = self.db.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-        return {
+        store = {
             "total_nodes": total,
             "by_tier": tier_counts,
             "total_edges": edge_count,
-            "whisper_health": compute_whisper_health(
-                self.db.conn, datetime.now(timezone.utc)
-            ),
+        }
+        usage, window = self._usage_stats(now, days=days)
+        whisper_health = compute_whisper_health(self.db.conn, now)
+
+        return {
+            "generated_at": now.isoformat(),
+            "window": window,
+            "usage": usage,
+            "store": store,
+            "whisper": {
+                "feedback_health": whisper_health,
+            },
         }
 
     # --- Merge operations ---
@@ -2148,66 +2209,6 @@ class MemoryEngine:
                 )
 
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
-
-    def get_stats(self, days: int | None = None) -> dict[str, Any]:
-        """Return ambient usage counts for the menubar/CLI surface (F09/F10).
-
-        A "whisper used" is a single whisper call that actually injected at
-        least one memory. ``whisper_log`` writes one row per candidate sharing
-        the same ``logged_at`` per call, so distinct used calls are counted by
-        the ``(session_id, prompt_hash, logged_at)`` triple where
-        ``was_injected = 1``. Memory counts come straight from ``nodes``.
-
-        With ``days=None`` (the default, used by the tray/CLI), the "week"
-        window is the fixed current calendar week (Mon 00:00 UTC) so the count
-        only ever increases within a week and resets once on Monday — it never
-        drifts down mid-week the way a rolling N-day window would. Passing an
-        explicit ``days`` opts into a rolling N-day window ending now instead,
-        for ad-hoc/custom-range queries.
-
-        ISO-8601 UTC timestamps compare correctly lexicographically, so the
-        window is a simple string ``>=`` against a Python-computed cutoff — no
-        SQLite date math, no timezone surprises.
-        """
-        conn = self.db.conn
-        now = datetime.now(timezone.utc)
-        if days is None:
-            window_days = now.weekday() + 1  # days elapsed in this calendar week
-            cutoff = (now - timedelta(days=now.weekday())).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ).isoformat()
-        else:
-            window_days = days
-            cutoff = (now - timedelta(days=days)).isoformat()
-
-        used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
-        whispers_total = conn.execute(
-            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log WHERE was_injected = 1"
-        ).fetchone()[0]
-        whispers_week = conn.execute(
-            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log "
-            "WHERE was_injected = 1 AND logged_at >= ?",
-            (cutoff,),
-        ).fetchone()[0]
-
-        # Exclude system-seeded bootstrap nodes (e.g. the "Self" node) so a
-        # fresh install honestly reads zero memories.
-        not_system = "source NOT LIKE 'system:%'"
-        memories_total = conn.execute(
-            f"SELECT COUNT(*) FROM nodes WHERE {not_system}"
-        ).fetchone()[0]
-        memories_week = conn.execute(
-            f"SELECT COUNT(*) FROM nodes WHERE {not_system} AND created >= ?", (cutoff,)
-        ).fetchone()[0]
-
-        return {
-            "whispers_used_this_week": whispers_week,
-            "whispers_used_total": whispers_total,
-            "memories_this_week": memories_week,
-            "memories_total": memories_total,
-            "window_days": window_days,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""

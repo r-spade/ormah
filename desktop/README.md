@@ -18,7 +18,7 @@ product:
 ```
 Tauri shell (Rust, src-tauri/)
   ├─ tray.rs      tray icon + title (counter) + dropdown menu
-  ├─ stats.rs     polls GET /agent/stats every 60s → tray title
+  ├─ stats.rs     polls GET /stats every 60s → tray title
   ├─ sidecar.rs   checks ormah on PATH; if absent, runs bundled uv to install it
   └─ commands.rs  setup_agents (ormah setup --json), open graph, onboarding marker
        ↓ installs (first launch only)
@@ -100,5 +100,5 @@ Also set `plugins.updater.pubkey` in `tauri.conf.json` and
 
 ## Backend coverage
 
-- `GET /agent/stats` — `tests/test_api/test_stats.py`
+- `GET /stats` — `tests/test_api/test_stats.py`
 - `GET /agent/clients` + `ormah setup --json` — `tests/test_setup_json.py`

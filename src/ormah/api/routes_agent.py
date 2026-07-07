@@ -250,22 +250,6 @@ def unwire_one(agent_id: str):
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-@router.get("/stats")
-def get_stats(
-    request: Request,
-    days: int | None = Query(
-        None,
-        ge=1,
-        le=365,
-        description="Rolling window in days for the *_this_week counts. "
-        "Omit to use the fixed current calendar week (Mon-Sun UTC).",
-    ),
-):
-    """Ambient usage counts for the menubar/CLI surface (F09 counter)."""
-    engine = request.app.state.engine
-    return engine.get_stats(days=days)
-
-
 @router.get("/insights")
 def get_insights(request: Request):
     """Get belief evolutions and conflicting ideas detected by the system."""

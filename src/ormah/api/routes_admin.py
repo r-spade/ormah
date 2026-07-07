@@ -109,12 +109,6 @@ def health(request: Request):
     return result
 
 
-@router.get("/stats")
-def stats(request: Request):
-    engine = request.app.state.engine
-    return engine.stats()
-
-
 @router.get("/maintenance-status")
 def maintenance_status(request: Request):
     manager = getattr(request.app.state, "maintenance_manager", None)

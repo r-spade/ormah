@@ -229,7 +229,7 @@ def test_stats(engine):
 
     stats = engine.stats()
     # +1 for the self node created on startup
-    assert stats["total_nodes"] == 2
+    assert stats["store"]["total_nodes"] == 2
 
 
 def test_warmup_reranker_marks_unavailable_when_cache_missing(settings):

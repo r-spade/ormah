@@ -355,10 +355,15 @@ def test_outdated_no_reason(monkeypatch):
 def test_stats_text(monkeypatch):
     def handler(request):
         url = str(request.url)
-        if "/admin/stats" in url:
-            return _mock_response({"total_nodes": 42, "by_tier": {"core": 5, "working": 30, "archival": 7}, "total_edges": 18})
-        if "/agent/stats" in url:
-            return _mock_response({"whispers_used_this_week": 7, "whispers_used_total": 42})
+        if "/stats" in url:
+            return _mock_response({
+                "store": {
+                    "total_nodes": 42,
+                    "by_tier": {"core": 5, "working": 30, "archival": 7},
+                    "total_edges": 18,
+                },
+                "usage": {"whispers_used_this_week": 7, "whispers_used_total": 42},
+            })
         return _mock_response({}, status_code=404)
 
     transport = httpx.MockTransport(handler)
@@ -377,10 +382,15 @@ def test_stats_text(monkeypatch):
 def test_stats_json(monkeypatch):
     def handler(request):
         url = str(request.url)
-        if "/admin/stats" in url:
-            return _mock_response({"total_nodes": 42, "by_tier": {"core": 5}, "total_edges": 18})
-        if "/agent/stats" in url:
-            return _mock_response({"whispers_used_this_week": 3, "whispers_used_total": 10})
+        if "/stats" in url:
+            return _mock_response({
+                "store": {
+                    "total_nodes": 42,
+                    "by_tier": {"core": 5},
+                    "total_edges": 18,
+                },
+                "usage": {"whispers_used_this_week": 3, "whispers_used_total": 10},
+            })
         return _mock_response({}, status_code=404)
 
     transport = httpx.MockTransport(handler)
@@ -391,7 +401,7 @@ def test_stats_json(monkeypatch):
     code, out, err = _run_cli(["stats", "--json"], monkeypatch)
     assert code == 0
     parsed = json.loads(out)
-    assert parsed["total_nodes"] == 42
+    assert parsed["store"]["total_nodes"] == 42
     assert parsed["usage"]["whispers_used_this_week"] == 3
 
 

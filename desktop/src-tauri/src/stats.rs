@@ -1,4 +1,4 @@
-//! Poll the bundled server's `/agent/stats` and surface the counter.
+//! Poll the bundled server's `/stats` and surface the counter.
 
 use std::time::Duration;
 
@@ -7,10 +7,14 @@ use tauri::{menu::MenuItem, tray::TrayIcon, AppHandle, Runtime};
 
 use crate::commands::base_url;
 
-/// Mirror of the JSON returned by `GET /agent/stats`. Unknown fields
-/// (window_days, generated_at) are ignored by serde.
+/// Mirror of the JSON returned by `GET /stats`. Unknown fields are ignored by serde.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {
+    pub usage: UsageStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageStats {
     pub whispers_used_this_week: i64,
     pub whispers_used_total: i64,
     pub memories_this_week: i64,
@@ -28,7 +32,7 @@ fn fmt_num(n: i64) -> String {
 }
 
 pub async fn fetch() -> Result<Stats, reqwest::Error> {
-    let url = format!("{}/agent/stats", base_url());
+    let url = format!("{}/stats", base_url());
     reqwest::Client::new()
         .get(url)
         .timeout(Duration::from_secs(5))
@@ -63,15 +67,16 @@ pub fn spawn_poller<R: Runtime>(
 
             if running {
                 if let Ok(s) = fetch().await {
-                    let _ = tray.set_title(Some(s.whispers_used_this_week.to_string()));
+                    let usage = s.usage;
+                    let _ = tray.set_title(Some(usage.whispers_used_this_week.to_string()));
                     let _ = week_item.set_text(format!(
                         "{} whispers this week",
-                        s.whispers_used_this_week
+                        usage.whispers_used_this_week
                     ));
                     let _ = total_item.set_text(format!(
                         "{}  all-time  ·  {}  memories",
-                        fmt_num(s.whispers_used_total),
-                        fmt_num(s.memories_total)
+                        fmt_num(usage.whispers_used_total),
+                        fmt_num(usage.memories_total)
                     ));
                 }
             } else {

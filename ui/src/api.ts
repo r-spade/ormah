@@ -52,7 +52,7 @@ export function fetchInsights(): Promise<InsightsData> {
 }
 
 export function fetchStats(): Promise<Record<string, unknown>> {
-  return get("/admin/stats");
+  return get("/stats");
 }
 
 export interface AdminTask {

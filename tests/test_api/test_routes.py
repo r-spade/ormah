@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
+from ormah.api.routes_stats import router as stats_router
 from ormah.api.routes_ui import router as ui_router
 from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.config import Settings
@@ -26,6 +27,7 @@ def client(tmp_memory_dir):
     test_app = FastAPI()
     test_app.include_router(agent_router)
     test_app.include_router(admin_router)
+    test_app.include_router(stats_router)
     test_app.include_router(ui_router)
     test_app.state.engine = engine
     test_app.state.maintenance_manager = MaintenanceManager(engine)
@@ -67,11 +69,14 @@ def test_recall_not_found(client):
 
 
 def test_stats(client):
-    resp = client.get("/admin/stats")
+    resp = client.get("/stats")
     assert resp.status_code == 200
     body = resp.json()
-    assert "total_nodes" in body
-    assert "whisper_health" in body
+    assert "total_nodes" in body["store"]
+    assert "feedback_health" in body["whisper"]
+
+    assert client.get("/admin/stats").status_code == 404
+    assert client.get("/agent/stats").status_code == 404
 
 
 def test_backup_status_empty_store(client):
@@ -182,7 +187,7 @@ def test_maintenance_runs_in_background_and_stats_stay_available(client):
         assert resp.json()["status"] == "running_phase1"
         assert started.wait(timeout=1)
 
-        stats = client.get("/admin/stats")
+        stats = client.get("/stats")
         assert stats.status_code == 200
 
         release.set()
