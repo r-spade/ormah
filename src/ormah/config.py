@@ -245,6 +245,12 @@ class Settings(BaseSettings):
 
     # Consolidation
     consolidation_interval_minutes: int = 1440
+    # Consolidator per-run limits (#89) — defaults preserve the previous
+    # hardcoded behavior exactly.
+    consolidation_max_clusters_per_run: int = 10
+    consolidation_min_cluster_size: int = 2
+    consolidation_cluster_threshold: float = 0.6
+    consolidation_max_cluster_nodes: int = 5
 
     # Claude-in-the-loop maintenance
     claude_maintenance_enabled: bool = False
