@@ -1539,7 +1539,8 @@ class MemoryEngine:
         batches of candidates (link, conflict, merge, consolidation clusters)
         plus a summary string.  Batch sizes are capped: up to *limit_per_batch*
         pairs for link/conflict/merge (default from settings), up to 4 clusters
-        of max 5 nodes each for consolidation.
+        for consolidation (max nodes per cluster from
+        ``settings.consolidation_max_cluster_nodes``).
         """
         from ormah.background.auto_linker import _find_link_candidates
         from ormah.background.conflict_detector import _find_conflict_candidates

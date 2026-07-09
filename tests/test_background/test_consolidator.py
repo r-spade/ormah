@@ -157,3 +157,17 @@ def test_run_consolidation_uses_settings_cap(engine, monkeypatch):
     assert seen["limit"] == 3
 
 
+def test_inverted_cluster_bounds_returns_empty_and_warns(consolidation_engine, caplog):
+    from ormah.background.consolidator import _find_consolidation_clusters
+
+    engine, _ids = consolidation_engine
+    engine.settings.consolidation_max_cluster_nodes = 1
+    engine.settings.consolidation_min_cluster_size = 2
+
+    with caplog.at_level("WARNING"):
+        clusters = _find_consolidation_clusters(engine)
+
+    assert clusters == []
+    assert "consolidation_max_cluster_nodes" in caplog.text
+
+

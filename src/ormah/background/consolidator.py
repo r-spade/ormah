@@ -26,6 +26,14 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     max_nodes = s.consolidation_max_cluster_nodes
     threshold = s.consolidation_cluster_threshold
 
+    if max_nodes < min_size:
+        logger.warning(
+            "consolidation_max_cluster_nodes (%d) < consolidation_min_cluster_size (%d); "
+            "no cluster can ever be emitted",
+            max_nodes, min_size,
+        )
+        return []
+
     rows = conn.execute(
         "SELECT id, title, content, space FROM nodes WHERE tier = 'working'"
     ).fetchall()
