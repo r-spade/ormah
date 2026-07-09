@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import struct
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,8 @@ import numpy as np
 
 if TYPE_CHECKING:
     from ormah.index.db import Database
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_f32(vec: np.ndarray) -> bytes:
@@ -88,3 +91,15 @@ class VectorStore:
     def count(self) -> int:
         row = self.db.conn.execute("SELECT COUNT(*) FROM node_vectors").fetchone()
         return row[0] if row else 0
+
+
+def stored_or_encoded(vec_store: VectorStore, encoder, node_id: str, text: str) -> np.ndarray:
+    """Return the stored embedding for *node_id*; re-encode *text* only if missing.
+
+    A miss should not happen after embedding backfill — warn so operators see it.
+    """
+    vec = vec_store.get(node_id)
+    if vec is not None:
+        return vec
+    logger.warning("node_vectors has no embedding for %s; re-encoding probe text", node_id[:8])
+    return encoder.encode(text)
