@@ -1,7 +1,6 @@
 """Issue #88: pairwise jobs must reuse stored vectors, not re-encode probes."""
 import re
 import numpy as np
-import pytest
 
 from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
