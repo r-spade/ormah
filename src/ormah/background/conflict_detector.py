@@ -111,7 +111,7 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
     """
     try:
         from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
         settings = engine.settings
         encoder = get_encoder(settings)
@@ -141,7 +141,7 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
             if not text:
                 continue
 
-            query_vec = encoder.encode(text)
+            query_vec = stored_or_encoded(vec_store, encoder, node["id"], text)
             similar = vec_store.search(query_vec, limit=15)
 
             for match in similar:

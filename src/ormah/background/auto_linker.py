@@ -172,7 +172,7 @@ def _find_link_candidates(engine, limit: int = 8) -> list[dict]:
     """
     try:
         from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
         settings = engine.settings
         encoder = get_encoder(settings)
@@ -195,7 +195,7 @@ def _find_link_candidates(engine, limit: int = 8) -> list[dict]:
             if not text:
                 continue
 
-            query_vec = encoder.encode(text)
+            query_vec = stored_or_encoded(vec_store, encoder, node["id"], text)
             similar = vec_store.search(query_vec, limit=6)
 
             for match in similar:
@@ -308,7 +308,6 @@ def run_auto_linker(engine) -> None:
     """Incrementally link nodes with seq above the watermark; advance only past
     fully-resolved nodes."""
     try:
-        from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
 
         settings = engine.settings
@@ -316,7 +315,6 @@ def run_auto_linker(engine) -> None:
             logger.debug("Auto-linker skipped: LLM not enabled")
             return
 
-        encoder = get_encoder(settings)
         vec_store = VectorStore(engine.db)
         conn = engine.db.conn
         threshold = settings.auto_link_similarity_threshold
@@ -335,7 +333,8 @@ def run_auto_linker(engine) -> None:
 
             node_resolved = True
             text = f"{node['title'] or ''} {node['content']}".strip()
-            if text and vec_store.get(node["id"]) is None:
+            node_vec = vec_store.get(node["id"]) if text else None
+            if text and node_vec is None:
                 # Node has no vector yet (e.g. node_vectors wiped mid full_rebuild,
                 # before _reindex_all_embeddings restores them). search() would return no
                 # candidates and the watermark would advance past a node never actually
@@ -346,7 +345,7 @@ def run_auto_linker(engine) -> None:
                 # permanently-unembeddable node ever stalls the cursor in practice.
                 node_resolved = False
             elif text:
-                query_vec = encoder.encode(text)
+                query_vec = node_vec
                 similar = vec_store.search(query_vec, limit=6)
 
                 for match in similar:
