@@ -221,3 +221,41 @@ def test_affinity_defaults():
 def test_feedback_llm_judge_min_confidence_range():
     with pytest.raises(ValidationError, match="threshold must be 0"):
         _settings(feedback_llm_judge_min_confidence=1.5)
+
+
+# --- Consolidation limits (#89) ---
+
+def test_consolidation_max_clusters_negative():
+    with pytest.raises(ValidationError, match="consolidation_max_clusters_per_run must be >= 0"):
+        _settings(consolidation_max_clusters_per_run=-1)
+
+
+def test_consolidation_min_cluster_size_below_two():
+    with pytest.raises(ValidationError, match="consolidation_min_cluster_size must be >= 2"):
+        _settings(consolidation_min_cluster_size=1)
+
+
+def test_consolidation_threshold_out_of_range():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=1.5)
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=-0.1)
+
+
+def test_consolidation_threshold_non_finite():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=float("nan"))
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=float("inf"))
+
+
+def test_consolidation_max_nodes_zero_rejected():
+    # The destructive misconfig Codex flagged: max_nodes=0 slips past the
+    # runtime guard and emits single-node clusters. Reject it at construction.
+    with pytest.raises(ValidationError, match="consolidation_max_cluster_nodes"):
+        _settings(consolidation_max_cluster_nodes=0)
+
+
+def test_consolidation_inverted_bounds_rejected():
+    with pytest.raises(ValidationError, match="consolidation_max_cluster_nodes"):
+        _settings(consolidation_min_cluster_size=3, consolidation_max_cluster_nodes=2)

@@ -418,11 +418,40 @@ class Settings(BaseSettings):
         "auto_link_similarity_threshold",
         "auto_merge_threshold",
         "feedback_llm_judge_min_confidence",
+        "consolidation_cluster_threshold",
     )
     @classmethod
     def _threshold_range(cls, v: float) -> float:
+        # `not 0 <= v <= 1` also rejects NaN/inf.
         if not 0 <= v <= 1:
             raise ValueError(f"threshold must be 0–1, got {v}")
+        return v
+
+    @field_validator("consolidation_max_clusters_per_run")
+    @classmethod
+    def _consolidation_max_clusters_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"consolidation_max_clusters_per_run must be >= 0, got {v}")
+        return v
+
+    @field_validator("consolidation_min_cluster_size")
+    @classmethod
+    def _consolidation_min_cluster_size_range(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError(f"consolidation_min_cluster_size must be >= 2, got {v}")
+        return v
+
+    @field_validator("consolidation_max_cluster_nodes")
+    @classmethod
+    def _consolidation_max_cluster_nodes_range(cls, v: int, info) -> int:
+        # Below min_cluster_size, no cluster can ever be emitted; at/above it the
+        # runtime guard still applies. Reject the impossible config up front.
+        min_size = info.data.get("consolidation_min_cluster_size", 2)
+        if v < min_size:
+            raise ValueError(
+                f"consolidation_max_cluster_nodes ({v}) must be >= "
+                f"consolidation_min_cluster_size ({min_size})"
+            )
         return v
 
     @field_validator("activation_decay")
