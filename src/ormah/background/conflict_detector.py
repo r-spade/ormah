@@ -141,7 +141,14 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
             if not text:
                 continue
 
-            query_vec = stored_or_encoded(vec_store, encoder, node["id"], text)
+            query_vec = stored_or_encoded(
+                vec_store,
+                encoder,
+                node["id"],
+                node["title"],
+                node["content"],
+                settings.embedding_max_content_chars,
+            )
             similar = vec_store.search(query_vec, limit=15)
 
             for match in similar:

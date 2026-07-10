@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ormah.config import Settings
+from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
 from ormah.engine.maintenance_signal import (
     MAINTENANCE_DUE_SIGNAL,
@@ -57,13 +58,6 @@ def _generate_title(content: str, max_chars: int = 60) -> str:
     # Truncate at last word boundary within max_chars
     truncated = first_line[:max_chars].rsplit(" ", 1)[0]
     return truncated + "…" if truncated else first_line[:max_chars]
-
-
-def _embedding_text(title: str | None, content: str, max_content_chars: int = 512) -> str:
-    """Build text for embedding. Truncates content to avoid topic averaging in long docs."""
-    prefix = title or ""
-    truncated = content[:max_content_chars]
-    return f"{prefix} {truncated}".strip()
 
 
 # Edge type factors for spreading activation scoring.

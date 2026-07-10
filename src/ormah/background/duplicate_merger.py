@@ -164,7 +164,14 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
             if not text:
                 continue
 
-            query_vec = stored_or_encoded(vec_store, encoder, node["id"], text)
+            query_vec = stored_or_encoded(
+                vec_store,
+                encoder,
+                node["id"],
+                node["title"],
+                node["content"],
+                settings.embedding_max_content_chars,
+            )
             similar = vec_store.search(query_vec, limit=6)
 
             for match in similar:
@@ -263,7 +270,14 @@ def run_duplicate_detection(engine) -> None:
             if not text:
                 continue
 
-            query_vec = stored_or_encoded(vec_store, encoder, node["id"], text)
+            query_vec = stored_or_encoded(
+                vec_store,
+                encoder,
+                node["id"],
+                node["title"],
+                node["content"],
+                settings.embedding_max_content_chars,
+            )
             # Fetch more candidates since we use a lower embedding pre-filter
             similar = vec_store.search(query_vec, limit=6)
 

@@ -2,6 +2,7 @@
 import re
 import numpy as np
 
+from ormah.embeddings.text import embedding_text
 from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
 
@@ -21,9 +22,11 @@ class _CountingEncoder:
     def __init__(self, dim):
         self.dim = dim
         self.calls = 0
+        self.seen: str | None = None
 
     def encode(self, text):
         self.calls += 1
+        self.seen = text
         return np.ones(self.dim, dtype=np.float32)
 
 
@@ -33,7 +36,7 @@ def test_stored_or_encoded_prefers_stored_vector(db):
     dim = _vec_dim(db)
     stored = np.full(dim, 0.5, dtype=np.float32)
     store.upsert("node-1", stored)
-    out = stored_or_encoded(store, _ExplodingEncoder(), "node-1", "some text")
+    out = stored_or_encoded(store, _ExplodingEncoder(), "node-1", "Title", "some text", 512)
     assert np.allclose(out, stored)
 
 
@@ -42,10 +45,26 @@ def test_stored_or_encoded_falls_back_and_warns(db, caplog):
     store = VectorStore(db)
     enc = _CountingEncoder(_vec_dim(db))
     with caplog.at_level("WARNING"):
-        out = stored_or_encoded(store, enc, "missing-node", "some text")
+        out = stored_or_encoded(store, enc, "missing-node", "Title", "some text", 512)
     assert enc.calls == 1
     assert out.shape == (enc.dim,)
     assert any("re-encoding" in r.message for r in caplog.records)
+
+
+def test_fallback_encodes_same_truncated_text_as_the_corpus(db):
+    """A miss must probe with _embedding_text semantics, not the raw full content.
+
+    Corpus vectors come from embedding_text(title, content[:max_chars]). Encoding the
+    untruncated probe here would compare a full-content vector against a truncated
+    corpus — the very probe/corpus asymmetry this helper exists to remove.
+    """
+    db.init_vec_table(dim=8)
+    store = VectorStore(db)
+    enc = _CountingEncoder(_vec_dim(db))
+    long_content = "a" * 600
+    stored_or_encoded(store, enc, "missing-node", "Title", long_content, 512)
+    assert enc.seen == embedding_text("Title", long_content, 512)
+    assert enc.seen == "Title " + "a" * 512
 
 
 def test_find_link_candidates_does_not_reencode(engine, monkeypatch, caplog):

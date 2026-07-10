@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from ormah.embeddings.text import embedding_text
+
 if TYPE_CHECKING:
     from ormah.index.db import Database
 
@@ -93,8 +95,19 @@ class VectorStore:
         return row[0] if row else 0
 
 
-def stored_or_encoded(vec_store: VectorStore, encoder, node_id: str, text: str) -> np.ndarray:
-    """Return the stored embedding for *node_id*; re-encode *text* only if missing.
+def stored_or_encoded(
+    vec_store: VectorStore,
+    encoder,
+    node_id: str,
+    title: str | None,
+    content: str,
+    max_content_chars: int,
+) -> np.ndarray:
+    """Return the stored embedding for *node_id*, re-encoding only if it is missing.
+
+    The fallback rebuilds the probe through ``embedding_text`` so it matches the
+    truncation the corpus vectors were built with — encoding the raw full content
+    here would compare a full-content probe against a truncated corpus.
 
     A miss should not happen after embedding backfill — warn so operators see it.
     """
@@ -102,4 +115,4 @@ def stored_or_encoded(vec_store: VectorStore, encoder, node_id: str, text: str) 
     if vec is not None:
         return vec
     logger.warning("node_vectors has no embedding for %s; re-encoding probe text", node_id[:8])
-    return encoder.encode(text)
+    return encoder.encode(embedding_text(title, content, max_content_chars))
