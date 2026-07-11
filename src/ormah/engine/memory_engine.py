@@ -514,44 +514,64 @@ class MemoryEngine:
         *,
         session_id: str | None = None,
         space: str | None = None,
-    ) -> None:
+    ) -> dict[str, int]:
         """Log surfaced memories so submit_feedback can learn from them later."""
         if not node_scores:
-            return
+            return {}
 
         unique_scores: dict[str, float] = {}
         for candidate_node_id, score in node_scores:
             if candidate_node_id and candidate_node_id not in unique_scores:
                 unique_scores[candidate_node_id] = float(score)
         if not unique_scores:
-            return
+            return {}
 
         prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()
         prompt_vec_blob = self._encode_feedback_prompt_vec(prompt_text)
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self.db.transaction() as conn:
-            for candidate_node_id, score in unique_scores.items():
-                conn.execute(
-                    """
-                    INSERT INTO whisper_log
+        inserted: dict[str, int] = {}
+        try:
+            with self.db.transaction() as conn:
+                for candidate_node_id, score in unique_scores.items():
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO whisper_log
+                            (
+                                session_id, space, prompt_hash, prompt_text, prompt_vec,
+                                node_id, score, was_injected, logged_at
+                            )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
                         (
-                            session_id, space, prompt_hash, prompt_text, prompt_vec,
-                            node_id, score, was_injected, logged_at
-                        )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session_id or "",
-                        space,
-                        prompt_hash,
-                        prompt_text,
-                        prompt_vec_blob,
-                        candidate_node_id,
-                        score,
-                        1,
-                        now_iso,
-                    ),
-                )
+                            session_id or "",
+                            space,
+                            prompt_hash,
+                            prompt_text,
+                            prompt_vec_blob,
+                            candidate_node_id,
+                            score,
+                            1,
+                            now_iso,
+                        ),
+                    )
+                    inserted[candidate_node_id] = int(cursor.lastrowid)
+        except Exception as e:
+            logger.warning("feedback candidate logging failed: %s", e)
+            return {}
+        return inserted
+
+    def _attach_feedback_log_ids(
+        self, results: list[dict[str, Any]], whisper_log_ids: dict[str, int],
+    ) -> list[dict[str, Any]]:
+        if not whisper_log_ids:
+            return results
+        annotated = []
+        for result in results:
+            node_id = result.get("node", {}).get("id")
+            if node_id in whisper_log_ids:
+                result = {**result, "_whisper_log_id": whisper_log_ids[node_id]}
+            annotated.append(result)
+        return annotated
 
     def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
         """Get a specific node with its neighbors, formatted as text."""
@@ -566,7 +586,7 @@ class MemoryEngine:
 
         edges = self.graph.get_edges_for(resolved_node_id)
         neighbors = self.graph.get_neighbors(resolved_node_id, depth=1)
-        self._log_feedback_candidates(
+        whisper_log_ids = self._log_feedback_candidates(
             f"recall_node:{resolved_node_id}",
             [(resolved_node_id, 1.0)] + [
                 (neighbor["id"], 0.5) for neighbor in neighbors if neighbor.get("id")
@@ -574,7 +594,17 @@ class MemoryEngine:
             session_id=session_id,
             space=node.get("space"),
         )
-        return format_node_with_neighbors(node, edges, neighbors)
+        node_for_format = dict(node)
+        if resolved_node_id in whisper_log_ids:
+            node_for_format["_whisper_log_id"] = whisper_log_ids[resolved_node_id]
+        neighbors_for_format = []
+        for neighbor in neighbors:
+            formatted_neighbor = dict(neighbor)
+            neighbor_id = formatted_neighbor.get("id")
+            if neighbor_id in whisper_log_ids:
+                formatted_neighbor["_whisper_log_id"] = whisper_log_ids[neighbor_id]
+            neighbors_for_format.append(formatted_neighbor)
+        return format_node_with_neighbors(node_for_format, edges, neighbors_for_format)
 
     # Additional command-like words for detecting "pure temporal" queries.
     _STOP_WORDS = STOP_WORDS | frozenset({
@@ -769,7 +799,7 @@ class MemoryEngine:
             for r in results:
                 if r.get("source") not in ("activated", "conflict"):
                     self._touch_access(r["node"]["id"])
-            self._log_feedback_candidates(
+            whisper_log_ids = self._log_feedback_candidates(
                 query_for_log,
                 [
                     (r["node"]["id"], r.get("score", 0.0))
@@ -779,6 +809,7 @@ class MemoryEngine:
                 session_id=session_id,
                 space=default_space,
             )
+            results = self._attach_feedback_log_ids(results, whisper_log_ids)
             return format_search_results(results)
 
         # Fallback to FTS only
@@ -813,7 +844,7 @@ class MemoryEngine:
         for r in enriched:
             if r.get("source") not in ("activated", "conflict"):
                 self._touch_access(r["node"]["id"])
-        self._log_feedback_candidates(
+        whisper_log_ids = self._log_feedback_candidates(
             query_for_log,
             [
                 (r["node"]["id"], r.get("score", 0.0))
@@ -824,6 +855,7 @@ class MemoryEngine:
             space=default_space,
         )
 
+        enriched = self._attach_feedback_log_ids(enriched, whisper_log_ids)
         return format_search_results(enriched)
 
     def update_node(self, node_id: str, req: UpdateNodeRequest) -> str | None:
@@ -2268,20 +2300,41 @@ class MemoryEngine:
             return None, f"Ambiguous node ID prefix {node_id}; matched {matched}"
         return matches[0]["node_id"], None
 
-    def submit_feedback(self, node_id: str, signal: int, source: str = "explicit") -> str:
-        """Record explicit or implicit feedback signal for a whisper candidate.
+    def _load_feedback_whisper_log_row(
+        self,
+        node_id: str,
+        whisper_log_id: int | None,
+    ) -> tuple[str | None, Any | None, str | None]:
+        if whisper_log_id is not None:
+            row = self.db.conn.execute(
+                """
+                SELECT id, node_id, prompt_vec, prompt_text, prompt_hash, session_id, space
+                FROM whisper_log
+                WHERE id = ?
+                """,
+                (whisper_log_id,),
+            ).fetchone()
+            if row is None:
+                return None, None, f"No whisper_log entry found for whisper_log_id {whisper_log_id}"
+            resolved_node_id = row["node_id"]
+            if not node_id or (
+                node_id != resolved_node_id and not resolved_node_id.startswith(node_id)
+            ):
+                return (
+                    None,
+                    None,
+                    f"whisper_log_id {whisper_log_id} belongs to node "
+                    f"{resolved_node_id[:8]}..., not {node_id}",
+                )
+            return resolved_node_id, row, None
 
-        Looks up the most recent whisper_log entry for *node_id*, inserts an
-        affinity row, and (for explicit feedback) marks any open review_log
-        entry as answered.
-        """
         resolved_node_id, error = self._resolve_feedback_node_id(node_id)
         if error is not None:
-            return error
+            return None, None, error
 
         row = self.db.conn.execute(
             """
-            SELECT id, prompt_vec, prompt_text, prompt_hash, session_id, space
+            SELECT id, node_id, prompt_vec, prompt_text, prompt_hash, session_id, space
             FROM whisper_log
             WHERE node_id = ?
             ORDER BY logged_at DESC, id DESC
@@ -2291,7 +2344,31 @@ class MemoryEngine:
         ).fetchone()
 
         if row is None:
-            return f"No whisper_log entry found for node {node_id}"
+            return None, None, f"No whisper_log entry found for node {node_id}"
+        return resolved_node_id, row, None
+
+    def submit_feedback(
+        self,
+        node_id: str,
+        signal: int,
+        source: str = "explicit",
+        whisper_log_id: int | None = None,
+    ) -> str:
+        """Record explicit or implicit feedback signal for a whisper candidate.
+
+        When *whisper_log_id* is supplied, feedback attaches to that exact
+        whisper/recall event after verifying the event belongs to *node_id*.
+        Without it, Ormah keeps the legacy compatibility fallback of using the
+        most recent whisper_log row for the resolved node ID. That fallback is
+        not exact and callers should pass whisper_log_id whenever it is shown.
+        """
+        resolved_node_id, row, error = self._load_feedback_whisper_log_row(
+            node_id, whisper_log_id,
+        )
+        if error is not None:
+            return error
+        assert resolved_node_id is not None
+        assert row is not None
 
         prompt_vec = row["prompt_vec"]
         prompt_text = row["prompt_text"]

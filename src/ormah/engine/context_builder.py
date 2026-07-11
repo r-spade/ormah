@@ -28,8 +28,9 @@ _REVIEW_FRAMING = (
     "In a recent session, the user was working on:\n"
     "\"{prompt_snippet}\"\n\n"
     "Ormah held back this memory because it wasn't confident it was relevant:\n"
-    "\"{title}\" — {content}  (node: {node_id})\n\n"
-    "When you can judge it, call submit_feedback(node_id=\"{node_id}\", signal=1 for yes, "
+    "\"{title}\" — {content}  (id: {node_id}, whisper_log_id: {whisper_log_id})\n\n"
+    "When you can judge it, call submit_feedback(node_id=\"{node_id}\", "
+    "whisper_log_id={whisper_log_id}, signal=1 for yes, "
     "signal=-1 for no, source=\"implicit\"). Skip if it's not a good moment — "
     "this won't be surfaced again for 14 days."
 )
@@ -81,6 +82,7 @@ def _find_review_candidate(conn, threshold: float) -> dict | None:
             WITH ranked AS (
               SELECT
                 wl.node_id, wl.score, wl.session_id, wl.space, wl.prompt_text,
+                wl.id AS whisper_log_id,
                 wl.prompt_vec,
                 n.title, n.content,
                 ROW_NUMBER() OVER (PARTITION BY wl.node_id ORDER BY wl.score DESC) AS rn
@@ -96,7 +98,9 @@ def _find_review_candidate(conn, threshold: float) -> dict | None:
                     AND wl2.logged_at > datetime('now', '-7 days')
                 )
             )
-            SELECT node_id, score, session_id, space, prompt_text, prompt_vec, title, content
+            SELECT
+              node_id, score, session_id, space, prompt_text, whisper_log_id,
+              prompt_vec, title, content
             FROM ranked
             WHERE rn = 1
             ORDER BY score DESC
@@ -947,6 +951,42 @@ class ContextBuilder:
             max_gate_score=max_gate_score,
         )
 
+        # Write one diagnostic row for every non-temporal retrieved candidate.
+        # Absolute signals and the first destructive stage are retained so live
+        # replays can distinguish retrieval misses from floor, topical, and gate
+        # rejections. Existing feedback consumers still key off was_injected.
+        whisper_log_ids: dict[str, int] = {}
+        if session_id and prompt_vec is not None and self.engine is not None:
+            try:
+                prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                vec_blob = prompt_vec.astype(np.float32).tobytes()
+                injected_ids = {r["node"]["id"] for r in search_results}
+                with self.engine.db.transaction() as conn:
+                    for node_id, trace in candidate_trace.items():
+                        r = trace["latest"]
+                        score = r.get("_pre_boost_score", r.get("score", 0.0))
+                        was_injected = 1 if node_id in injected_ids else 0
+                        cursor = conn.execute(
+                            "INSERT INTO whisper_log "
+                            "(session_id, space, prompt_hash, prompt_text, prompt_vec, "
+                            "node_id, score, retrieval_score, raw_cosine, "
+                            "cross_encoder_score, ce_absolute, gate_score, source, "
+                            "retrieval_rank, final_rank, decision_stage, was_injected, logged_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (session_id, space, prompt_hash, prompt, vec_blob,
+                             node_id, score, trace["retrieval_score"],
+                             r.get("raw_cosine"), r.get("cross_encoder_score"),
+                             r.get("ce_absolute"), _gate_score(r), r.get("source"),
+                             trace["retrieval_rank"], trace.get("final_rank"),
+                             trace["decision_stage"], was_injected, now_iso),
+                        )
+                        if was_injected:
+                            whisper_log_ids[node_id] = int(cursor.lastrowid)
+            except Exception as e:
+                logger.warning("whisper_log write failed: %s", e)
+                whisper_log_ids = {}
+
         # Build flat ranked list — top full_content_count get full content,
         # rest get title + type + node ID only.
         lines = []
@@ -957,7 +997,11 @@ class ContextBuilder:
             content_preview = node.get("content", "")
             title = node.get("title") or (content_preview[:60].strip() + ("…" if len(content_preview) > 60 else ""))
             node_type = node.get("type", "fact")
-            id_suffix = f" (id: {short_id})" if short_id else ""
+            event_id = whisper_log_ids.get(node_id)
+            if short_id and event_id is not None:
+                id_suffix = f" (id: {short_id}, whisper_log_id: {event_id})"
+            else:
+                id_suffix = f" (id: {short_id})" if short_id else ""
             marker = "[exploring]" if r.get("_exploration") else f"[{node_type}]"
 
             lines.append(f"- **{marker}** {title}{id_suffix}")
@@ -973,38 +1017,6 @@ class ContextBuilder:
             lines.append("")
 
         body = "\n".join(lines).rstrip()
-
-        # Write one diagnostic row for every non-temporal retrieved candidate.
-        # Absolute signals and the first destructive stage are retained so live
-        # replays can distinguish retrieval misses from floor, topical, and gate
-        # rejections. Existing feedback consumers still key off was_injected.
-        if session_id and prompt_vec is not None and self.engine is not None:
-            try:
-                prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-                now_iso = datetime.now(timezone.utc).isoformat()
-                vec_blob = prompt_vec.astype(np.float32).tobytes()
-                injected_ids = {r["node"]["id"] for r in search_results}
-                with self.engine.db.transaction() as conn:
-                    for node_id, trace in candidate_trace.items():
-                        r = trace["latest"]
-                        score = r.get("_pre_boost_score", r.get("score", 0.0))
-                        was_injected = 1 if node_id in injected_ids else 0
-                        conn.execute(
-                            "INSERT INTO whisper_log "
-                            "(session_id, space, prompt_hash, prompt_text, prompt_vec, "
-                            "node_id, score, retrieval_score, raw_cosine, "
-                            "cross_encoder_score, ce_absolute, gate_score, source, "
-                            "retrieval_rank, final_rank, decision_stage, was_injected, logged_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (session_id, space, prompt_hash, prompt, vec_blob,
-                             node_id, score, trace["retrieval_score"],
-                             r.get("raw_cosine"), r.get("cross_encoder_score"),
-                             r.get("ce_absolute"), _gate_score(r), r.get("source"),
-                             trace["retrieval_rank"], trace.get("final_rank"),
-                             trace["decision_stage"], was_injected, now_iso),
-                        )
-            except Exception as e:
-                logger.warning("whisper_log write failed: %s", e)
 
         if not body:
             result = ""
@@ -1081,6 +1093,7 @@ class ContextBuilder:
                         title=candidate["title"],
                         content=candidate["content"],
                         node_id=candidate["node_id"],
+                        whisper_log_id=candidate["whisper_log_id"],
                     )
                     result = result + review_block
             except Exception as e:

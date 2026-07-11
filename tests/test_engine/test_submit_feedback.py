@@ -18,12 +18,20 @@ def _insert_whisper_log(
     session_id: str = "sess-abc",
     space: str = "myspace",
     prompt_text: str = "how does auth work",
+    prompt_hash: str = "hash-abc",
+    prompt_vec: bytes = b"",
+    was_injected: int = 0,
+    logged_at: str = "datetime('now')",
 ) -> int:
+    logged_at_sql = logged_at if logged_at.startswith("datetime(") else "?"
+    params = [node_id, 0.48, session_id, space, prompt_text, prompt_vec, prompt_hash, was_injected]
+    if logged_at_sql == "?":
+        params.append(logged_at)
     cursor = conn.execute(
         "INSERT INTO whisper_log "
         "(node_id, score, session_id, space, prompt_text, prompt_vec, prompt_hash, was_injected, logged_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-        (node_id, 0.48, session_id, space, prompt_text, b"", "hash-abc", 0),
+        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, {logged_at_sql})",
+        tuple(params),
     )
     conn.commit()
     return cursor.lastrowid
@@ -77,7 +85,7 @@ class TestSubmitFeedbackBasic:
         node_id = "node-signal-001"
         whisper_log_id = _insert_whisper_log(engine.db.conn, node_id)
 
-        engine.submit_feedback(node_id, 1, "explicit")
+        engine.submit_feedback(node_id, 1, "explicit", whisper_log_id=whisper_log_id)
 
         row = engine.db.conn.execute(
             "SELECT * FROM signals WHERE node_id = ?", (node_id,)
@@ -88,6 +96,122 @@ class TestSubmitFeedbackBasic:
         assert row["polarity"] == 1
         assert row["source"] == "explicit"
         assert row["surface"] == "submit_feedback"
+
+    def test_exact_feedback_uses_older_injected_event_not_newer_rejected(self, engine):
+        node_id = "node-exact-older-001"
+        injected_id = _insert_whisper_log(
+            engine.db.conn,
+            node_id,
+            session_id="sess-injected",
+            space="space-a",
+            prompt_text="prompt A",
+            prompt_hash="hash-a",
+            prompt_vec=b"vec-a",
+            was_injected=1,
+            logged_at="2026-01-01T00:00:00+00:00",
+        )
+        rejected_id = _insert_whisper_log(
+            engine.db.conn,
+            node_id,
+            session_id="sess-rejected",
+            space="space-b",
+            prompt_text="prompt B",
+            prompt_hash="hash-b",
+            prompt_vec=b"vec-b",
+            was_injected=0,
+            logged_at="2026-01-02T00:00:00+00:00",
+        )
+
+        engine.submit_feedback(node_id, 1, "explicit", whisper_log_id=injected_id)
+
+        affinity = engine.db.conn.execute("SELECT * FROM affinity").fetchone()
+        assert affinity["whisper_log_id"] == injected_id
+        assert affinity["whisper_log_id"] != rejected_id
+        assert affinity["prompt_text"] == "prompt A"
+        assert affinity["session_id"] == "sess-injected"
+        assert affinity["space"] == "space-a"
+
+        signal = engine.db.conn.execute("SELECT * FROM signals").fetchone()
+        assert signal["whisper_log_id"] == injected_id
+        assert signal["prompt_hash"] == "hash-a"
+
+    def test_exact_feedback_rejects_wrong_node_without_writes_or_review_update(self, engine):
+        review_id = _insert_review_log(engine.db.conn, "node-x")
+        whisper_log_id = _insert_whisper_log(engine.db.conn, "node-y")
+
+        result = engine.submit_feedback(
+            "node-x", 1, "explicit", whisper_log_id=whisper_log_id,
+        )
+
+        assert "belongs to node node-y" in result
+        assert engine.db.conn.execute("SELECT COUNT(*) FROM affinity").fetchone()[0] == 0
+        assert engine.db.conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 0
+        review = engine.db.conn.execute(
+            "SELECT answered FROM review_log WHERE id = ?", (review_id,)
+        ).fetchone()
+        assert review["answered"] == 0
+
+    def test_exact_feedback_rejects_missing_event_without_writes(self, engine):
+        result = engine.submit_feedback(
+            "node-missing-event", 1, "explicit", whisper_log_id=999_999,
+        )
+
+        assert "No whisper_log entry found for whisper_log_id 999999" in result
+        assert engine.db.conn.execute("SELECT COUNT(*) FROM affinity").fetchone()[0] == 0
+        assert engine.db.conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 0
+
+    def test_exact_feedback_accepts_active_review_held_back_event(self, engine):
+        node_id = "node-active-review-001"
+        whisper_log_id = _insert_whisper_log(
+            engine.db.conn,
+            node_id,
+            session_id="sess-held-back",
+            prompt_text="held back prompt",
+            prompt_hash="hash-held",
+            prompt_vec=b"held-vec",
+            was_injected=0,
+        )
+
+        engine.submit_feedback(node_id, 1, "implicit", whisper_log_id=whisper_log_id)
+
+        affinity = engine.db.conn.execute("SELECT * FROM affinity").fetchone()
+        assert affinity["whisper_log_id"] == whisper_log_id
+        assert affinity["prompt_text"] == "held back prompt"
+        assert affinity["session_id"] == "sess-held-back"
+
+    def test_exact_feedback_is_idempotent_for_same_event(self, engine):
+        node_id = "node-exact-idempotent-001"
+        whisper_log_id = _insert_whisper_log(engine.db.conn, node_id)
+
+        engine.submit_feedback(node_id, 1, "explicit", whisper_log_id=whisper_log_id)
+        engine.submit_feedback(node_id, 1, "explicit", whisper_log_id=whisper_log_id)
+
+        assert engine.db.conn.execute("SELECT COUNT(*) FROM affinity").fetchone()[0] == 1
+        assert engine.db.conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 1
+
+    def test_legacy_feedback_without_event_id_uses_latest_event_fallback(self, engine):
+        node_id = "node-legacy-latest-001"
+        older_id = _insert_whisper_log(
+            engine.db.conn,
+            node_id,
+            prompt_text="older injected",
+            was_injected=1,
+            logged_at="2026-01-01T00:00:00+00:00",
+        )
+        newer_id = _insert_whisper_log(
+            engine.db.conn,
+            node_id,
+            prompt_text="newer rejected",
+            was_injected=0,
+            logged_at="2026-01-02T00:00:00+00:00",
+        )
+
+        engine.submit_feedback(node_id, 1, "implicit")
+
+        affinity = engine.db.conn.execute("SELECT whisper_log_id, prompt_text FROM affinity").fetchone()
+        assert affinity["whisper_log_id"] == newer_id
+        assert affinity["whisper_log_id"] != older_id
+        assert affinity["prompt_text"] == "newer rejected"
 
     def test_short_id_feedback_resolves_full_whisper_log_node_id(self, engine):
         node_id = "72a9ea26-1111-2222-3333-444444444444"
@@ -187,15 +311,16 @@ class TestSubmitFeedbackBasic:
 
         assert "FastAPI" in text
         row = engine.db.conn.execute(
-            "SELECT session_id, prompt_text, was_injected FROM whisper_log WHERE node_id = ?",
+            "SELECT id, session_id, prompt_text, was_injected FROM whisper_log WHERE node_id = ?",
             (node_id,),
         ).fetchone()
         assert row is not None
         assert row["session_id"] == "recall-search-session"
         assert row["prompt_text"] == "FastAPI"
         assert row["was_injected"] == 1
+        assert f"whisper_log_id: {row['id']}" in text
 
-        engine.submit_feedback(node_id, 1, "implicit")
+        engine.submit_feedback(node_id, 1, "implicit", whisper_log_id=row["id"])
         affinity = engine.db.conn.execute(
             "SELECT * FROM affinity WHERE node_id = ?", (node_id,)
         ).fetchone()
@@ -212,15 +337,16 @@ class TestSubmitFeedbackBasic:
 
         assert "SQLite choice" in text
         row = engine.db.conn.execute(
-            "SELECT session_id, prompt_text, was_injected FROM whisper_log WHERE node_id = ?",
+            "SELECT id, session_id, prompt_text, was_injected FROM whisper_log WHERE node_id = ?",
             (node_id,),
         ).fetchone()
         assert row is not None
         assert row["session_id"] == "recall-node-session"
         assert row["prompt_text"] == f"recall_node:{node_id}"
         assert row["was_injected"] == 1
+        assert f"whisper_log_id: {row['id']}" in text
 
-        engine.submit_feedback(node_id, 1, "implicit")
+        engine.submit_feedback(node_id, 1, "implicit", whisper_log_id=row["id"])
         affinity = engine.db.conn.execute(
             "SELECT * FROM affinity WHERE node_id = ?", (node_id,)
         ).fetchone()
@@ -265,11 +391,16 @@ class TestSubmitFeedbackRoute:
     def test_route_explicit_feedback(self, client):
         c, eng = client
         node_id = "route-node-001"
-        _insert_whisper_log(eng.db.conn, node_id)
+        whisper_log_id = _insert_whisper_log(eng.db.conn, node_id)
 
         resp = c.post(
             "/agent/feedback",
-            json={"node_id": node_id, "signal": 1, "source": "explicit"},
+            json={
+                "node_id": node_id,
+                "signal": 1,
+                "source": "explicit",
+                "whisper_log_id": whisper_log_id,
+            },
         )
         assert resp.status_code == 200
         assert "Feedback recorded" in resp.json()["text"]
@@ -279,6 +410,7 @@ class TestSubmitFeedbackRoute:
         ).fetchone()
         assert row is not None
         assert row["signal"] == 1
+        assert row["whisper_log_id"] == whisper_log_id
 
     def test_route_short_id_feedback(self, client):
         c, eng = client
@@ -312,10 +444,18 @@ class TestSubmitFeedbackRoute:
         )
         assert recall_resp.status_code == 200
         assert "FastAPI" in recall_resp.json()["text"]
+        whisper_log_id = eng.db.conn.execute(
+            "SELECT id FROM whisper_log WHERE node_id = ?", (node_id,)
+        ).fetchone()["id"]
 
         feedback_resp = c.post(
             "/agent/feedback",
-            json={"node_id": node_id, "signal": 1, "source": "implicit"},
+            json={
+                "node_id": node_id,
+                "signal": 1,
+                "source": "implicit",
+                "whisper_log_id": whisper_log_id,
+            },
         )
         assert feedback_resp.status_code == 200
         assert "Feedback recorded" in feedback_resp.json()["text"]
@@ -342,10 +482,18 @@ class TestSubmitFeedbackRoute:
         )
         assert recall_resp.status_code == 200
         assert "SQLite choice" in recall_resp.json()["text"]
+        whisper_log_id = eng.db.conn.execute(
+            "SELECT id FROM whisper_log WHERE node_id = ?", (node_id,)
+        ).fetchone()["id"]
 
         feedback_resp = c.post(
             "/agent/feedback",
-            json={"node_id": node_id, "signal": 1, "source": "implicit"},
+            json={
+                "node_id": node_id,
+                "signal": 1,
+                "source": "implicit",
+                "whisper_log_id": whisper_log_id,
+            },
         )
         assert feedback_resp.status_code == 200
         assert "Feedback recorded" in feedback_resp.json()["text"]

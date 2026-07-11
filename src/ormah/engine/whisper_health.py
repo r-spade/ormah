@@ -14,10 +14,9 @@ Semantics & known limitations (council-reviewed):
   `.isoformat()` (context_builder.py, memory_engine.py) — so lexicographic
   comparison on that column is safe. `confirmed_at` (written as datetime('now'),
   a different format) is never compared.
-- KNOWN UNDERCOUNT: if a node was injected then re-logged held-back, feedback
-  attaches to the latest (held-back) whisper_log row and is excluded here. The
-  fix belongs in submit_feedback's attribution (collection side), tracked as a
-  follow-up; this read-only metric reports pessimistically rather than wrong.
+- exact feedback attribution uses the surfaced `whisper_log_id`, so feedback for
+  an older injected row remains linked to that injected event even if newer
+  held-back rows exist for the same node.
 """
 
 from __future__ import annotations

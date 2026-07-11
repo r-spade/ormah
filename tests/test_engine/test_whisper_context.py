@@ -2195,7 +2195,7 @@ class TestWhisperLog:
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
              patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
-            builder.build_whisper_context(
+            result = builder.build_whisper_context(
                 prompt="how does search work",
                 min_score=0.1,
                 reranker_enabled=True,
@@ -2215,6 +2215,7 @@ class TestWhisperLog:
         assert row["retrieval_rank"] == 1
         assert row["final_rank"] == 1
         assert row["ce_absolute"] is not None
+        assert f"(id: node-log, whisper_log_id: {row['id']})" in result
 
     def test_whisper_log_not_written_without_session_id(self, db_graph):
         """When session_id is None, no whisper_log rows should be written."""

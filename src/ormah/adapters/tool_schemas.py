@@ -179,6 +179,8 @@ TOOLS = [
             "Call with source='implicit' when you can judge from context whether a whispered or recalled "
             "memory was useful — signal=1 if useful, signal=-1 if not relevant. "
             "Only ask the user (source='explicit') when you genuinely cannot determine relevance yourself. "
+            "If the surfaced memory includes whisper_log_id, always include it so feedback is attached "
+            "to that exact whisper or recall event; omitting it uses a legacy latest-event fallback. "
             "The system uses this feedback to improve which memories surface in future sessions."
         ),
         "parameters": {
@@ -201,6 +203,13 @@ TOOLS = [
                         "'implicit' when you infer usefulness from the conversation without asking."
                     ),
                     "default": "explicit",
+                },
+                "whisper_log_id": {
+                    "type": "integer",
+                    "description": (
+                        "Optional exact whisper_log event ID shown next to surfaced memories. "
+                        "Pass it whenever present; omit only for older outputs that do not include it."
+                    ),
                 },
             },
             "required": ["node_id", "signal"],

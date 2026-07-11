@@ -243,18 +243,19 @@ class TestReviewBlockInBuildWhisperContext:
         return engine
 
     def _insert_whisper_row(self, conn, node_id, prompt_text="how does auth work", prompt_vec_bytes=b""):
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO whisper_log (node_id, score, session_id, space, prompt_text, prompt_hash, prompt_vec, was_injected, logged_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-1 day'))",
             (node_id, 0.48, "sess-abc", "myspace", prompt_text, "hash-blk", prompt_vec_bytes, 0),
         )
+        return cursor.lastrowid
 
     def test_review_block_appended_when_eligible(self, mock_graph):
         """Eligible candidate causes review block to appear in result on first message."""
         conn = mock_graph.conn
         node = _make_node_dict("node-r1", "Auth token storage", space="myspace")
         _insert_node(conn, node)
-        self._insert_whisper_row(conn, "node-r1")
+        whisper_log_id = self._insert_whisper_row(conn, "node-r1")
         conn.commit()
 
         engine = self._make_mock_engine(conn)
@@ -265,6 +266,8 @@ class TestReviewBlockInBuildWhisperContext:
 
         assert "one thing to review when you get a chance" in result
         assert "Auth token storage" in result
+        assert f"whisper_log_id: {whisper_log_id}" in result
+        assert f"whisper_log_id={whisper_log_id}" in result
 
     def test_review_log_row_inserted(self, mock_graph):
         """After build_whisper_context with eligible candidate, review_log has 1 row."""

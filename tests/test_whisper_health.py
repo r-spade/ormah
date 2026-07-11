@@ -204,3 +204,32 @@ def test_stats_whisper_health_seeded(engine):
     assert wh["feedback_rows"] == 1
     assert wh["coverage"] == 1.0
     assert wh["precision"] == 1.0
+
+
+def test_exact_feedback_on_older_injected_event_counts_in_health(engine):
+    conn = engine.db.conn
+    node_id = "health-node-1"
+    conn.execute(
+        "INSERT INTO whisper_log "
+        "(session_id, prompt_hash, prompt_vec, node_id, score, was_injected, logged_at) "
+        "VALUES ('sess-a', 'hash-a', X'00', ?, 0.8, 1, ?)",
+        (node_id, datetime.now(timezone.utc).isoformat()),
+    )
+    injected_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO whisper_log "
+        "(session_id, prompt_hash, prompt_vec, node_id, score, was_injected, logged_at) "
+        "VALUES ('sess-b', 'hash-b', X'01', ?, 0.3, 0, ?)",
+        (node_id, datetime.now(timezone.utc).isoformat()),
+    )
+
+    result = engine.submit_feedback(
+        node_id, 1, "explicit", whisper_log_id=injected_id,
+    )
+
+    assert "Feedback recorded" in result
+    wh = engine.stats()["whisper"]["feedback_health"]["all_time"]
+    assert wh["injected"] == 1
+    assert wh["feedback_rows"] == 1
+    assert wh["coverage"] == 1.0
+    assert wh["precision"] == 1.0
