@@ -98,16 +98,25 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE TABLE IF NOT EXISTS whisper_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id   TEXT NOT NULL,
-    space        TEXT,
-    prompt_hash  TEXT NOT NULL,
-    prompt_text  TEXT,
-    prompt_vec   BLOB NOT NULL,
-    node_id      TEXT NOT NULL,
-    score        REAL NOT NULL,
-    was_injected INTEGER NOT NULL,
-    logged_at    TEXT NOT NULL
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id          TEXT NOT NULL,
+    space               TEXT,
+    prompt_hash         TEXT NOT NULL,
+    prompt_text         TEXT,
+    prompt_vec          BLOB NOT NULL,
+    node_id             TEXT NOT NULL,
+    score               REAL NOT NULL,
+    retrieval_score     REAL,
+    raw_cosine          REAL,
+    cross_encoder_score REAL,
+    ce_absolute         REAL,
+    gate_score          REAL,
+    source              TEXT,
+    retrieval_rank      INTEGER,
+    final_rank          INTEGER,
+    decision_stage      TEXT NOT NULL DEFAULT 'legacy',
+    was_injected        INTEGER NOT NULL,
+    logged_at           TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_whisper_log_session ON whisper_log(session_id);
 CREATE INDEX IF NOT EXISTS idx_whisper_log_node    ON whisper_log(node_id);

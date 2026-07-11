@@ -2125,6 +2125,10 @@ class TestWhisperLog:
         assert row["node_id"] == "node-log-1"
         assert row["was_injected"] == 1
         assert row["prompt_text"] == "how does search work"
+        assert row["decision_stage"] == "injected"
+        assert row["retrieval_rank"] == 1
+        assert row["final_rank"] == 1
+        assert row["ce_absolute"] is not None
 
     def test_whisper_log_not_written_without_session_id(self, db_graph):
         """When session_id is None, no whisper_log rows should be written."""
@@ -2255,6 +2259,90 @@ class TestWhisperLog:
         # The logged score is the pre-boost (CE blended), not boosted
         # We just verify a row was written — exact value depends on reranker mock
         assert logged_score >= 0.0
+
+    def test_whisper_log_records_candidates_rejected_before_reranking(self, db_graph):
+        db, graph = db_graph
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.db = db
+
+        builder = ContextBuilder(graph, engine=mock_engine)
+        node = _make_node_dict("trimmed-node", "Unrelated candidate")
+        mock_engine.recall_search_structured.return_value = [
+            {
+                "node": node,
+                "score": 0.20,
+                "source": "hybrid",
+                "raw_cosine": 0.25,
+            }
+        ]
+
+        builder.build_whisper_context(
+            prompt="deployment pipeline",
+            min_score=0.45,
+            session_id="session-pretrim",
+        )
+
+        row = db.conn.execute(
+            "SELECT * FROM whisper_log WHERE node_id = 'trimmed-node'"
+        ).fetchone()
+        assert row is not None
+        assert row["decision_stage"] == "pre_rerank_floor"
+        assert row["retrieval_score"] == pytest.approx(0.20)
+        assert row["raw_cosine"] == pytest.approx(0.25)
+        assert row["ce_absolute"] is None
+        assert row["was_injected"] == 0
+
+    def test_whisper_log_records_topical_rejection_with_absolute_scores(self, db_graph):
+        db, graph = db_graph
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.db = db
+
+        builder = ContextBuilder(graph, engine=mock_engine)
+        relevant = _make_node_dict("overlap-node", "Deployment pipeline details")
+        rejected = _make_node_dict("rejected-node", "Unrelated embedding neighbor")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": relevant, "score": 0.80, "source": "hybrid"},
+            {"node": rejected, "score": 0.75, "source": "hybrid"},
+        ]
+        mock_ce = MagicMock()
+        mock_ce.rerank.return_value = [3.0, -5.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            builder.build_whisper_context(
+                prompt="deployment pipeline problems",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.45,
+                no_overlap_ce_floor=0.45,
+                session_id="session-topical",
+            )
+
+        row = db.conn.execute(
+            "SELECT * FROM whisper_log WHERE node_id = 'rejected-node'"
+        ).fetchone()
+        assert row is not None
+        assert row["decision_stage"] == "topical_filter"
+        assert row["cross_encoder_score"] == pytest.approx(-5.0)
+        assert row["ce_absolute"] == pytest.approx(7 / 18)
+        assert row["gate_score"] == pytest.approx(7 / 18)
+        assert row["was_injected"] == 0
 
 
 class TestWhisperFlatRankedDisplay:

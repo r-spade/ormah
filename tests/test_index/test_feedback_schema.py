@@ -49,6 +49,15 @@ def test_whisper_log_columns(db):
         "prompt_vec",
         "node_id",
         "score",
+        "retrieval_score",
+        "raw_cosine",
+        "cross_encoder_score",
+        "ce_absolute",
+        "gate_score",
+        "source",
+        "retrieval_rank",
+        "final_rank",
+        "decision_stage",
         "was_injected",
         "logged_at",
     ]:
@@ -204,6 +213,46 @@ def test_migrate_creates_whisper_log(tmp_path):
     assert not _table_exists(db, "whisper_log")
     db._migrate()
     assert _table_exists(db, "whisper_log")
+    db.close()
+
+
+def test_migrate_adds_whisper_candidate_diagnostics(tmp_path):
+    path = tmp_path / "index.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE whisper_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            space TEXT,
+            prompt_hash TEXT NOT NULL,
+            prompt_text TEXT,
+            prompt_vec BLOB NOT NULL,
+            node_id TEXT NOT NULL,
+            score REAL NOT NULL,
+            was_injected INTEGER NOT NULL,
+            logged_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO whisper_log "
+        "(session_id, prompt_hash, prompt_vec, node_id, score, was_injected, logged_at) "
+        "VALUES ('s1', 'h1', X'00', 'n1', 0.5, 0, '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.init_schema()
+
+    cols = _table_columns(db, "whisper_log")
+    assert "decision_stage" in cols
+    assert "ce_absolute" in cols
+    row = db.conn.execute(
+        "SELECT node_id, decision_stage FROM whisper_log WHERE node_id = 'n1'"
+    ).fetchone()
+    assert tuple(row) == ("n1", "legacy")
     db.close()
 
 

@@ -148,16 +148,25 @@ class Database:
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS whisper_log (
-                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                        session_id   TEXT NOT NULL,
-                        space        TEXT,
-                        prompt_hash  TEXT NOT NULL,
-                        prompt_text  TEXT,
-                        prompt_vec   BLOB NOT NULL,
-                        node_id      TEXT NOT NULL,
-                        score        REAL NOT NULL,
-                        was_injected INTEGER NOT NULL,
-                        logged_at    TEXT NOT NULL
+                        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id          TEXT NOT NULL,
+                        space               TEXT,
+                        prompt_hash         TEXT NOT NULL,
+                        prompt_text         TEXT,
+                        prompt_vec          BLOB NOT NULL,
+                        node_id             TEXT NOT NULL,
+                        score               REAL NOT NULL,
+                        retrieval_score     REAL,
+                        raw_cosine          REAL,
+                        cross_encoder_score REAL,
+                        ce_absolute         REAL,
+                        gate_score          REAL,
+                        source              TEXT,
+                        retrieval_rank      INTEGER,
+                        final_rank          INTEGER,
+                        decision_stage      TEXT NOT NULL DEFAULT 'legacy',
+                        was_injected        INTEGER NOT NULL,
+                        logged_at           TEXT NOT NULL
                     )
                     """
                 )
@@ -170,6 +179,8 @@ class Database:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_whisper_log_logged ON whisper_log(logged_at)"
                 )
+
+            self._migrate_whisper_log_schema(conn)
 
             self._migrate_affinity_schema(conn, existing_tables)
             self._ensure_signals_schema(conn)
@@ -192,6 +203,24 @@ class Database:
 
         # Migrate FTS table to porter stemmer if needed
         self._migrate_fts_tokenizer()
+
+    def _migrate_whisper_log_schema(self, conn: sqlite3.Connection) -> None:
+        """Add candidate-stage diagnostics without rebuilding feedback history."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(whisper_log)").fetchall()}
+        additions = {
+            "retrieval_score": "REAL",
+            "raw_cosine": "REAL",
+            "cross_encoder_score": "REAL",
+            "ce_absolute": "REAL",
+            "gate_score": "REAL",
+            "source": "TEXT",
+            "retrieval_rank": "INTEGER",
+            "final_rank": "INTEGER",
+            "decision_stage": "TEXT NOT NULL DEFAULT 'legacy'",
+        }
+        for name, column_type in additions.items():
+            if name not in cols:
+                conn.execute(f"ALTER TABLE whisper_log ADD COLUMN {name} {column_type}")
 
     def _create_affinity_table(self, conn: sqlite3.Connection, table: str = "affinity") -> None:
         conn.execute(

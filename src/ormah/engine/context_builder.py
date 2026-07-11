@@ -85,6 +85,7 @@ def _find_review_candidate(conn, threshold: float) -> dict | None:
               FROM whisper_log wl
               JOIN nodes n ON n.id = wl.node_id
               WHERE wl.was_injected = 0
+                AND wl.decision_stage IN ('injection_gate', 'candidate_cap', 'legacy')
                 AND wl.logged_at > datetime('now', '-7 days')
                 AND NOT EXISTS (
                   SELECT 1 FROM whisper_log wl2
@@ -540,6 +541,38 @@ class ContextBuilder:
                 return "", _injected_ids
             return ""
 
+        candidate_trace: dict[str, dict] = {}
+
+        def _record_candidate_versions(results: list[dict]) -> None:
+            for rank, result in enumerate(results, start=1):
+                if result.get("source") == "temporal":
+                    continue
+                node_id = result.get("node", {}).get("id")
+                if not node_id:
+                    continue
+                trace = candidate_trace.setdefault(
+                    node_id,
+                    {
+                        "retrieval_score": result.get("score", 0.0),
+                        "retrieval_rank": rank,
+                        "decision_stage": "candidate",
+                    },
+                )
+                trace["latest"] = result
+
+        def _mark_removed(before: list[dict], after: list[dict], stage: str) -> None:
+            after_ids = {r.get("node", {}).get("id") for r in after}
+            for result in before:
+                node_id = result.get("node", {}).get("id")
+                trace = candidate_trace.get(node_id)
+                if (
+                    trace is not None
+                    and node_id not in after_ids
+                    and trace["decision_stage"] == "candidate"
+                ):
+                    trace["decision_stage"] = stage
+
+        _record_candidate_versions(search_results)
         initial_candidate_count = len(search_results)
         reranker_applied = False
         reranker_before_count = 0
@@ -566,12 +599,14 @@ class ContextBuilder:
         # strongest match can otherwise be the lowest-blended candidate).
         # The cross-encoder + absolute gate downstream handle any noise this
         # lets through.
+        before_min_score = search_results
         search_results = [
             r for r in search_results
             if r.get("score", 0) >= effective_min_score
             or r.get("raw_cosine", 0.0) >= effective_min_score
             or r.get("source") == "temporal"
         ]
+        _mark_removed(before_min_score, search_results, "pre_rerank_floor")
         post_min_score_count = len(search_results)
         # Cross-encoder reranking — always pass min_score=0.0 so affinity boost
         # can rescue candidates before any floor is applied (spec: reranker_min_score
@@ -582,6 +617,7 @@ class ContextBuilder:
 
                 reranker_applied = True
                 reranker_before_count = len(search_results)
+                before_rerank = search_results
                 search_results = rerank(
                     query=effective_query,
                     candidates=search_results,
@@ -590,6 +626,8 @@ class ContextBuilder:
                     blend_alpha=reranker_blend_alpha,
                     max_doc_chars=reranker_max_doc_chars,
                 )
+                _record_candidate_versions(search_results)
+                _mark_removed(before_rerank, search_results, "reranker_floor")
                 reranker_after_count = len(search_results)
 
             except Exception as e:
@@ -623,13 +661,16 @@ class ContextBuilder:
                 # Apply 0.40 floor AFTER boost (spec: reranker_min_score is now a post-boost floor).
                 # Use the reranker_min_score parameter (passed from engine.settings); fall back to 0.40.
                 effective_floor = reranker_min_score if reranker_min_score > 0.0 else 0.40
+                _record_candidate_versions(boosted)
                 pre_gate_candidates = [r for r in boosted if r["score"] >= effective_floor]
+                _mark_removed(boosted, pre_gate_candidates, "post_rerank_floor")
                 search_results = pre_gate_candidates
             except Exception as e:
                 logger.warning("Affinity boost failed, using unmodified scores: %s", e)
 
         if search_results:
             if identity_only:
+                before_identity_filter = search_results
                 global_results = [
                     r for r in search_results
                     if r["node"].get("space") in (None, "null")
@@ -640,6 +681,11 @@ class ContextBuilder:
                         r for r in pre_gate_candidates
                         if r["node"].get("space") in (None, "null")
                     ] or pre_gate_candidates
+                    _mark_removed(
+                        before_identity_filter,
+                        search_results,
+                        "identity_space_filter",
+                    )
 
             prompt_tokens = _topic_tokens(prompt)
             if space:
@@ -687,7 +733,9 @@ class ContextBuilder:
                 # overlapped.
                 return not overlapping_ids
 
+            before_topical_filter = search_results
             search_results = [r for r in search_results if _keep(r)]
+            _mark_removed(before_topical_filter, search_results, "topical_filter")
             if pre_gate_candidates:
                 pre_gate_candidates = [r for r in pre_gate_candidates if _keep(r)]
 
@@ -700,6 +748,7 @@ class ContextBuilder:
         if search_results:
             max_gate_score = max(_gate_score(r) for r in search_results)
         if not has_temporal and search_results:
+            before_injection_gate = search_results
             if max_gate_score < injection_gate:
                 logger.info(
                     "Whisper diagnostics: prompt=%r gate_reject max_gate_score=%.3f gate=%.3f",
@@ -713,6 +762,7 @@ class ContextBuilder:
                 # injection gate.  Weak queries naturally get fewer results
                 # instead of padding to max_nodes with marginal matches.
                 search_results = [r for r in search_results if _gate_score(r) >= injection_gate]
+            _mark_removed(before_injection_gate, search_results, "injection_gate")
 
         # Exploration slot: inject one unconfirmed gated-out candidate to
         # surface false negatives and collect affinity signal for them.
@@ -764,6 +814,7 @@ class ContextBuilder:
                             # long-shot differently from a confident whisper,
                             # and feedback on it stays honest.
                             search_results.append({**candidate, "_exploration": True})
+                            candidate_trace[nid]["decision_stage"] = "candidate"
                             break  # one exploration slot only
             except Exception as e:
                 logger.warning("Exploration slot failed: %s", e)
@@ -782,9 +833,21 @@ class ContextBuilder:
             )
 
         # Cap to max_nodes (already ordered by relevance score, or by recency for temporal queries)
+        before_candidate_cap = search_results
         search_results = search_results[:max_nodes]
+        _mark_removed(before_candidate_cap, search_results, "candidate_cap")
         final_candidate_count = len(search_results)
         _injected_ids = [r["node"]["id"] for r in search_results]
+        for final_rank, result in enumerate(search_results, start=1):
+            node_id = result["node"]["id"]
+            trace = candidate_trace.get(node_id)
+            if trace is None:
+                continue
+            trace["latest"] = result
+            trace["final_rank"] = final_rank
+            trace["decision_stage"] = (
+                "exploration_injected" if result.get("_exploration") else "injected"
+            )
 
         # Per-prompt outcome row (silence instrumentation): exactly one row
         # per whisper call so silence rate has a denominator.
@@ -829,34 +892,34 @@ class ContextBuilder:
 
         body = "\n".join(lines).rstrip()
 
-        # Write whisper_log: one row per non-temporal candidate with boosted_score >= 0.40.
-        # Uses pre_gate_candidates (all above the 0.40 floor) so gated-out candidates
-        # are also logged. was_injected reflects the final post-gate, post-exploration decision.
+        # Write one diagnostic row for every non-temporal retrieved candidate.
+        # Absolute signals and the first destructive stage are retained so live
+        # replays can distinguish retrieval misses from floor, topical, and gate
+        # rejections. Existing feedback consumers still key off was_injected.
         if session_id and prompt_vec is not None and self.engine is not None:
             try:
                 prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
                 now_iso = datetime.now(timezone.utc).isoformat()
                 vec_blob = prompt_vec.astype(np.float32).tobytes()
-                # Use pre_gate_candidates when available (after affinity boost),
-                # otherwise fall back to the current search_results
-                candidates_to_log = pre_gate_candidates if pre_gate_candidates else search_results
                 injected_ids = {r["node"]["id"] for r in search_results}
                 with self.engine.db.transaction() as conn:
-                    for r in candidates_to_log:
-                        if r.get("source") == "temporal":
-                            continue
-                        boosted_score = r["score"]
-                        if boosted_score < 0.40:
-                            continue  # below noise floor, skip
-                        pre_boost_score = r.get("_pre_boost_score", r["score"])
-                        was_injected = 1 if r["node"]["id"] in injected_ids else 0
+                    for node_id, trace in candidate_trace.items():
+                        r = trace["latest"]
+                        score = r.get("_pre_boost_score", r.get("score", 0.0))
+                        was_injected = 1 if node_id in injected_ids else 0
                         conn.execute(
                             "INSERT INTO whisper_log "
                             "(session_id, space, prompt_hash, prompt_text, prompt_vec, "
-                            "node_id, score, was_injected, logged_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "node_id, score, retrieval_score, raw_cosine, "
+                            "cross_encoder_score, ce_absolute, gate_score, source, "
+                            "retrieval_rank, final_rank, decision_stage, was_injected, logged_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (session_id, space, prompt_hash, prompt, vec_blob,
-                             r["node"]["id"], pre_boost_score, was_injected, now_iso),
+                             node_id, score, trace["retrieval_score"],
+                             r.get("raw_cosine"), r.get("cross_encoder_score"),
+                             r.get("ce_absolute"), _gate_score(r), r.get("source"),
+                             trace["retrieval_rank"], trace.get("final_rank"),
+                             trace["decision_stage"], was_injected, now_iso),
                         )
             except Exception as e:
                 logger.warning("whisper_log write failed: %s", e)
