@@ -586,7 +586,8 @@ class MemoryEngine:
 
     def recall_search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
-        touch_access: bool = True, min_relevance: float | None = None, **filters,
+        touch_access: bool = True, min_relevance: float | None = None,
+        auto_temporal: bool = True, spread_activation: bool = True, **filters,
     ) -> list[dict]:
         """Search memories and return structured results (list of dicts).
 
@@ -601,8 +602,14 @@ class MemoryEngine:
         the raw candidate pool because it applies its own floors and an
         absolute-signal gate downstream.
         """
-        # Auto-extract temporal filters from query when none provided
-        if not filters.get("created_after") and not filters.get("created_before"):
+        # Auto-extract temporal filters from query when none provided. Typed
+        # applicability searches disable this: a standing rule remains relevant
+        # even when the action mentions yesterday or last week.
+        if (
+            auto_temporal
+            and not filters.get("created_after")
+            and not filters.get("created_before")
+        ):
             from ormah.engine.prompt_classifier import (
                 extract_time_params, has_temporal_phrases, strip_temporal_phrases,
             )
@@ -656,7 +663,8 @@ class MemoryEngine:
                         default_space=default_space,
                     )
 
-            results = self._spread_activation(results, limit)
+            if spread_activation:
+                results = self._spread_activation(results, limit)
             if touch_access:
                 for r in results:
                     if r.get("source") not in ("activated", "conflict"):
@@ -691,7 +699,8 @@ class MemoryEngine:
                 default_space=default_space,
             )
 
-        enriched = self._spread_activation(enriched, limit)
+        if spread_activation:
+            enriched = self._spread_activation(enriched, limit)
         if touch_access:
             for r in enriched:
                 if r.get("source") not in ("activated", "conflict"):
@@ -999,6 +1008,13 @@ class MemoryEngine:
             ),
             no_overlap_ce_floor=self.settings.whisper_no_overlap_ce_floor,
             no_overlap_cosine_floor=self.settings.whisper_no_overlap_cosine_floor,
+            preference_applicability_enabled=(
+                self.settings.whisper_preference_applicability_enabled
+            ),
+            preference_applicability_gate=(
+                self.settings.whisper_preference_applicability_gate
+            ),
+            preference_max_nodes=self.settings.whisper_preference_max_nodes,
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
             session_id=session_id,

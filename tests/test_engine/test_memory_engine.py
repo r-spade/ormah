@@ -290,6 +290,20 @@ def test_get_whisper_context_threads_pool_and_content_cap_settings(engine):
     assert build.call_args.kwargs["injected_content_max_chars"] == 450
 
 
+def test_get_whisper_context_threads_preference_applicability_settings(engine):
+    engine._whisper_reranker_available = True
+    engine.settings.whisper_preference_applicability_enabled = True
+    engine.settings.whisper_preference_applicability_gate = 0.42
+    engine.settings.whisper_preference_max_nodes = 1
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value="") as build:
+        engine.get_whisper_context("auth prompt")
+
+    assert build.call_args.kwargs["preference_applicability_enabled"] is True
+    assert build.call_args.kwargs["preference_applicability_gate"] == 0.42
+    assert build.call_args.kwargs["preference_max_nodes"] == 1
+
+
 def test_startup_seeds_maintenance_grace_period(settings):
     settings.claude_maintenance_enabled = True
     engine = MemoryEngine(settings)

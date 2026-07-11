@@ -32,6 +32,9 @@ _EVAL_SETTINGS_OVERRIDES = {
     "whisper_injection_gate": 0.45,
     "whisper_no_overlap_ce_floor": 0.45,
     "whisper_no_overlap_cosine_floor": 0.70,
+    "whisper_preference_applicability_enabled": True,
+    "whisper_preference_applicability_gate": 0.40,
+    "whisper_preference_max_nodes": 2,
     "whisper_exploration_enabled": True,
     # Ranking adjustments used by whisper post-processing
     "affinity_similarity_threshold": 0.70,

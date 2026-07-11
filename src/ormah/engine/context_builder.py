@@ -34,6 +34,8 @@ _REVIEW_FRAMING = (
     "this won't be surfaced again for 14 days."
 )
 
+_PREFERENCE_APPLICABILITY_PREFIX = "Relevant user preference for this action: "
+
 def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
     """Return *text* truncated to *max_len* characters at a word boundary."""
     if len(text) <= max_len:
@@ -336,6 +338,9 @@ class ContextBuilder:
         injection_gate: float = 0.55,
         no_overlap_ce_floor: float = 0.45,
         no_overlap_cosine_floor: float = 0.70,
+        preference_applicability_enabled: bool = False,
+        preference_applicability_gate: float = 0.40,
+        preference_max_nodes: int = 2,
         session_id: str | None = None,
         _return_debug: bool = False,
     ) -> str | tuple[str, list[str]]:
@@ -495,6 +500,7 @@ class ContextBuilder:
             # improve ambiguous prompts without polluting explicit ones.
             context_parts = recent_prompts[-2:] + [prompt]
             search_query = " ".join(context_parts)
+        preference_query = search_query
 
         # Build search kwargs, merging any intent-derived params
         # Fetch a deep candidate pool so the reranker/gate can rescue memories
@@ -830,6 +836,82 @@ class ContextBuilder:
             search_results.sort(
                 key=lambda r: (r.get("_space_factor", 1.0), r["node"].get("created") or ""),
                 reverse=True,
+            )
+
+        # Standing preferences need a different relevance relation from the
+        # topical channel: they govern an action rather than answer its prompt.
+        # This is intentionally a parallel typed search, not the removed April
+        # heuristic: no prompt regex changes the core path, facts are never
+        # suppressed, and every added preference must pass an applicability CE.
+        applicable_preferences: list[dict] = []
+        if (
+            preference_applicability_enabled
+            and reranker_enabled
+            and preference_max_nodes > 0
+        ):
+            try:
+                from ormah.embeddings.reranker import rerank
+
+                existing_ids = {r["node"]["id"] for r in search_results}
+                preference_candidates = self.engine.recall_search_structured(
+                    query=preference_query,
+                    limit=max_nodes * max(candidate_pool_multiplier, 1),
+                    default_space=space,
+                    types=["preference"],
+                    tiers=["core", "working"],
+                    touch_access=False,
+                    min_relevance=0.0,
+                    auto_temporal=False,
+                    spread_activation=False,
+                )
+                preference_candidates = [
+                    r for r in preference_candidates if r["node"]["id"] not in existing_ids
+                ]
+                _record_candidate_versions(preference_candidates)
+                applicability_results = rerank(
+                    query=_PREFERENCE_APPLICABILITY_PREFIX + preference_query,
+                    candidates=preference_candidates,
+                    model_name=reranker_model,
+                    min_score=0.0,
+                    blend_alpha=reranker_blend_alpha,
+                    max_doc_chars=reranker_max_doc_chars,
+                )
+                applicability_results = [
+                    {**r, "source": "preference_applicability"}
+                    for r in applicability_results
+                ]
+                _record_candidate_versions(applicability_results)
+                for result in applicability_results:
+                    trace = candidate_trace[result["node"]["id"]]
+                    trace["decision_stage"] = "candidate"
+                passed_applicability = [
+                    r
+                    for r in applicability_results
+                    if _gate_score(r) >= preference_applicability_gate
+                ]
+                _mark_removed(
+                    applicability_results,
+                    passed_applicability,
+                    "preference_applicability_gate",
+                )
+                applicable_preferences = passed_applicability[:preference_max_nodes]
+                _mark_removed(
+                    passed_applicability,
+                    applicable_preferences,
+                    "preference_candidate_cap",
+                )
+            except Exception as e:
+                logger.warning("Preference applicability search failed: %s", e)
+
+        if applicable_preferences:
+            # Reserve room without discarding the topical ranking wholesale.
+            # The strongest applicable rule is first so its content, not just
+            # its title, reaches the agent; remaining topical results keep order.
+            room_for_main = max(max_nodes - len(applicable_preferences), 0)
+            search_results = (
+                applicable_preferences[:1]
+                + search_results[:room_for_main]
+                + applicable_preferences[1:]
             )
 
         # Cap to max_nodes (already ordered by relevance score, or by recency for temporal queries)

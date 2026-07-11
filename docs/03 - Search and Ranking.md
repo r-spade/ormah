@@ -1,6 +1,6 @@
 # Search and Ranking
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-07-11.
 
 Ormah search is a hybrid pipeline that combines:
 
@@ -140,6 +140,24 @@ Recall fetches a `3 x limit` pool from hybrid search **before** applying space s
 ## Recall relevance floor
 
 Deliberate recall drops results below `recall_min_relevance_score` (default `0.35`) instead of padding to `limit` with cross-space noise — recall may legitimately return fewer results than requested. Recency-vouched temporal supplements (`source="temporal"`) are exempt. Whisper's internal candidate fetch bypasses this floor (`min_relevance=0.0`): it applies its own floors and an absolute-signal gate downstream.
+
+## Standing preference applicability
+
+Whisper has a second, typed retrieval path for standing preferences. The main path still asks whether a memory answers or directly relates to the prompt. The preference path instead asks whether a stored rule applies to the action the user is taking.
+
+The preference path:
+
+- searches only `type="preference"` nodes
+- does not apply date filters from temporal wording, because standing rules are timeless
+- disables graph spreading so related non-preference nodes cannot enter the channel
+- cross-encodes candidates against an applicability-framed query
+- applies an absolute applicability gate and merges at most two results
+
+This does not infer a preference mode from prompt keywords and does not alter or suppress the main factual ranking. Those constraints avoid the failure mode of the removed prompt-shape heuristic, which treated broad words such as `build`, `design`, and `style` as permission to boost all preferences and discard factual results.
+
+## Whisper candidate diagnostics
+
+For session-scoped whispers, `whisper_log` retains every non-temporal retrieved candidate, including candidates removed before reranking. Rows include retrieval rank and score, raw cosine, cross-encoder signals when available, the absolute gate score, final rank, and the stage that injected or rejected the candidate. This makes floor, topical-filter, gate, and candidate-cap failures distinguishable in live replays.
 
 ## Spreading Activation
 

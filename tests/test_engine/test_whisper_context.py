@@ -1163,6 +1163,92 @@ class TestWhisperPrecisionGuards:
 
         assert "Theme system implementation" in result
 
+
+class TestPreferenceApplicability:
+    """Standing rules use a typed applicability channel without biasing facts."""
+
+    def _builder(self, mock_graph, main_results, preference_results):
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        mock_engine.settings.whisper_exploration_enabled = False
+        mock_engine.recall_search_structured.side_effect = [
+            main_results,
+            preference_results,
+        ]
+        return ContextBuilder(mock_graph, engine=mock_engine), mock_engine
+
+    def test_applicable_preference_is_merged_without_suppressing_fact(self, mock_graph):
+        factual = _make_node_dict("fact-1", "Graph component implementation")
+        preference = _make_node_dict(
+            "pref-1", "Prefer simple designs", node_type="preference"
+        )
+        builder, engine = self._builder(
+            mock_graph,
+            [{"node": factual, "score": 0.80, "source": "hybrid"}],
+            [{"node": preference, "score": 0.65, "source": "hybrid"}],
+        )
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = [[3.0], [0.0]]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch(
+                 "ormah.engine.context_builder.ContextBuilder._get_classifier",
+                 return_value=None,
+             ), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="build the graph component",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.45,
+                preference_applicability_enabled=True,
+                preference_applicability_gate=0.40,
+            )
+
+        assert "Prefer simple designs" in result
+        assert "Graph component implementation" in result
+        preference_call = engine.recall_search_structured.call_args_list[1]
+        assert preference_call.kwargs["types"] == ["preference"]
+        assert preference_call.kwargs["auto_temporal"] is False
+        assert preference_call.kwargs["spread_activation"] is False
+        assert mock_ce.rerank.call_args_list[1].args[0].startswith(
+            "Relevant user preference for this action:"
+        )
+
+    def test_inapplicable_preference_cannot_suppress_factual_result(self, mock_graph):
+        factual = _make_node_dict("fact-1", "Graph component implementation")
+        preference = _make_node_dict(
+            "pref-1", "Prefer dark themes", node_type="preference"
+        )
+        builder, _ = self._builder(
+            mock_graph,
+            [{"node": factual, "score": 0.80, "source": "hybrid"}],
+            [{"node": preference, "score": 0.65, "source": "hybrid"}],
+        )
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = [[3.0], [-12.0]]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch(
+                 "ormah.engine.context_builder.ContextBuilder._get_classifier",
+                 return_value=None,
+             ), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="build the graph component",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.45,
+                preference_applicability_enabled=True,
+                preference_applicability_gate=0.40,
+            )
+
+        assert "Graph component implementation" in result
+        assert "Prefer dark themes" not in result
+
     def test_topical_overlap_guard_drops_unrelated_extra_result(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)

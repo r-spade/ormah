@@ -214,6 +214,13 @@ class Settings(BaseSettings):
     whisper_no_overlap_ce_floor: float = 0.45
     whisper_no_overlap_cosine_floor: float = 0.70
 
+    # Standing preferences are applicability rules, not passages that answer
+    # the prompt. A separate typed retrieval channel asks the reranker whether
+    # each preference applies to the current action, then merges at most two.
+    whisper_preference_applicability_enabled: bool = True
+    whisper_preference_applicability_gate: float = 0.40
+    whisper_preference_max_nodes: int = 2
+
     # Injection gate when the reranker did not run (unavailable, still
     # downloading, or disabled): the gate then cuts raw_cosine, a weaker
     # absolute signal, so demand a higher bar — degraded mode is more
@@ -419,6 +426,7 @@ class Settings(BaseSettings):
         "auto_merge_threshold",
         "feedback_llm_judge_min_confidence",
         "consolidation_cluster_threshold",
+        "whisper_preference_applicability_gate",
     )
     @classmethod
     def _threshold_range(cls, v: float) -> float:
