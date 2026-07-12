@@ -628,7 +628,8 @@ class MemoryEngine:
     def recall_search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
         touch_access: bool = True, min_relevance: float | None = None,
-        auto_temporal: bool = True, spread_activation: bool = True, **filters,
+        auto_temporal: bool = True, spread_activation: bool = True,
+        query_vec: Any | None = None, **filters,
     ) -> list[dict]:
         """Search memories and return structured results (list of dicts).
 
@@ -657,7 +658,13 @@ class MemoryEngine:
             if has_temporal_phrases(query):
                 time_params = extract_time_params(query)
                 filters.update(time_params)
-                query = strip_temporal_phrases(query)
+                stripped_query = strip_temporal_phrases(query)
+                if stripped_query != query:
+                    # A supplied vector belongs to the caller's original
+                    # query. Once temporal preprocessing changes that query,
+                    # HybridSearch must encode the effective text itself.
+                    query_vec = None
+                query = stripped_query
 
         explicit_spaces = filters.get("spaces")
 
@@ -666,7 +673,12 @@ class MemoryEngine:
             # Fetch a wider pool so the space penalty decides what SURVIVES,
             # not just the order of whatever fit in `limit` — a current-space
             # match at raw rank 11 can now outlive a penalized cross-space hit.
-            results = search.search(query, limit=limit * 3, **filters)
+            results = search.search(
+                query,
+                limit=limit * 3,
+                query_vec=query_vec,
+                **filters,
+            )
             if default_space and not explicit_spaces:
                 results = self._apply_space_scores(results, default_space)
 
@@ -748,6 +760,23 @@ class MemoryEngine:
                     self._touch_access(r["node"]["id"])
 
         return enriched
+
+    def has_searchable_preferences(self) -> bool:
+        """Return whether the applicability channel has any eligible nodes."""
+        row = self.db.conn.execute(
+            """
+            SELECT 1
+            FROM nodes
+            WHERE type = 'preference'
+              AND tier IN ('core', 'working')
+              AND (
+                  valid_until IS NULL
+                  OR valid_until > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+              )
+            LIMIT 1
+            """
+        ).fetchone()
+        return row is not None
 
     def recall_search(
         self,

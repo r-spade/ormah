@@ -542,6 +542,30 @@ class ContextBuilder:
         # sense with the session context ("and the second one?").
         effective_query = search_kwargs["query"]
 
+        # Search uses encode_query(), which may apply model-specific query
+        # prefixes and is therefore not interchangeable with the classifier's
+        # document-style prompt_vec. Cache by exact query text so the factual
+        # and preference channels share work only when their queries match.
+        query_vectors: dict[str, np.ndarray] = {}
+
+        def _query_vector(query: str) -> np.ndarray | None:
+            if query in query_vectors:
+                return query_vectors[query]
+            try:
+                hybrid_search = self.engine._get_hybrid_search()
+                if hybrid_search is None:
+                    return None
+                vector = hybrid_search.encoder.encode_query(query)
+                query_vectors[query] = vector
+                return vector
+            except Exception as e:
+                logger.warning("Failed to compute search query vector: %s", e)
+                return None
+
+        effective_query_vec = _query_vector(effective_query)
+        if effective_query_vec is not None:
+            search_kwargs["query_vec"] = effective_query_vec
+
         # Always run search — even for identity-only queries, search finds
         # location/work/study nodes that graph neighbors alone miss.
         try:
@@ -857,6 +881,7 @@ class ContextBuilder:
             preference_applicability_enabled
             and reranker_enabled
             and preference_max_nodes > 0
+            and self.engine.has_searchable_preferences()
         ):
             try:
                 from ormah.embeddings.reranker import rerank
@@ -872,6 +897,7 @@ class ContextBuilder:
                     min_relevance=0.0,
                     auto_temporal=False,
                     spread_activation=False,
+                    query_vec=_query_vector(preference_query),
                 )
                 preference_candidates = [
                     r for r in preference_candidates if r["node"]["id"] not in existing_ids

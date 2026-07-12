@@ -152,6 +152,8 @@ The preference path:
 - disables graph spreading so related non-preference nodes cannot enter the channel
 - cross-encodes candidates against an applicability-framed query
 - applies an absolute applicability gate and merges at most two results
+- skips the channel when no active core/working preference exists
+- reuses the main search's `encode_query()` vector when both channels use the exact same query
 
 This does not infer a preference mode from prompt keywords and does not alter or suppress the main factual ranking. Those constraints avoid the failure mode of the removed prompt-shape heuristic, which treated broad words such as `build`, `design`, and `style` as permission to boost all preferences and discard factual results.
 
