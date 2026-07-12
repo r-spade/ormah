@@ -243,6 +243,14 @@ class Settings(BaseSettings):
     feedback_llm_judge_enabled: bool = False
     feedback_llm_judge_min_confidence: float = 0.75
 
+    # Candidate diagnostics are high-volume. Prompt payloads are normalized
+    # separately, while stale rejected rows with no feedback references are
+    # pruned in bounded background batches. Injected rows are retained for
+    # all-time whisper health and exact feedback history.
+    whisper_log_rejected_retention_days: int = 30
+    whisper_log_cleanup_interval_hours: int = 24
+    whisper_log_cleanup_batch_size: int = 1000
+
     # Space prioritization
     space_boost_global: float = 1.0
     space_boost_other: float = 0.6
@@ -390,6 +398,17 @@ class Settings(BaseSettings):
     def _backup_retention_count_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"backup_retention_count must be >= 1, got {v}")
+        return v
+
+    @field_validator(
+        "whisper_log_rejected_retention_days",
+        "whisper_log_cleanup_interval_hours",
+        "whisper_log_cleanup_batch_size",
+    )
+    @classmethod
+    def _whisper_log_cleanup_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"whisper log cleanup settings must be >= 1, got {v}")
         return v
 
     @field_validator("core_memory_cap")

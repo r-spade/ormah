@@ -514,6 +514,7 @@ class MemoryEngine:
         *,
         session_id: str | None = None,
         space: str | None = None,
+        surface: str,
     ) -> dict[str, int]:
         """Log surfaced memories so submit_feedback can learn from them later."""
         if not node_scores:
@@ -532,26 +533,35 @@ class MemoryEngine:
         inserted: dict[str, int] = {}
         try:
             with self.db.transaction() as conn:
+                retrieval_event_id = self.db.insert_retrieval_event(
+                    conn,
+                    surface=surface,
+                    session_id=session_id or "",
+                    space=space,
+                    prompt_hash=prompt_hash,
+                    prompt_text=prompt_text,
+                    prompt_vec=prompt_vec_blob,
+                    logged_at=now_iso,
+                )
                 for candidate_node_id, score in unique_scores.items():
                     cursor = conn.execute(
                         """
                         INSERT INTO whisper_log
                             (
                                 session_id, space, prompt_hash, prompt_text, prompt_vec,
-                                node_id, score, was_injected, logged_at
+                                node_id, score, was_injected, logged_at, retrieval_event_id
                             )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, NULL, X'', ?, ?, ?, ?, ?)
                         """,
                         (
                             session_id or "",
                             space,
                             prompt_hash,
-                            prompt_text,
-                            prompt_vec_blob,
                             candidate_node_id,
                             score,
                             1,
                             now_iso,
+                            retrieval_event_id,
                         ),
                     )
                     inserted[candidate_node_id] = int(cursor.lastrowid)
@@ -593,6 +603,7 @@ class MemoryEngine:
             ],
             session_id=session_id,
             space=node.get("space"),
+            surface="recall_node",
         )
         node_for_format = dict(node)
         if resolved_node_id in whisper_log_ids:
@@ -808,6 +819,7 @@ class MemoryEngine:
                 ],
                 session_id=session_id,
                 space=default_space,
+                surface="recall_search",
             )
             results = self._attach_feedback_log_ids(results, whisper_log_ids)
             return format_search_results(results)
@@ -853,6 +865,7 @@ class MemoryEngine:
             ],
             session_id=session_id,
             space=default_space,
+            surface="recall_search",
         )
 
         enriched = self._attach_feedback_log_ids(enriched, whisper_log_ids)
@@ -2308,9 +2321,16 @@ class MemoryEngine:
         if whisper_log_id is not None:
             row = self.db.conn.execute(
                 """
-                SELECT id, node_id, prompt_vec, prompt_text, prompt_hash, session_id, space
-                FROM whisper_log
-                WHERE id = ?
+                SELECT
+                    wl.id, wl.node_id,
+                    COALESCE(re.prompt_vec, wl.prompt_vec) AS prompt_vec,
+                    COALESCE(re.prompt_text, wl.prompt_text) AS prompt_text,
+                    COALESCE(re.prompt_hash, wl.prompt_hash) AS prompt_hash,
+                    COALESCE(re.session_id, wl.session_id) AS session_id,
+                    COALESCE(re.space, wl.space) AS space
+                FROM whisper_log wl
+                LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
+                WHERE wl.id = ?
                 """,
                 (whisper_log_id,),
             ).fetchone()
@@ -2334,10 +2354,17 @@ class MemoryEngine:
 
         row = self.db.conn.execute(
             """
-            SELECT id, node_id, prompt_vec, prompt_text, prompt_hash, session_id, space
-            FROM whisper_log
-            WHERE node_id = ?
-            ORDER BY logged_at DESC, id DESC
+            SELECT
+                wl.id, wl.node_id,
+                COALESCE(re.prompt_vec, wl.prompt_vec) AS prompt_vec,
+                COALESCE(re.prompt_text, wl.prompt_text) AS prompt_text,
+                COALESCE(re.prompt_hash, wl.prompt_hash) AS prompt_hash,
+                COALESCE(re.session_id, wl.session_id) AS session_id,
+                COALESCE(re.space, wl.space) AS space
+            FROM whisper_log wl
+            LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
+            WHERE wl.node_id = ?
+            ORDER BY wl.logged_at DESC, wl.id DESC
             LIMIT 1
             """,
             (resolved_node_id,),
@@ -2348,6 +2375,22 @@ class MemoryEngine:
         return resolved_node_id, row, None
 
     def submit_feedback(
+        self,
+        node_id: str,
+        signal: int,
+        source: str = "explicit",
+        whisper_log_id: int | None = None,
+    ) -> str:
+        """Record feedback while preventing retention from deleting its event."""
+        with self.db.transaction():
+            return self._submit_feedback_locked(
+                node_id=node_id,
+                signal=signal,
+                source=source,
+                whisper_log_id=whisper_log_id,
+            )
+
+    def _submit_feedback_locked(
         self,
         node_id: str,
         signal: int,

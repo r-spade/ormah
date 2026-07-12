@@ -113,6 +113,17 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.whisper_log_cleanup import run_whisper_log_cleanup
+
+    scheduler.add_job(
+        tracked(tracker, "whisper_log_cleanup", run_whisper_log_cleanup, engine),
+        "interval",
+        hours=s.whisper_log_cleanup_interval_hours,
+        id="whisper_log_cleanup",
+        name="Whisper log cleanup",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     from ormah.backup import run_auto_backup
 
     scheduler.add_job(

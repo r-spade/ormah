@@ -311,12 +311,20 @@ class TestSubmitFeedbackBasic:
 
         assert "FastAPI" in text
         row = engine.db.conn.execute(
-            "SELECT id, session_id, prompt_text, was_injected FROM whisper_log WHERE node_id = ?",
+            """
+            SELECT wl.id, wl.session_id, wl.prompt_text, wl.prompt_vec,
+                   wl.was_injected, re.prompt_text AS event_prompt_text
+            FROM whisper_log wl
+            JOIN retrieval_events re ON re.id = wl.retrieval_event_id
+            WHERE wl.node_id = ?
+            """,
             (node_id,),
         ).fetchone()
         assert row is not None
         assert row["session_id"] == "recall-search-session"
-        assert row["prompt_text"] == "FastAPI"
+        assert row["prompt_text"] is None
+        assert row["prompt_vec"] == b""
+        assert row["event_prompt_text"] == "FastAPI"
         assert row["was_injected"] == 1
         assert f"whisper_log_id: {row['id']}" in text
 
@@ -337,12 +345,20 @@ class TestSubmitFeedbackBasic:
 
         assert "SQLite choice" in text
         row = engine.db.conn.execute(
-            "SELECT id, session_id, prompt_text, was_injected FROM whisper_log WHERE node_id = ?",
+            """
+            SELECT wl.id, wl.session_id, wl.prompt_text, wl.prompt_vec,
+                   wl.was_injected, re.prompt_text AS event_prompt_text
+            FROM whisper_log wl
+            JOIN retrieval_events re ON re.id = wl.retrieval_event_id
+            WHERE wl.node_id = ?
+            """,
             (node_id,),
         ).fetchone()
         assert row is not None
         assert row["session_id"] == "recall-node-session"
-        assert row["prompt_text"] == f"recall_node:{node_id}"
+        assert row["prompt_text"] is None
+        assert row["prompt_vec"] == b""
+        assert row["event_prompt_text"] == f"recall_node:{node_id}"
         assert row["was_injected"] == 1
         assert f"whisper_log_id: {row['id']}" in text
 

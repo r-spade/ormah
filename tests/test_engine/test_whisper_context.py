@@ -2210,7 +2210,15 @@ class TestWhisperLog:
         assert row["session_id"] == "test-session-abc"
         assert row["node_id"] == "node-log-1"
         assert row["was_injected"] == 1
-        assert row["prompt_text"] == "how does search work"
+        assert row["prompt_text"] is None
+        assert row["prompt_vec"] == b""
+        event = db.conn.execute(
+            "SELECT * FROM retrieval_events WHERE id = ?",
+            (row["retrieval_event_id"],),
+        ).fetchone()
+        assert event["surface"] == "whisper"
+        assert event["prompt_text"] == "how does search work"
+        assert len(event["prompt_vec"]) == 12
         assert row["decision_stage"] == "injected"
         assert row["retrieval_rank"] == 1
         assert row["final_rank"] == 1

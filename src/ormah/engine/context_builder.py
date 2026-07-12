@@ -81,12 +81,15 @@ def _find_review_candidate(conn, threshold: float) -> dict | None:
             """
             WITH ranked AS (
               SELECT
-                wl.node_id, wl.score, wl.session_id, wl.space, wl.prompt_text,
+                wl.node_id, wl.score, wl.session_id,
+                COALESCE(re.space, wl.space) AS space,
+                COALESCE(re.prompt_text, wl.prompt_text) AS prompt_text,
                 wl.id AS whisper_log_id,
-                wl.prompt_vec,
+                COALESCE(re.prompt_vec, wl.prompt_vec) AS prompt_vec,
                 n.title, n.content,
                 ROW_NUMBER() OVER (PARTITION BY wl.node_id ORDER BY wl.score DESC) AS rn
               FROM whisper_log wl
+              LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
               JOIN nodes n ON n.id = wl.node_id
               WHERE wl.was_injected = 0
                 AND wl.decision_stage IN ('injection_gate', 'candidate_cap', 'legacy')
@@ -265,8 +268,10 @@ class ContextBuilder:
             return True
         try:
             rows = self.graph.conn.execute(
-                "SELECT DISTINCT prompt_vec FROM whisper_log "
-                "WHERE session_id = ? AND was_injected = 1",
+                "SELECT DISTINCT COALESCE(re.prompt_vec, wl.prompt_vec) AS prompt_vec "
+                "FROM whisper_log wl "
+                "LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id "
+                "WHERE wl.session_id = ? AND wl.was_injected = 1",
                 (session_id,),
             ).fetchall()
             norm_current = float(np.linalg.norm(prompt_vec))
@@ -963,6 +968,16 @@ class ContextBuilder:
                 vec_blob = prompt_vec.astype(np.float32).tobytes()
                 injected_ids = {r["node"]["id"] for r in search_results}
                 with self.engine.db.transaction() as conn:
+                    retrieval_event_id = self.engine.db.insert_retrieval_event(
+                        conn,
+                        surface="whisper",
+                        session_id=session_id,
+                        space=space,
+                        prompt_hash=prompt_hash,
+                        prompt_text=prompt,
+                        prompt_vec=vec_blob,
+                        logged_at=now_iso,
+                    )
                     for node_id, trace in candidate_trace.items():
                         r = trace["latest"]
                         score = r.get("_pre_boost_score", r.get("score", 0.0))
@@ -972,14 +987,16 @@ class ContextBuilder:
                             "(session_id, space, prompt_hash, prompt_text, prompt_vec, "
                             "node_id, score, retrieval_score, raw_cosine, "
                             "cross_encoder_score, ce_absolute, gate_score, source, "
-                            "retrieval_rank, final_rank, decision_stage, was_injected, logged_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (session_id, space, prompt_hash, prompt, vec_blob,
+                            "retrieval_rank, final_rank, decision_stage, was_injected, logged_at, "
+                            "retrieval_event_id) "
+                            "VALUES (?, ?, ?, NULL, X'', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (session_id, space, prompt_hash,
                              node_id, score, trace["retrieval_score"],
                              r.get("raw_cosine"), r.get("cross_encoder_score"),
                              r.get("ce_absolute"), _gate_score(r), r.get("source"),
                              trace["retrieval_rank"], trace.get("final_rank"),
-                             trace["decision_stage"], was_injected, now_iso),
+                             trace["decision_stage"], was_injected, now_iso,
+                             retrieval_event_id),
                         )
                         if was_injected:
                             whisper_log_ids[node_id] = int(cursor.lastrowid)

@@ -119,6 +119,26 @@ def test_backup_retention_zero():
         _settings(backup_retention_count=0)
 
 
+def test_whisper_log_cleanup_defaults():
+    s = _settings()
+    assert s.whisper_log_rejected_retention_days == 30
+    assert s.whisper_log_cleanup_interval_hours == 24
+    assert s.whisper_log_cleanup_batch_size == 1000
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "whisper_log_rejected_retention_days",
+        "whisper_log_cleanup_interval_hours",
+        "whisper_log_cleanup_batch_size",
+    ],
+)
+def test_whisper_log_cleanup_settings_must_be_positive(field):
+    with pytest.raises(ValidationError, match="whisper log cleanup settings must be >= 1"):
+        _settings(**{field: 0})
+
+
 # --- Core cap ---
 
 def test_core_cap_zero():
