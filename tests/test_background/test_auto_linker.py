@@ -562,3 +562,47 @@ def test_k1_stops_llm_calls_at_max_edges(engine):
     with patch(_LLM_PATCH, single):
         al.run_auto_linker(engine)
     assert calls["n"] <= 2   # budget 1 -> at most the winning call + the boundary check
+
+
+def test_vectorless_node_skipped_then_heals(engine):
+    """A vectorless node must not kill the run: later nodes still get edges,
+    the watermark parks BEFORE the orphan, and once the orphan's vector lands
+    a later run advances past it (skip-then-heal)."""
+    import numpy as np
+
+    from ormah.background.auto_linker import _get_watermark, run_auto_linker
+    from ormah.embeddings.vector_store import VectorStore
+    from ormah.models.node import CreateNodeRequest
+
+    # Orphan: lowest seq above the watermark, vector deleted.
+    a_id, _ = engine.remember(
+        CreateNodeRequest(title="orphan", content="a node whose vector was lost", tags=["test"])
+    )
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (a_id,))
+
+    id_b, id_c = _create_pair(engine)  # both embedded, similar
+
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+
+    orphan_seq = engine.db.conn.execute(
+        "SELECT seq FROM nodes WHERE id = ?", (a_id,)
+    ).fetchone()["seq"]
+    verdict = json.dumps({"relationship": "supports", "reason": "same topic"})
+
+    with patch(_LLM_PATCH, return_value=verdict):
+        stats = run_auto_linker(engine)
+
+    assert len(_edges_between(engine, id_b, id_c)) >= 1  # pair linked despite orphan
+    assert stats["pairs_attempted"] >= 1
+    assert _get_watermark(engine.db.conn) < orphan_seq  # parked before the orphan
+
+    # Heal: the orphan's vector lands (backfill), next run advances past it.
+    dim = engine.settings.embedding_dim
+    VectorStore(engine.db).upsert(a_id, np.ones(dim, dtype=np.float32))
+    with patch(_LLM_PATCH, return_value=verdict):
+        run_auto_linker(engine)
+
+    assert _get_watermark(engine.db.conn) >= orphan_seq

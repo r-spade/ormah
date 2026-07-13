@@ -434,13 +434,20 @@ def run_auto_linker(engine) -> dict | None:
             text = f"{node['title'] or ''} {node['content']}".strip()
             node_vec = vec_store.get(node["id"]) if text else None
             if text and node_vec is None:
-                # Node has no vector yet (e.g. node_vectors wiped mid full_rebuild). search()
-                # would find nothing and the watermark would pass a node never checked — so
-                # leave it unresolved and let a later run reprocess it (fail-closed, same as
-                # the LLM-unavailable path). ponytail: a node that never embeds blocks the
-                # watermark forever; acceptable today, revisit if one ever stalls the cursor.
-                stopped = True
-                break
+                # Vectorless node (store mid-backfill). Don't abort the whole run —
+                # that froze the cursor for the entire store. Park the watermark here
+                # (resolved=False → never advance past it, fail-closed) but keep
+                # processing later nodes so they still get edges. A later run advances
+                # once this node's vector lands. A PERMANENTLY vectorless node parks
+                # the cursor for good — hence the WARNING (deferred: retry set
+                # decoupled from the cursor).
+                logger.warning(
+                    "auto_linker: node %s (seq %s) has no vector; watermark parked, "
+                    "continuing with later nodes",
+                    node["id"][:8], node["seq"],
+                )
+                active.append({"node": node, "resolved": False, "pending": 0, "collected": True})
+                continue
             state = {"node": node, "resolved": True, "pending": 0, "collected": False}
             active.append(state)
             if text:
