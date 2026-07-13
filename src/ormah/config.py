@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     embedding_provider: str = "local"  # "local", "ollama", "litellm"
     embedding_model: str = "BAAI/bge-base-en-v1.5"
     embedding_dim: int = 768
+    # Set to the NEW dim to authorize ONE deliberate destructive reindex of a
+    # populated vector store (embedding-model migration). Remove after the boot.
+    reindex_on_dim_change: int = 0
 
     # LLM for extraction. Disabled by default; setup can opt into cloud/local providers.
     llm_provider: str = "none"

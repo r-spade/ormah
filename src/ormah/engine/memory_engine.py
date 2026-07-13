@@ -82,7 +82,10 @@ class MemoryEngine:
         self.file_store = FileStore(settings.nodes_dir)
         self.db = Database(settings.db_path)
         self.db.init_schema()
-        self.db.init_vec_table(settings.embedding_dim)
+        self.db.init_vec_table(
+            settings.embedding_dim,
+            allow_drop=settings.reindex_on_dim_change == settings.embedding_dim,
+        )
 
         self.graph = GraphIndex(self.db)
         self.builder = IndexBuilder(self.db, self.file_store)
