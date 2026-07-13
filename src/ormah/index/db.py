@@ -518,67 +518,74 @@ class Database:
         except ImportError:
             return  # sqlite-vec not available, vector search disabled
 
-        row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='node_vectors'"
-        ).fetchone()
-        if row is not None:
-            match = re.search(r"FLOAT\[(\d+)\]", row[0] or "")
-            if match is None:
-                # Corrupt/foreign schema: fail closed — never guess-drop, and never
-                # boot into broken vector search (MATCH would fail at runtime).
-                raise RuntimeError(
-                    "node_vectors exists but its DDL has no FLOAT[dim] — "
-                    "unsupported or corrupt schema. Rows were preserved; inspect "
-                    "the table, then restore a vec0 table (or move this one aside "
-                    "and let the embedding backfill re-embed)."
-                )
-            existing_dim = int(match.group(1))
-            if existing_dim != dim:
-                count = self.conn.execute(
-                    "SELECT count(*) FROM node_vectors"
-                ).fetchone()[0]
-                if count > 0:
-                    consumed = self.conn.execute(
-                        "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
-                    ).fetchone()
-                    already_consumed = consumed is not None and consumed["value"] == str(dim)
-                    if not allow_drop:
-                        raise RuntimeError(
-                            f"Embedding dimension mismatch: configured "
-                            f"ORMAH_EMBEDDING_DIM={dim} but node_vectors holds "
-                            f"{count} vectors of dim {existing_dim}. Refusing to "
-                            f"DROP them. If this is a deliberate embedding-model "
-                            f"change, set ORMAH_REINDEX_ON_DIM_CHANGE={dim} for one "
-                            f"boot (remove it afterwards); otherwise fix "
-                            f"ORMAH_EMBEDDING_DIM — the code default is 768."
-                        )
-                    if already_consumed:
-                        raise RuntimeError(
-                            f"Embedding dimension mismatch: a reindex to dim {dim} "
-                            f"was already performed and the ORMAH_REINDEX_ON_DIM_CHANGE "
-                            f"authorization is spent. node_vectors now holds {count} "
-                            f"vectors of dim {existing_dim} — remove the stale "
-                            f"ORMAH_REINDEX_ON_DIM_CHANGE from your config. If a second "
-                            f"deliberate reindex to dim {dim} is genuinely needed, clear "
-                            f"the marker first: DELETE FROM meta WHERE "
-                            f"key='reindex_consumed_dim'."
-                        )
-                    logger.info(
-                        "Recreating vec table (%d → %d, %d vectors dropped)",
-                        existing_dim, dim, count,
+        # The whole read → decide → drop → mark → create sequence runs inside a
+        # SINGLE BEGIN IMMEDIATE. transaction() takes the write lock (via the
+        # internal RLock across threads, and via SQLite's write lock across
+        # processes), so a concurrent initializer can no longer read the marker
+        # as absent, THEN drop after another initializer already consumed it —
+        # closing the check-then-drop TOCTOU (council: codex high). A concurrent
+        # caller blocks here, then re-reads the marker itself once serialized.
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='node_vectors'"
+            ).fetchone()
+            if row is not None:
+                match = re.search(r"FLOAT\[(\d+)\]", row[0] or "")
+                if match is None:
+                    # Corrupt/foreign schema: fail closed — never guess-drop, and never
+                    # boot into broken vector search (MATCH would fail at runtime).
+                    raise RuntimeError(
+                        "node_vectors exists but its DDL has no FLOAT[dim] — "
+                        "unsupported or corrupt schema. Rows were preserved; inspect "
+                        "the table, then restore a vec0 table (or move this one aside "
+                        "and let the embedding backfill re-embed)."
                     )
-                    with self.transaction() as conn:
+                existing_dim = int(match.group(1))
+                if existing_dim != dim:
+                    count = conn.execute(
+                        "SELECT count(*) FROM node_vectors"
+                    ).fetchone()[0]
+                    if count > 0:
+                        consumed = conn.execute(
+                            "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
+                        ).fetchone()
+                        already_consumed = (
+                            consumed is not None and consumed["value"] == str(dim)
+                        )
+                        if not allow_drop:
+                            raise RuntimeError(
+                                f"Embedding dimension mismatch: configured "
+                                f"ORMAH_EMBEDDING_DIM={dim} but node_vectors holds "
+                                f"{count} vectors of dim {existing_dim}. Refusing to "
+                                f"DROP them. If this is a deliberate embedding-model "
+                                f"change, set ORMAH_REINDEX_ON_DIM_CHANGE={dim} for one "
+                                f"boot (remove it afterwards); otherwise fix "
+                                f"ORMAH_EMBEDDING_DIM — the code default is 768."
+                            )
+                        if already_consumed:
+                            raise RuntimeError(
+                                f"Embedding dimension mismatch: a reindex to dim {dim} "
+                                f"was already performed and the ORMAH_REINDEX_ON_DIM_CHANGE "
+                                f"authorization is spent. node_vectors now holds {count} "
+                                f"vectors of dim {existing_dim} — remove the stale "
+                                f"ORMAH_REINDEX_ON_DIM_CHANGE from your config. If a second "
+                                f"deliberate reindex to dim {dim} is genuinely needed, clear "
+                                f"the marker first: DELETE FROM meta WHERE "
+                                f"key='reindex_consumed_dim'."
+                            )
+                        logger.info(
+                            "Recreating vec table (%d → %d, %d vectors dropped)",
+                            existing_dim, dim, count,
+                        )
                         conn.execute("DROP TABLE node_vectors")
                         conn.execute(
                             "INSERT OR REPLACE INTO meta (key, value) VALUES "
                             "('reindex_consumed_dim', ?)",
                             (str(dim),),
                         )
-                else:
-                    with self.transaction() as conn:
+                    else:
                         conn.execute("DROP TABLE node_vectors")
 
-        with self.transaction() as conn:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS node_vectors USING vec0("
                 f"id TEXT PRIMARY KEY, embedding FLOAT[{dim}])"
