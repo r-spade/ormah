@@ -84,3 +84,53 @@ def test_startup_wiring_respects_reindex_flag(settings):
     eng2 = MemoryEngine(settings)
     assert eng2.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0] == 0
     eng2.db.close()
+
+
+def test_authorization_is_one_shot(engine):
+    """A consumed reindex authorization must not silently re-authorize a second
+    destructive drop — the stale flag left in .env would otherwise reopen the
+    data-loss path. (council: codex high)"""
+    import numpy as np
+
+    from ormah.embeddings.vector_store import VectorStore
+
+    dim = engine.settings.embedding_dim
+    VectorStore(engine.db).upsert("n1", np.ones(dim, dtype=np.float32))
+
+    # First authorized migration: allowed, drops, and consumes the authorization.
+    engine.db.init_vec_table(dim + 256, allow_drop=True)
+    assert _count(engine) == 0
+    marker = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
+    ).fetchone()
+    assert marker["value"] == str(dim + 256)
+
+    # Store gets repopulated at the new dim, then a DIFFERENT dim shows up while the
+    # stale flag still authorizes dim+256. The spent authorization must NOT allow it.
+    VectorStore(engine.db).upsert("n2", np.ones(dim + 256, dtype=np.float32))
+    with engine.db.transaction() as conn:
+        conn.execute("DROP TABLE node_vectors")
+        conn.execute(
+            f"CREATE VIRTUAL TABLE node_vectors USING vec0(id TEXT PRIMARY KEY, "
+            f"embedding FLOAT[{dim}])"
+        )
+    VectorStore(engine.db).upsert("n3", np.ones(dim, dtype=np.float32))
+    assert _count(engine) == 1
+
+    with pytest.raises(RuntimeError, match="already"):
+        engine.db.init_vec_table(dim + 256, allow_drop=True)  # stale flag, spent auth
+
+    assert _count(engine) == 1  # nothing dropped
+
+
+def test_empty_table_does_not_consume_authorization(engine):
+    """An empty table is recreated freely and must not burn the one-shot token."""
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    engine.db.init_vec_table(engine.settings.embedding_dim + 256)  # no allow_drop needed
+
+    marker = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
+    ).fetchone()
+    assert marker is None  # authorization untouched

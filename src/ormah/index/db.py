@@ -537,22 +537,46 @@ class Database:
                 count = self.conn.execute(
                     "SELECT count(*) FROM node_vectors"
                 ).fetchone()[0]
-                if count > 0 and not allow_drop:
-                    raise RuntimeError(
-                        f"Embedding dimension mismatch: configured "
-                        f"ORMAH_EMBEDDING_DIM={dim} but node_vectors holds "
-                        f"{count} vectors of dim {existing_dim}. Refusing to "
-                        f"DROP them. If this is a deliberate embedding-model "
-                        f"change, set ORMAH_REINDEX_ON_DIM_CHANGE={dim} for one "
-                        f"boot (remove it afterwards); otherwise fix "
-                        f"ORMAH_EMBEDDING_DIM — the code default is 768."
+                if count > 0:
+                    consumed = self.conn.execute(
+                        "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
+                    ).fetchone()
+                    already_consumed = consumed is not None and consumed["value"] == str(dim)
+                    if not allow_drop:
+                        raise RuntimeError(
+                            f"Embedding dimension mismatch: configured "
+                            f"ORMAH_EMBEDDING_DIM={dim} but node_vectors holds "
+                            f"{count} vectors of dim {existing_dim}. Refusing to "
+                            f"DROP them. If this is a deliberate embedding-model "
+                            f"change, set ORMAH_REINDEX_ON_DIM_CHANGE={dim} for one "
+                            f"boot (remove it afterwards); otherwise fix "
+                            f"ORMAH_EMBEDDING_DIM — the code default is 768."
+                        )
+                    if already_consumed:
+                        raise RuntimeError(
+                            f"Embedding dimension mismatch: a reindex to dim {dim} "
+                            f"was already performed and the ORMAH_REINDEX_ON_DIM_CHANGE "
+                            f"authorization is spent. node_vectors now holds {count} "
+                            f"vectors of dim {existing_dim} — remove the stale "
+                            f"ORMAH_REINDEX_ON_DIM_CHANGE from your config. If a second "
+                            f"deliberate reindex to dim {dim} is genuinely needed, clear "
+                            f"the marker first: DELETE FROM meta WHERE "
+                            f"key='reindex_consumed_dim'."
+                        )
+                    logger.info(
+                        "Recreating vec table (%d → %d, %d vectors dropped)",
+                        existing_dim, dim, count,
                     )
-                logger.info(
-                    "Recreating vec table (%d → %d, %d vectors dropped)",
-                    existing_dim, dim, count,
-                )
-                with self.transaction() as conn:
-                    conn.execute("DROP TABLE node_vectors")
+                    with self.transaction() as conn:
+                        conn.execute("DROP TABLE node_vectors")
+                        conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                            "('reindex_consumed_dim', ?)",
+                            (str(dim),),
+                        )
+                else:
+                    with self.transaction() as conn:
+                        conn.execute("DROP TABLE node_vectors")
 
         with self.transaction() as conn:
             conn.execute(
