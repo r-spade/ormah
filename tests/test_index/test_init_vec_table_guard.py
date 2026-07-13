@@ -101,7 +101,7 @@ def test_authorization_is_one_shot(engine):
     engine.db.init_vec_table(dim + 256, allow_drop=True)
     assert _count(engine) == 0
     marker = engine.db.conn.execute(
-        "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
+        "SELECT value FROM meta WHERE key = 'reindex_consumed_dims'"
     ).fetchone()
     assert marker["value"] == str(dim + 256)
 
@@ -131,7 +131,7 @@ def test_empty_table_does_not_consume_authorization(engine):
     engine.db.init_vec_table(engine.settings.embedding_dim + 256)  # no allow_drop needed
 
     marker = engine.db.conn.execute(
-        "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
+        "SELECT value FROM meta WHERE key = 'reindex_consumed_dims'"
     ).fetchone()
     assert marker is None  # authorization untouched
 
@@ -213,7 +213,37 @@ def test_concurrent_init_vec_table_race_consumes_authorization_once(engine):
     )
 
     marker = engine.db.conn.execute(
-        "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
+        "SELECT value FROM meta WHERE key = 'reindex_consumed_dims'"
     ).fetchone()
     assert marker["value"] == str(new_dim)  # written exactly once
     assert _count(engine) == 0  # exactly one drop+recreate, not two
+
+
+def test_consumed_authorization_survives_a_later_migration(engine):
+    """The consumed-marker must accumulate. A later migration must not erase the
+    record of an earlier consumption, or the spent token becomes valid again and
+    silently drops a populated store. (council: codex high)"""
+    import numpy as np
+
+    from ormah.embeddings.vector_store import VectorStore
+
+    d1 = engine.settings.embedding_dim          # starting dim
+    d2 = d1 + 256
+    d3 = d1 + 512
+
+    # 1) Populated store at d1. Authorized migration d1 -> d2 consumes the d2 token.
+    VectorStore(engine.db).upsert("a", np.ones(d1, dtype=np.float32))
+    engine.db.init_vec_table(d2, allow_drop=True)
+
+    # 2) Repopulate at d2, then a second authorized migration d2 -> d3 consumes d3.
+    VectorStore(engine.db).upsert("b", np.ones(d2, dtype=np.float32))
+    engine.db.init_vec_table(d3, allow_drop=True)
+
+    # 3) Repopulate at d3. Now a STALE flag re-offers the ALREADY-SPENT d2 token.
+    VectorStore(engine.db).upsert("c", np.ones(d3, dtype=np.float32))
+    assert _count(engine) == 1
+
+    with pytest.raises(RuntimeError, match="already"):
+        engine.db.init_vec_table(d2, allow_drop=True)
+
+    assert _count(engine) == 1  # the populated d3 store was NOT dropped

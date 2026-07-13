@@ -547,11 +547,14 @@ class Database:
                     ).fetchone()[0]
                     if count > 0:
                         consumed = conn.execute(
-                            "SELECT value FROM meta WHERE key = 'reindex_consumed_dim'"
+                            "SELECT value FROM meta WHERE key = 'reindex_consumed_dims'"
                         ).fetchone()
-                        already_consumed = (
-                            consumed is not None and consumed["value"] == str(dim)
+                        consumed_dims = (
+                            set(consumed["value"].split(","))
+                            if consumed is not None
+                            else set()
                         )
+                        already_consumed = str(dim) in consumed_dims
                         if not allow_drop:
                             raise RuntimeError(
                                 f"Embedding dimension mismatch: configured "
@@ -571,17 +574,19 @@ class Database:
                                 f"ORMAH_REINDEX_ON_DIM_CHANGE from your config. If a second "
                                 f"deliberate reindex to dim {dim} is genuinely needed, clear "
                                 f"the marker first: DELETE FROM meta WHERE "
-                                f"key='reindex_consumed_dim'."
+                                f"key='reindex_consumed_dims' (or remove {dim} from its "
+                                f"comma-separated value)."
                             )
                         logger.info(
                             "Recreating vec table (%d → %d, %d vectors dropped)",
                             existing_dim, dim, count,
                         )
                         conn.execute("DROP TABLE node_vectors")
+                        consumed_dims.add(str(dim))
                         conn.execute(
                             "INSERT OR REPLACE INTO meta (key, value) VALUES "
-                            "('reindex_consumed_dim', ?)",
-                            (str(dim),),
+                            "('reindex_consumed_dims', ?)",
+                            (",".join(sorted(consumed_dims)),),
                         )
                     else:
                         conn.execute("DROP TABLE node_vectors")
