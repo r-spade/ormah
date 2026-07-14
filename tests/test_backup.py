@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,6 +69,22 @@ def test_retention_keeps_latest_ten_backups(tmp_path):
     assert backups[-1].name == "memory_2026-04-26_20-00-02"
     assert not (backup_dir / "memory_2026-04-26_20-00-00").exists()
     assert not (backup_dir / "memory_2026-04-26_20-00-01").exists()
+
+
+def test_concurrent_backup_creates_use_distinct_atomic_directories(tmp_path):
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    _save_node(memory_dir, "Memory", "Content")
+    service = _service(memory_dir, backup_dir)
+    created_at = datetime(2026, 4, 26, 20, 0, 0, tzinfo=timezone.utc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        backups = list(pool.map(lambda _: service.create(now=created_at), range(2)))
+
+    assert {backup.name for backup in backups} == {
+        "memory_2026-04-26_20-00-00",
+        "memory_2026-04-26_20-00-00_01",
+    }
 
 
 def test_restore_replaces_memory_files_and_rebuilds_index(tmp_path):

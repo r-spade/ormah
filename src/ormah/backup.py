@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 import re
 import shutil
+import threading
 
 from ormah.index.builder import IndexBuilder
 from ormah.index.db import Database
@@ -24,6 +25,7 @@ BACKUP_NAME_RE = re.compile(
 )
 MANIFEST_NAME = "backup.json"
 SOURCE_DIRS = ("nodes", "deleted")
+_BACKUP_CREATE_LOCK = threading.RLock()
 
 
 class BackupError(RuntimeError):
@@ -142,6 +144,17 @@ class BackupService:
         now: datetime | None = None,
         prune: bool = True,
     ) -> BackupInfo:
+        """Create a timestamped backup, serialized across in-process jobs."""
+        with _BACKUP_CREATE_LOCK:
+            return self._create(reason=reason, now=now, prune=prune)
+
+    def _create(
+        self,
+        *,
+        reason: str = "manual",
+        now: datetime | None = None,
+        prune: bool = True,
+    ) -> BackupInfo:
         """Create a timestamped backup of source-of-truth memory files."""
         if not self.memory_dir.exists():
             raise BackupError(f"Memory directory not found: {self.memory_dir}")
@@ -177,6 +190,7 @@ class BackupService:
                     "index.db-shm",
                     "index.db-wal",
                     ".env",
+                    ".store_id",
                     "logs",
                     "model_cache",
                 ],

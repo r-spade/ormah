@@ -86,6 +86,56 @@ def test_format_timeout_error_for_maintenance_is_explicit():
 
 
 @pytest.mark.asyncio
+async def test_dispatch_submit_feedback_includes_whisper_log_id(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        is_success = True
+        text = "{}"
+        request = MagicMock()
+
+        def json(self):
+            return {"text": "Feedback recorded"}
+
+    class _FakeAsyncClient:
+        def __init__(self, *, base_url, timeout):
+            captured["base_url"] = base_url
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, path, json):
+            captured["path"] = path
+            captured["json"] = json
+            return _FakeResponse()
+
+    monkeypatch.setattr(mcp_adapter.httpx, "AsyncClient", _FakeAsyncClient)
+
+    text = await mcp_adapter._dispatch(
+        "http://localhost:8787",
+        "submit_feedback",
+        {
+            "node_id": "node-1",
+            "signal": 1,
+            "source": "implicit",
+            "whisper_log_id": 123,
+        },
+    )
+
+    assert text == "Feedback recorded"
+    assert captured["path"] == "/agent/feedback"
+    assert captured["json"] == {
+        "node_id": "node-1",
+        "signal": 1,
+        "source": "implicit",
+        "whisper_log_id": 123,
+    }
+
+
+@pytest.mark.asyncio
 async def test_dispatch_polls_until_phase1_batches_are_ready(monkeypatch):
     responses = [
         {"status": "running_phase1", "job_id": "job-1"},

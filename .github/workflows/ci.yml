@@ -10,13 +10,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
       - name: Install
         run: uv sync --extra dev
       - name: Run tests
-        run: uv run pytest tests/ -q
+        run: |
+          monitor_disk() {
+            while true; do
+              echo "::group::Disk usage $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              df -h
+              df -i
+              (du -x -h -d 2 \
+                "$GITHUB_WORKSPACE" \
+                "$RUNNER_TEMP" \
+                "$UV_CACHE_DIR" \
+                "$HOME/.local/share/ormah" \
+                "$HOME/.cache" \
+                /tmp \
+                .venv 2>/dev/null || true) | sort -hr | head -100
+              echo "::endgroup::"
+              sleep 120
+            done
+          }
+
+          monitor_disk &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+
+          uv run pytest tests/ -vv --durations=25
+      - name: Report disk usage
+        if: always()
+        run: |
+          df -h
+          (du -h -d 2 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$HOME/.cache/uv" .venv 2>/dev/null || true) | sort -hr | head -100
 
   lint:
     runs-on: ubuntu-latest

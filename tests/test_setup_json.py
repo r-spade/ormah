@@ -7,6 +7,12 @@ from unittest.mock import patch
 import ormah.setup as setup
 
 
+def set_detected(monkeypatch, *agent_ids: str) -> None:
+    detected = set(agent_ids)
+    for agent in setup.AGENT_REGISTRY:
+        monkeypatch.setattr(agent, "detect_fn", lambda agent_id=agent.id: agent_id in detected)
+
+
 def test_detect_clients_none(tmp_path):
     with (
         patch("ormah.setup._find_binary", return_value=None),
@@ -14,7 +20,12 @@ def test_detect_clients_none(tmp_path):
         patch("platform.system", return_value="Darwin"),
     ):
         d = setup.detect_clients()
-    assert d == {"claude_code": False, "codex": False, "claude_desktop": False}
+    assert d == {
+        "claude_code": False,
+        "codex": False,
+        "claude_desktop": False,
+        "pi": False,
+    }
 
 
 def test_detect_clients_claude_code(tmp_path):
@@ -43,10 +54,7 @@ def test_run_setup_json_wires_detected(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
     monkeypatch.setattr(setup, "_preload_local_models", lambda: None)
-    # Drive detection via the registry's detect_fn (not detect_clients)
-    monkeypatch.setattr(setup.AGENT_REGISTRY[0], "detect_fn", lambda: True)   # claude_code
-    monkeypatch.setattr(setup.AGENT_REGISTRY[1], "detect_fn", lambda: False)  # codex
-    monkeypatch.setattr(setup.AGENT_REGISTRY[2], "detect_fn", lambda: False)  # claude_desktop
+    set_detected(monkeypatch, "claude_code")
     for name in (
         "configure_claude_hooks", "configure_claude_code_mcp",
         "install_claude_md", "install_claude_agents", "install_claude_commands",
@@ -65,9 +73,7 @@ def test_run_setup_json_wires_detected(monkeypatch):
 def test_run_setup_json_captures_errors(monkeypatch):
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
     monkeypatch.setattr(setup, "_preload_local_models", lambda: None)
-    monkeypatch.setattr(setup.AGENT_REGISTRY[0], "detect_fn", lambda: True)   # claude_code
-    monkeypatch.setattr(setup.AGENT_REGISTRY[1], "detect_fn", lambda: False)  # codex
-    monkeypatch.setattr(setup.AGENT_REGISTRY[2], "detect_fn", lambda: False)  # claude_desktop
+    set_detected(monkeypatch, "claude_code")
 
     def boom(*a, **k):
         raise RuntimeError("nope")
@@ -85,6 +91,21 @@ def test_run_setup_json_captures_errors(monkeypatch):
     assert "claude_code" in result["errors"]
     assert result["warnings"] == {}
     assert "RuntimeError" in result["errors"]["claude_code"]
+
+
+def test_run_setup_json_wires_pi_from_registry(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
+    monkeypatch.setattr(setup, "_preload_local_models", lambda: None)
+    set_detected(monkeypatch, "pi")
+    monkeypatch.setattr(setup._get_agent("pi"), "wire_fn", lambda: calls.append("pi"))
+
+    result = setup.run_setup_json()
+
+    assert result["detected"] == ["pi"]
+    assert result["wired"] == ["pi"]
+    assert result["errors"] == {}
+    assert calls == ["pi"]
 
 
 def test_run_setup_json_preloads_models_and_keeps_stdout_clean(monkeypatch, capsys):

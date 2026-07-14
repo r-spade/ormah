@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 
 from ormah.models.node import MemoryNode, Tier
 
@@ -26,7 +25,7 @@ class TierManager:
             return False
 
         node.tier = target_tier
-        node.updated = datetime.now(timezone.utc)
+        node.touch_updated()
         return True
 
     def demote(self, node: MemoryNode, target_tier: Tier) -> bool:
@@ -39,7 +38,7 @@ class TierManager:
             return False
 
         node.tier = target_tier
-        node.updated = datetime.now(timezone.utc)
+        node.touch_updated()
         return True
 
     def enforce_core_cap(

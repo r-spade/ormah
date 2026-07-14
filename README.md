@@ -65,10 +65,12 @@ One command gets you a working local Ormah runtime with setup for supported clie
 ### Claude Code Plugin
 
 1. Add the marketplace and install the plugin:
+
    ```
    /plugin marketplace add r-spade/ormah
    /plugin install ormah@ormah
    ```
+
 2. Reload: `/reload-plugins`
 3. Run `/ormah:setup`
 4. Check that the Ormah MCP server is enabled via `/mcp` — if not, enable it there
@@ -80,7 +82,7 @@ Ormah is agent-agnostic by design. It can be wired into any agent that exposes t
 1. Start the Ormah server and install auto-start
 2. Preload the local models used for search and whisper retrieval
 3. Detect supported clients and wire them up automatically
-4. Offer agent-backed maintenance when Claude Code or Codex are available
+4. Offer agent-backed maintenance when Claude Code, Codex, or Pi are available
 5. Offer transcript backfill to help bootstrap memory from earlier sessions
 
 Today, setup can wire up:
@@ -88,6 +90,7 @@ Today, setup can wire up:
 - Claude Code
 - Codex
 - Claude Desktop (MCP)
+- Pi
 
 Local search, embeddings, storage, the graph UI, and whisper retrieval do not require an API key. If you want Ormah's LLM-backed features to run independently of your agent, setup can opt into a provider explicitly. Ormah stores only provider policy in `~/.config/ormah/.env`; it does not copy API key values into its config. Local Ollama generation uses a configurable `ORMAH_LLM_NUM_PREDICT` token budget.
 
@@ -98,6 +101,8 @@ Local search, embeddings, storage, the graph UI, and whisper retrieval do not re
 Ormah supports both deliberate recall and involuntary recall.
 
 When an agent knows it needs something, it can explicitly search memory. But memory should not always wait to be asked. Ormah is built to whisper the right memory at the right time, before the next prompt, so the agent starts with context instead of having to go looking for it.
+
+Whisper evaluates standing preferences through a separate applicability path. This lets a rule govern a task even when it does not read like a passage that directly answers the prompt, without allowing preference guesses to suppress ordinary factual retrieval.
 
 Whisper feedback can learn from transcript files after they stop changing: a local heuristic records clear usage for free, and an optional LLM judge can classify ambiguous turns into positive, negative, or uncertain retrieval signals.
 
@@ -126,6 +131,61 @@ Memories should be hard to lose.
 Ormah can create timestamped local backups of the source-of-truth memory files and keeps the latest 10 by default. Backups include active and deleted memory nodes, but exclude derived indexes, logs, config, and API keys. When memory nodes exist, the server checks for a due backup in the background. Manual workflows are available through `ormah backup create`, `ormah backup list`, `ormah backup status`, and `ormah backup restore`.
 
 Read more: [Configuration Reference](https://www.ormah.me/docs/operations/configuration-reference)
+
+### Cloud Account
+
+Sign in with an emailed one-time code using `ormah account login`. Use
+`ormah account status` to inspect the cached paid-tier entitlement and
+`ormah account logout` to revoke this device token and remove local account
+credentials. Cloud entitlement checks tolerate temporary outages; they never
+gate local backups or cloud downloads.
+
+### Cloud Backup (Paid)
+
+Ormah can encrypt local memory backups on your machine and upload only the
+ciphertext to Ormah Cloud. Sign in, initialize the store key, and enable the
+scheduled uploader:
+
+```bash
+ormah account login
+ormah cloud init
+# Add ORMAH_CLOUD_BACKUP_ENABLED=true to ~/.config/ormah/.env
+ormah backup status
+```
+
+The recovery kit written by `ormah cloud init` contains every identity needed
+to decrypt current and pre-rotation snapshots, plus the store ID that locates
+them. Keep it offline and separate from the machine and cloud account it
+protects. Anyone with the kit can read the backups; without it, nobody can,
+including Ormah.
+
+`ormah uninstall` removes local data and account configuration, but it always
+preserves `~/.config/ormah/cloud.key` and
+`~/.config/ormah/ormah-recovery-kit.md`. Before deleting anything, uninstall
+verifies that the kit contains the current encryption identities and store ID,
+and safely refreshes a missing or stale kit when the local key and store ID are
+available. If complete recovery cannot be guaranteed, uninstall stops without
+removing data or integrations. Deleting the preserved files manually can make
+encrypted cloud backups permanently unreadable.
+
+Restore on a new machine with:
+
+```bash
+ormah account login
+ormah cloud init --import-key /path/to/ormah-recovery-kit.md
+ormah backup restore --cloud --yes
+```
+
+Cloud downloads remain available when a paid entitlement expires. The restore
+command verifies the encrypted bundle manifest and every file hash before it
+delegates to the normal local restore path. A weekly background job also
+downloads the latest committed snapshot, rebuilds a scratch index, and probes
+search without touching the live memory directory. `ormah backup status` and
+the admin panel report the last snapshot proven restorable.
+
+The hosted service never receives key material, plaintext, or blob bytes. It
+stores account and snapshot metadata and issues short-lived object-store URLs;
+encryption, decryption, hashing, upload, and restore all happen on the client.
 
 ### Agent-Agnostic Surfaces
 
@@ -158,6 +218,7 @@ Ormah is agent-agnostic, but it already has first-class integrations for:
 - Claude Code — whisper hooks, MCP, transcript backfill, maintenance agent
 - Codex — whisper hooks, MCP, maintenance agent
 - Claude Desktop (macOS) — MCP
+- Pi — whisper inject, memory tools, transcript capture, maintenance agent (install with `pi install npm:ormah-pi`)
 
 It can also be used through:
 

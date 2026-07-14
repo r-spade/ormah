@@ -76,8 +76,28 @@ def _load_prompt_groups(conn: sqlite3.Connection) -> list[dict]:
         ).fetchall()
     }
 
-    rows = conn.execute(
+    has_events = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retrieval_events'"
+    ).fetchone() is not None
+    if has_events:
+        rows_sql = """
+        SELECT
+               wl.session_id, wl.prompt_hash,
+               COALESCE(re.prompt_text, wl.prompt_text) AS prompt_text,
+               COALESCE(re.space, wl.space) AS space,
+               wl.node_id,
+               MAX(wl.score) AS score, MAX(wl.was_injected) AS was_injected,
+               MAX(wl.logged_at) AS logged_at
+        FROM whisper_log wl
+        LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
+        WHERE COALESCE(re.prompt_text, wl.prompt_text) IS NOT NULL
+          AND TRIM(COALESCE(re.prompt_text, wl.prompt_text)) != ''
+        GROUP BY wl.session_id, wl.prompt_hash, wl.node_id
         """
+    else:
+        # Read-only mining can target a DB that has not yet been opened by the
+        # upgraded server, so retain the legacy query until migration runs.
+        rows_sql = """
         SELECT session_id, prompt_hash, prompt_text, space, node_id,
                MAX(score) AS score, MAX(was_injected) AS was_injected,
                MAX(logged_at) AS logged_at
@@ -85,7 +105,7 @@ def _load_prompt_groups(conn: sqlite3.Connection) -> list[dict]:
         WHERE prompt_text IS NOT NULL AND TRIM(prompt_text) != ''
         GROUP BY session_id, prompt_hash, node_id
         """
-    ).fetchall()
+    rows = conn.execute(rows_sql).fetchall()
     groups: dict[tuple[str, str], dict] = {}
     for r in rows:
         key = (r["session_id"], r["prompt_hash"])

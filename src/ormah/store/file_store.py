@@ -80,10 +80,23 @@ class FileStore:
         return True
 
     def soft_delete(self, node_id: str) -> bool:
-        """Move a node file to the deleted/ directory. Returns True if moved."""
+        """Move a node file to the deleted/ directory, stamping `deleted_at`
+        into its frontmatter first so tombstones carry their deletion time
+        (sync merge ordering depends on it). Returns True if moved.
+        """
         path = self._find_file(node_id)
         if path is None:
             return False
+        try:
+            node = self._load_path(path)
+            node.deleted_at = datetime.now(timezone.utc)
+            # save() writes atomically (tmp + os.replace) onto the existing
+            # path, so an interruption can never truncate the live node file.
+            self.save(node)
+        except Exception:
+            logger.warning(
+                "soft_delete: could not stamp deleted_at on %s; moving as-is", path
+            )
         deleted_dir = self.nodes_dir.parent / "deleted"
         deleted_dir.mkdir(parents=True, exist_ok=True)
         dest = deleted_dir / path.name

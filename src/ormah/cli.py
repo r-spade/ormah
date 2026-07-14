@@ -8,8 +8,12 @@ Usage:
     ormah setup             One-shot setup (hooks, MCP, server)
     ormah backup create     Create a local memory backup
     ormah backup restore    Restore a local memory backup
+    ormah account login     Sign in to Ormah Cloud
+    ormah account status    Show cached account entitlement status
+    ormah account logout    Revoke this device token and sign out
     ormah claude-md install Install shared Ormah guidance into CLAUDE.md
-    ormah uninstall         Remove all ormah integrations and data
+    ormah pi-md install     Install shared Ormah guidance into Pi AGENTS.md
+    ormah uninstall         Remove integrations and local data; preserve cloud recovery files
     ormah mcp               Run MCP stdio server
     ormah recall <query>    Search memories
     ormah remember <text>   Store a memory
@@ -200,6 +204,12 @@ def _cmd_claude_md_install(args):
     install_claude_md(scope=args.scope, cwd=Path.cwd())
 
 
+def _cmd_pi_md_install(args):
+    from ormah.setup import install_pi_md
+
+    install_pi_md(scope=args.scope, cwd=Path.cwd())
+
+
 def _format_bytes(size_bytes: int) -> str:
     units = ["B", "KB", "MB", "GB"]
     value = float(size_bytes)
@@ -223,6 +233,143 @@ def _backup_service():
     from ormah.config import settings
 
     return service_from_settings(settings)
+
+
+def _cloud_client():
+    from ormah.cloud.client import client_from_settings
+    from ormah.config import settings
+
+    return client_from_settings(settings)
+
+
+def _print_account_error(message: str) -> None:
+    from ormah.console import fail
+
+    fail(message)
+    sys.exit(1)
+
+
+def _format_cache_age(seconds: int | None) -> str:
+    if seconds is None:
+        return "none"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _format_iso_time(value: str | None) -> str:
+    if value is None:
+        return "never"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return _format_backup_time(parsed)
+
+
+def _cmd_account_login(args):
+    from ormah.cloud.client import (
+        CloudError,
+        get_device_name,
+        get_or_create_device_id,
+        persist_account_credentials,
+    )
+    from ormah.cloud.entitlements import refresh_entitlements, status_from_cache
+    from ormah.config import settings
+    from ormah.console import info, ok, warn
+
+    email = (args.email or input("Email: ")).strip().lower()
+    if not email:
+        _print_account_error("Email is required.")
+
+    client = None
+    try:
+        client = _cloud_client()
+        client.request_code(email)
+        info(f"Sign-in code requested for {email}")
+        code = (args.code or input("Sign-in code: ")).strip()
+        device_id = get_or_create_device_id()
+        device_name = get_device_name()
+        token = client.verify_code(email, code, device_id, device_name)
+        persist_account_credentials(token, email)
+        try:
+            cache = refresh_entitlements(settings, client=client)
+        except Exception:
+            cache = None
+    except (CloudError, OSError) as exc:
+        _print_account_error(str(exc))
+    finally:
+        close = getattr(client, "close", None) if client is not None else None
+        if close:
+            close()
+
+    ok(f"Signed in as {email}")
+    if cache is None:
+        warn("Entitlement status is unavailable while offline; it will refresh later.")
+        return
+    print(f"Plan status: {cache.plan_status or 'unknown'}")
+    print(f"Cloud backup entitlement: {status_from_cache(cache).value}")
+
+
+def _cmd_account_status(args):
+    from ormah.cloud.client import get_device_name
+    from ormah.cloud.entitlements import check_entitlement, load_entitlement_cache
+    from ormah.config import settings
+
+    state = check_entitlement(settings)
+    cache = load_entitlement_cache()
+    age_seconds = int(cache.age().total_seconds()) if cache is not None else None
+    result = {
+        "cache_age_seconds": age_seconds,
+        "device_name": get_device_name(),
+        "email": settings.account_email,
+        "entitlement": state.value,
+        "plan_status": cache.plan_status if cache is not None else None,
+    }
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    print(f"Account: {settings.account_email or 'not signed in'}")
+    print(f"Entitlement: {state.value}")
+    print(f"Plan status: {result['plan_status'] or 'unknown'}")
+    print(f"Cache age: {_format_cache_age(age_seconds)}")
+    print(f"Device: {result['device_name']}")
+
+
+def _cmd_account_logout(args):
+    from ormah.cloud.client import remove_account_credentials
+    from ormah.cloud.entitlements import clear_entitlement_cache
+    from ormah.config import settings
+    from ormah.console import info, ok, warn
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            _print_account_error("Logout needs confirmation. Re-run with --yes in non-interactive shells.")
+        answer = input("Revoke this device token and sign out? (y/N) ").strip().lower()
+        if answer not in {"y", "yes"}:
+            info("Logout cancelled")
+            return
+
+    if settings.account_token:
+        client = None
+        try:
+            client = _cloud_client()
+            client.revoke_token()
+        except Exception as exc:
+            warn(f"Could not revoke the server token while offline: {exc}")
+        finally:
+            close = getattr(client, "close", None) if client is not None else None
+            if close:
+                close()
+
+    remove_account_credentials()
+    clear_entitlement_cache()
+    ok("Signed out locally")
 
 
 def _print_backup_error(message: str) -> None:
@@ -281,12 +428,14 @@ def _cmd_backup_list(args):
 
 
 def _cmd_backup_status(args):
+    from ormah.cloud.state import cloud_status_payload
     from ormah.config import settings
 
     service = _backup_service()
     latest = service.latest()
     has_memory = service.has_backupable_memory()
     due = has_memory and service.backup_due(interval_hours=settings.backup_interval_hours)
+    cloud = cloud_status_payload(settings)
     status = {
         "enabled": settings.backup_enabled,
         "backup_dir": str(settings.backup_dir),
@@ -295,6 +444,7 @@ def _cmd_backup_status(args):
         "has_backupable_memory": has_memory,
         "due": due,
         "latest": _backup_to_dict(latest) if latest else None,
+        "cloud": cloud,
     }
 
     if args.json:
@@ -313,27 +463,65 @@ def _cmd_backup_status(args):
     else:
         print(f"Backup due now: {'yes' if due else 'no'}")
 
+    print("\nCloud backup:")
+    print(f"  Automatic uploads: {'enabled' if cloud['enabled'] else 'disabled'}")
+    print(f"  Entitlement: {cloud['entitlement']}")
+    if cloud["last_upload_snapshot_id"]:
+        age = _format_cache_age(cloud["last_upload_age_seconds"])
+        print(f"  Last upload: {cloud['last_upload_snapshot_id']} ({age} ago)")
+    else:
+        print("  Last upload: never")
+    if cloud["last_verify_ok"] is True:
+        print(f"  Last verified restorable: ✓ {_format_iso_time(cloud['last_verify_at'])}")
+    elif cloud["last_verify_ok"] is False:
+        reason = f" — {cloud['last_verify_error']}" if cloud["last_verify_error"] else ""
+        print(f"  Last verified restorable: ✗ {_format_iso_time(cloud['last_verify_at'])}{reason}")
+    else:
+        print("  Last verified restorable: not yet verified")
+    for warning in cloud["warnings"]:
+        print(f"  WARNING: {warning}")
+
 
 def _cmd_backup_restore(args):
     from ormah.backup import BackupError
+    from ormah.cloud.restore import CloudRestoreError, restore_cloud_snapshot
+    from ormah.config import settings
     from ormah.console import info, ok, warn
     from ormah.server_manager import is_server_running
 
     if is_server_running():
         _print_backup_error("Stop the Ormah server before restoring: ormah server stop")
 
+    cloud_requested = args.cloud is not None
+    if cloud_requested and args.backup:
+        _print_backup_error("Choose either a local backup name or --cloud, not both.")
+    if not cloud_requested and not args.backup:
+        _print_backup_error("Provide a local backup name or use --cloud [SNAPSHOT_ID].")
+
+    restore_label = (
+        f"cloud snapshot {args.cloud}" if args.cloud else "latest committed cloud snapshot"
+    ) if cloud_requested else f"backup {args.backup}"
+
     if not args.yes:
         if not sys.stdin.isatty():
             _print_backup_error("Restore needs confirmation. Re-run with --yes in non-interactive shells.")
         warn("Restore overwrites current memory files.")
-        answer = input(f"Restore backup {args.backup}? (y/N) ").strip().lower()
+        answer = input(f"Restore {restore_label}? (y/N) ").strip().lower()
         if answer not in {"y", "yes"}:
             info("Restore cancelled")
             return
 
     try:
-        result = _backup_service().restore(args.backup, rebuild_index=not args.no_rebuild)
-    except BackupError as exc:
+        if cloud_requested:
+            cloud_result = restore_cloud_snapshot(
+                settings,
+                args.cloud or None,
+                rebuild_index=not args.no_rebuild,
+            )
+            result = cloud_result.restore
+        else:
+            result = _backup_service().restore(args.backup, rebuild_index=not args.no_rebuild)
+    except (BackupError, CloudRestoreError) as exc:
         _print_backup_error(str(exc))
 
     ok(f"Restored backup: {result.restored.name}")
@@ -341,6 +529,150 @@ def _cmd_backup_restore(args):
         info(f"Safety backup of previous memory: {result.safety_backup.name}")
     if result.rebuilt_nodes is not None:
         info(f"Rebuilt search index from {result.rebuilt_nodes} nodes")
+
+
+def _cmd_cloud_init(args):
+    from ormah.cloud.crypto import CloudCryptoError
+    from ormah.cloud.keys import (
+        KEY_PATH,
+        CloudKeyError,
+        extract_store_id,
+        get_or_create_store_id,
+        import_key,
+        init_key,
+        install_store_id,
+        load_identity_strings,
+        write_recovery_kit,
+    )
+    from ormah.config import settings
+    from ormah.console import info, ok, warn
+
+    try:
+        if args.import_key:
+            # The kit's store id is the remote namespace — it must be
+            # installed too, or the restored machine would point at a brand
+            # new store and orphan every existing backup. Installed first so
+            # a store-id conflict aborts before any key material is written.
+            imported_store_id = extract_store_id(args.import_key)
+            if imported_store_id:
+                install_store_id(settings.memory_dir, imported_store_id)
+            import_key(args.import_key)
+        else:
+            init_key()
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(str(exc))
+
+    try:
+        store_id = get_or_create_store_id(settings.memory_dir)
+        kit_path = write_recovery_kit(store_id)
+        identity_count = len(load_identity_strings())
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(
+            f"Encryption key was written to {KEY_PATH}, but finishing setup failed: {exc}\n"
+            "Complete it with: ormah cloud kit"
+        )
+
+    if args.json:
+        print(json.dumps({
+            "key_path": str(KEY_PATH),
+            "identity_count": identity_count,
+            "imported": bool(args.import_key),
+            "store_id": store_id,
+            "recovery_kit": str(kit_path),
+        }, indent=2, sort_keys=True))
+        return
+
+    if args.import_key:
+        ok(f"Imported {identity_count} encryption identit{'y' if identity_count == 1 else 'ies'} to {KEY_PATH}")
+    else:
+        ok(f"Generated encryption key: {KEY_PATH}")
+    info(f"Store id: {store_id}")
+    ok(f"Recovery kit written: {kit_path}")
+    warn(
+        "Store the recovery kit somewhere safe and OFFLINE. Anyone with it can "
+        "read your backups; without it, nobody can — including us."
+    )
+
+
+def _cmd_cloud_kit(args):
+    """Regenerate the recovery kit from the existing key file (idempotent)."""
+    from ormah.cloud.crypto import CloudCryptoError
+    from ormah.cloud.keys import (
+        CloudKeyError,
+        get_or_create_store_id,
+        load_identity_strings,
+        write_recovery_kit,
+    )
+    from ormah.config import settings
+    from ormah.console import ok, warn
+
+    try:
+        store_id = get_or_create_store_id(settings.memory_dir)
+        kit_path = write_recovery_kit(store_id)
+        identity_count = len(load_identity_strings())
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(str(exc))
+
+    if args.json:
+        print(json.dumps({
+            "identity_count": identity_count,
+            "recovery_kit": str(kit_path),
+            "store_id": store_id,
+        }, indent=2, sort_keys=True))
+        return
+
+    ok(f"Recovery kit regenerated: {kit_path} ({identity_count} identities)")
+    warn("Replace any stored copies of the old kit with this one.")
+
+
+def _cmd_cloud_rotate_key(args):
+    from ormah.cloud.crypto import CloudCryptoError
+    from ormah.cloud.keys import (
+        CloudKeyError,
+        get_or_create_store_id,
+        load_identity_strings,
+        rotate_key,
+        write_recovery_kit,
+    )
+    from ormah.config import settings
+    from ormah.console import info, ok, warn
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            _print_backup_error("Key rotation needs confirmation. Re-run with --yes in non-interactive shells.")
+        warn("Rotation generates a new encryption key. Old keys are retained so existing backups stay readable.")
+        answer = input("Rotate the cloud encryption key? (y/N) ").strip().lower()
+        if answer not in {"y", "yes"}:
+            info("Rotation cancelled")
+            return
+
+    try:
+        rotate_key()
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(str(exc))
+
+    try:
+        store_id = get_or_create_store_id(settings.memory_dir)
+        kit_path = write_recovery_kit(store_id)
+        identity_count = len(load_identity_strings())
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(
+            f"Key was rotated, but recovery-kit regeneration failed: {exc}\n"
+            "Your stored kit is now MISSING the new key — run `ormah cloud kit` immediately."
+        )
+
+    if args.json:
+        print(json.dumps({
+            "identity_count": identity_count,
+            "recovery_kit": str(kit_path),
+            "rotated": True,
+        }, indent=2, sort_keys=True))
+        return
+
+    ok("Rotated encryption key; new bundles use the new key.")
+    info(f"Identities on file: {identity_count} (all retained — older backups still decrypt)")
+    ok(f"Recovery kit regenerated: {kit_path}")
+    warn("Replace any stored copies of the old recovery kit with the new one.")
 
 
 def _cmd_mcp(args):
@@ -399,11 +731,56 @@ def main():
     backup_status.add_argument("--json", action="store_true", help="Output backup status as JSON")
     backup_status.set_defaults(func=_cmd_backup_status)
 
-    backup_restore = backup_sub.add_parser("restore", help="Restore memory files from a local backup")
-    backup_restore.add_argument("backup", help="Backup name from `ormah backup list`")
+    backup_restore = backup_sub.add_parser("restore", help="Restore memory files from a backup")
+    backup_restore.add_argument("backup", nargs="?", help="Backup name from `ormah backup list`")
+    backup_restore.add_argument(
+        "--cloud",
+        nargs="?",
+        const="",
+        metavar="SNAPSHOT_ID",
+        help="Restore the latest committed cloud snapshot, or the specified snapshot",
+    )
     backup_restore.add_argument("--yes", action="store_true", help="Skip interactive restore confirmation")
     backup_restore.add_argument("--no-rebuild", action="store_true", help="Skip search index rebuild")
     backup_restore.set_defaults(func=_cmd_backup_restore)
+
+    # --- account ---
+    account_p = sub.add_parser("account", help="Manage the Ormah Cloud account")
+    account_sub = account_p.add_subparsers(dest="account_cmd", required=True)
+
+    account_login = account_sub.add_parser("login", help="Sign in with an emailed one-time code")
+    account_login.add_argument("--email", help="Account email (otherwise prompted)")
+    account_login.add_argument("--code", help="One-time code (otherwise prompted)")
+    account_login.set_defaults(func=_cmd_account_login)
+
+    account_status = account_sub.add_parser("status", help="Show account and entitlement status")
+    account_status.add_argument("--json", action="store_true", help="Output status as JSON")
+    account_status.set_defaults(func=_cmd_account_status)
+
+    account_logout = account_sub.add_parser("logout", help="Revoke this device token and sign out")
+    account_logout.add_argument("--yes", action="store_true", help="Skip interactive confirmation")
+    account_logout.set_defaults(func=_cmd_account_logout)
+
+    # --- cloud ---
+    cloud_p = sub.add_parser("cloud", help="Encrypted cloud backup keys and store identity")
+    cloud_sub = cloud_p.add_subparsers(dest="cloud_cmd", required=True)
+
+    cloud_init = cloud_sub.add_parser("init", help="Generate encryption key, store id, and recovery kit")
+    cloud_init.add_argument("--json", action="store_true", help="Output result as JSON")
+    cloud_init.add_argument(
+        "--import-key", metavar="PATH",
+        help="Install identities from a recovery kit or key file (fresh machine)",
+    )
+    cloud_init.set_defaults(func=_cmd_cloud_init)
+
+    cloud_rotate = cloud_sub.add_parser("rotate-key", help="Rotate the encryption key (old keys are retained)")
+    cloud_rotate.add_argument("--yes", action="store_true", help="Skip interactive confirmation")
+    cloud_rotate.add_argument("--json", action="store_true", help="Output result as JSON")
+    cloud_rotate.set_defaults(func=_cmd_cloud_rotate_key)
+
+    cloud_kit = cloud_sub.add_parser("kit", help="Regenerate the recovery kit from the existing key")
+    cloud_kit.add_argument("--json", action="store_true", help="Output result as JSON")
+    cloud_kit.set_defaults(func=_cmd_cloud_kit)
 
     # --- setup ---
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")
@@ -422,7 +799,10 @@ def main():
     setup_p.set_defaults(func=_cmd_setup)
 
     # --- uninstall ---
-    uninstall_p = sub.add_parser("uninstall", help="Remove all ormah integrations and data")
+    uninstall_p = sub.add_parser(
+        "uninstall",
+        help="Remove integrations and local data; preserve cloud recovery files",
+    )
     uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
     uninstall_p.set_defaults(func=_cmd_uninstall)
 
@@ -441,6 +821,22 @@ def main():
         help="Install into the CLAUDE.md target that matches plugin scope, or override it explicitly",
     )
     claude_md_install.set_defaults(func=_cmd_claude_md_install)
+
+    # --- pi-md ---
+    pi_md_p = sub.add_parser("pi-md", help="Manage Ormah guidance in the Pi agent AGENTS.md")
+    pi_md_sub = pi_md_p.add_subparsers(dest="pi_md_cmd", required=True)
+
+    pi_md_install = pi_md_sub.add_parser(
+        "install",
+        help="Install the Ormah guidance block into a Pi AGENTS.md file",
+    )
+    pi_md_install.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default="user",
+        help="user = ~/.pi/agent/AGENTS.md (default), project = ./AGENTS.md",
+    )
+    pi_md_install.set_defaults(func=_cmd_pi_md_install)
 
     # --- mcp ---
     mcp_p = sub.add_parser("mcp", help="Run MCP stdio server")

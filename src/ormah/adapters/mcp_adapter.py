@@ -378,6 +378,8 @@ async def _dispatch(
                 "signal": args["signal"],
                 "source": args.get("source", "explicit"),
             }
+            if args.get("whisper_log_id") is not None:
+                body["whisper_log_id"] = args["whisper_log_id"]
             resp = await client.post("/agent/feedback", json=body)
             if not resp.is_success:
                 return _handle_error(resp)

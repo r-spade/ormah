@@ -59,6 +59,7 @@ class MemoryNode(BaseModel):
     stability: float = Field(default=1.0, ge=0.0)  # FSRS: days until ~37% retrievability
     last_review: datetime | None = None  # last stability update (distinct from last_accessed)
     valid_until: datetime | None = None
+    deleted_at: datetime | None = None  # tombstone stamp; ordering for sync merges uses this, never `updated`
     space: str | None = None
     tags: list[str] = Field(default_factory=list)
     connections: list[Connection] = Field(default_factory=list)
@@ -68,6 +69,11 @@ class MemoryNode(BaseModel):
     @property
     def short_id(self) -> str:
         return self.id.split("-")[0]
+
+    def touch_updated(self) -> None:
+        """Advance `updated`. Call before saving any content mutation; never for
+        read-side access metadata (last_accessed, access_count, FSRS review state)."""
+        self.updated = datetime.now(timezone.utc)
 
 
 class CreateNodeRequest(BaseModel):

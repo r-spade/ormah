@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     backup_interval_hours: int = 24
     backup_retention_count: int = 10
 
+    # Encrypted cloud backups (paid tier). Client-side keys; nothing readable
+    # ever leaves the machine. Off by default until an account is configured.
+    cloud_backup_enabled: bool = False
+    cloud_backup_interval_hours: int = 24
+    cloud_api_url: str = "https://api.ormah.dev"
+    account_token: str | None = None
+    account_email: str | None = None
+
     # Embeddings
     embedding_provider: str = "local"  # "local", "ollama", "litellm"
     embedding_model: str = "BAAI/bge-base-en-v1.5"
@@ -214,6 +222,13 @@ class Settings(BaseSettings):
     whisper_no_overlap_ce_floor: float = 0.45
     whisper_no_overlap_cosine_floor: float = 0.70
 
+    # Standing preferences are applicability rules, not passages that answer
+    # the prompt. A separate typed retrieval channel asks the reranker whether
+    # each preference applies to the current action, then merges at most two.
+    whisper_preference_applicability_enabled: bool = True
+    whisper_preference_applicability_gate: float = 0.40
+    whisper_preference_max_nodes: int = 2
+
     # Injection gate when the reranker did not run (unavailable, still
     # downloading, or disabled): the gate then cuts raw_cosine, a weaker
     # absolute signal, so demand a higher bar — degraded mode is more
@@ -235,6 +250,14 @@ class Settings(BaseSettings):
     whisper_exploration_enabled: bool = True
     feedback_llm_judge_enabled: bool = False
     feedback_llm_judge_min_confidence: float = 0.75
+
+    # Candidate diagnostics are high-volume. Prompt payloads are normalized
+    # separately, while stale rejected rows with no feedback references are
+    # pruned in bounded background batches. Injected rows are retained for
+    # all-time whisper health and exact feedback history.
+    whisper_log_rejected_retention_days: int = 30
+    whisper_log_cleanup_interval_hours: int = 24
+    whisper_log_cleanup_batch_size: int = 1000
 
     # Space prioritization
     space_boost_global: float = 1.0
@@ -378,11 +401,29 @@ class Settings(BaseSettings):
             raise ValueError(f"backup_interval_hours must be >= 1, got {v}")
         return v
 
+    @field_validator("cloud_backup_interval_hours")
+    @classmethod
+    def _cloud_backup_interval_hours_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"cloud_backup_interval_hours must be >= 1, got {v}")
+        return v
+
     @field_validator("backup_retention_count")
     @classmethod
     def _backup_retention_count_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"backup_retention_count must be >= 1, got {v}")
+        return v
+
+    @field_validator(
+        "whisper_log_rejected_retention_days",
+        "whisper_log_cleanup_interval_hours",
+        "whisper_log_cleanup_batch_size",
+    )
+    @classmethod
+    def _whisper_log_cleanup_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"whisper log cleanup settings must be >= 1, got {v}")
         return v
 
     @field_validator("core_memory_cap")
@@ -419,6 +460,7 @@ class Settings(BaseSettings):
         "auto_merge_threshold",
         "feedback_llm_judge_min_confidence",
         "consolidation_cluster_threshold",
+        "whisper_preference_applicability_gate",
     )
     @classmethod
     def _threshold_range(cls, v: float) -> float:

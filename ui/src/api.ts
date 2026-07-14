@@ -82,12 +82,32 @@ export interface BackupStatus {
   latest: BackupInfo | null;
 }
 
+export interface CloudStatus {
+  enabled: boolean;
+  store_id: string | null;
+  interval_hours: number;
+  entitlement: "active" | "grace" | "expired" | "none";
+  last_upload_at: string | null;
+  last_upload_snapshot_id: string | null;
+  last_upload_error: string | null;
+  last_upload_age_seconds: number | null;
+  last_verify_at: string | null;
+  last_verify_ok: boolean | null;
+  last_verify_snapshot_id: string | null;
+  last_verify_error: string | null;
+  warnings: string[];
+}
+
 export function fetchAdminTasks(): Promise<{ tasks: AdminTask[] }> {
   return get("/admin/tasks");
 }
 
 export function fetchBackupStatus(): Promise<BackupStatus> {
   return get("/admin/backup");
+}
+
+export function fetchCloudStatus(): Promise<CloudStatus> {
+  return get("/admin/cloud-status");
 }
 
 export function createBackup(): Promise<{

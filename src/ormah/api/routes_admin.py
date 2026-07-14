@@ -26,6 +26,8 @@ _TASK_RUNNERS = {
     "importance_scorer": ("ormah.background.importance_scorer", "run_importance_scoring"),
     "consolidator": ("ormah.background.consolidator", "run_consolidation"),
     "memory_backup": ("ormah.backup", "run_auto_backup"),
+    "cloud_backup": ("ormah.cloud.jobs", "run_cloud_backup"),
+    "restore_verification": ("ormah.cloud.jobs", "run_restore_verification"),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -39,6 +41,8 @@ _TASK_DESCRIPTIONS = {
     "decay_manager": "Applies time-based decay to memory importance, demoting stale unused memories.",
     "hippocampus": "Scans for structural patterns and promotes frequently accessed working memories to core.",
     "memory_backup": "Creates a local backup of memory source files when one is due.",
+    "cloud_backup": "Encrypts and uploads a due cloud backup without changing the sync head.",
+    "restore_verification": "Downloads, decrypts, rebuilds, and searches the latest cloud backup.",
 }
 
 # Order for sleep cycle (full maintenance pass)
@@ -122,6 +126,14 @@ def backup_status(request: Request):
     """Return local backup configuration and latest backup metadata."""
     settings, service = _backup_service_from_request(request)
     return _backup_status_payload(settings, service)
+
+
+@router.get("/cloud-status")
+def cloud_status(request: Request):
+    """Return per-store cloud backup and restore-verification health."""
+    from ormah.cloud.state import cloud_status_payload
+
+    return cloud_status_payload(request.app.state.engine.settings)
 
 
 @router.post("/backup/create")

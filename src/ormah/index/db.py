@@ -88,6 +88,37 @@ class Database:
         self.conn.executescript(schema)
         self._migrate()
 
+    @staticmethod
+    def insert_retrieval_event(
+        conn: sqlite3.Connection,
+        *,
+        surface: str,
+        session_id: str,
+        space: str | None,
+        prompt_hash: str,
+        prompt_text: str,
+        prompt_vec: bytes,
+        logged_at: str,
+    ) -> int:
+        """Insert one prompt payload shared by its candidate log rows."""
+        cursor = conn.execute(
+            """
+            INSERT INTO retrieval_events
+                (surface, session_id, space, prompt_hash, prompt_text, prompt_vec, logged_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                surface,
+                session_id,
+                space,
+                prompt_hash,
+                prompt_text,
+                prompt_vec,
+                logged_at,
+            ),
+        )
+        return int(cursor.lastrowid)
+
     def _migrate(self) -> None:
         """Run migrations for existing databases."""
         with self.transaction() as conn:
@@ -148,16 +179,27 @@ class Database:
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS whisper_log (
-                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                        session_id   TEXT NOT NULL,
-                        space        TEXT,
-                        prompt_hash  TEXT NOT NULL,
-                        prompt_text  TEXT,
-                        prompt_vec   BLOB NOT NULL,
-                        node_id      TEXT NOT NULL,
-                        score        REAL NOT NULL,
-                        was_injected INTEGER NOT NULL,
-                        logged_at    TEXT NOT NULL
+                        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id          TEXT NOT NULL,
+                        space               TEXT,
+                        prompt_hash         TEXT NOT NULL,
+                        prompt_text         TEXT,
+                        prompt_vec          BLOB NOT NULL,
+                        node_id             TEXT NOT NULL,
+                        score               REAL NOT NULL,
+                        retrieval_score     REAL,
+                        raw_cosine          REAL,
+                        cross_encoder_score REAL,
+                        ce_absolute         REAL,
+                        gate_score          REAL,
+                        source              TEXT,
+                        retrieval_rank      INTEGER,
+                        final_rank          INTEGER,
+                        decision_stage      TEXT NOT NULL DEFAULT 'legacy',
+                        was_injected        INTEGER NOT NULL,
+                        logged_at           TEXT NOT NULL,
+                        retrieval_event_id  INTEGER REFERENCES retrieval_events(id)
+                            ON DELETE RESTRICT
                     )
                     """
                 )
@@ -170,6 +212,9 @@ class Database:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_whisper_log_logged ON whisper_log(logged_at)"
                 )
+
+            self._migrate_whisper_log_schema(conn)
+            self._migrate_retrieval_event_schema(conn)
 
             self._migrate_affinity_schema(conn, existing_tables)
             self._ensure_signals_schema(conn)
@@ -192,6 +237,128 @@ class Database:
 
         # Migrate FTS table to porter stemmer if needed
         self._migrate_fts_tokenizer()
+
+    def _migrate_whisper_log_schema(self, conn: sqlite3.Connection) -> None:
+        """Add candidate-stage diagnostics without rebuilding feedback history."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(whisper_log)").fetchall()}
+        additions = {
+            "retrieval_score": "REAL",
+            "raw_cosine": "REAL",
+            "cross_encoder_score": "REAL",
+            "ce_absolute": "REAL",
+            "gate_score": "REAL",
+            "source": "TEXT",
+            "retrieval_rank": "INTEGER",
+            "final_rank": "INTEGER",
+            "decision_stage": "TEXT NOT NULL DEFAULT 'legacy'",
+        }
+        for name, column_type in additions.items():
+            if name not in cols:
+                conn.execute(f"ALTER TABLE whisper_log ADD COLUMN {name} {column_type}")
+
+    def _migrate_retrieval_event_schema(self, conn: sqlite3.Connection) -> None:
+        """Normalize prompt payloads without rebuilding exact feedback rows."""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS retrieval_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                surface     TEXT NOT NULL,
+                session_id  TEXT NOT NULL,
+                space       TEXT,
+                prompt_hash TEXT NOT NULL,
+                prompt_text TEXT,
+                prompt_vec  BLOB NOT NULL,
+                logged_at   TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_events_session "
+            "ON retrieval_events(session_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_events_logged "
+            "ON retrieval_events(logged_at)"
+        )
+
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(whisper_log)").fetchall()}
+        if "retrieval_event_id" not in cols:
+            conn.execute(
+                "ALTER TABLE whisper_log ADD COLUMN retrieval_event_id INTEGER "
+                "REFERENCES retrieval_events(id) ON DELETE RESTRICT"
+            )
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_whisper_log_event "
+            "ON whisper_log(retrieval_event_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_whisper_log_retention "
+            "ON whisper_log(was_injected, logged_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_whisper_log_session_injected "
+            "ON whisper_log(session_id, was_injected)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_whisper_log_node_injected_logged "
+            "ON whisper_log(node_id, was_injected, logged_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_whisper_log_event_key "
+            "ON whisper_log(session_id, prompt_hash, logged_at)"
+        )
+
+        # Older schemas duplicated the same prompt payload on every candidate.
+        # Backfill one parent per writer event, preserve candidate IDs, then
+        # release the duplicate blobs for SQLite to reuse. No VACUUM runs on
+        # startup: compacting the file is an explicit operator choice.
+        groups = conn.execute(
+            """
+            SELECT
+                session_id, prompt_hash, logged_at,
+                MAX(space) AS space,
+                MAX(prompt_text) AS prompt_text,
+                MIN(id) AS sample_id
+            FROM whisper_log
+            WHERE retrieval_event_id IS NULL
+            GROUP BY session_id, prompt_hash, logged_at
+            """
+        ).fetchall()
+        for group in groups:
+            sample = conn.execute(
+                "SELECT prompt_vec FROM whisper_log WHERE id = ?",
+                (group["sample_id"],),
+            ).fetchone()
+            cursor = conn.execute(
+                """
+                INSERT INTO retrieval_events
+                    (surface, session_id, space, prompt_hash, prompt_text, prompt_vec, logged_at)
+                VALUES ('legacy', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    group["session_id"],
+                    group["space"],
+                    group["prompt_hash"],
+                    group["prompt_text"],
+                    sample["prompt_vec"] if sample is not None else b"",
+                    group["logged_at"],
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE whisper_log
+                SET retrieval_event_id = ?, prompt_text = NULL, prompt_vec = X''
+                WHERE retrieval_event_id IS NULL
+                  AND session_id = ? AND prompt_hash = ? AND logged_at = ?
+                """,
+                (
+                    int(cursor.lastrowid),
+                    group["session_id"],
+                    group["prompt_hash"],
+                    group["logged_at"],
+                ),
+            )
 
     def _create_affinity_table(self, conn: sqlite3.Connection, table: str = "affinity") -> None:
         conn.execute(

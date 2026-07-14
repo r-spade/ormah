@@ -405,8 +405,13 @@ def _record_whisper_usage_signals(
     rows = engine.db.conn.execute(
         """
         SELECT
-            wl.id, wl.node_id, wl.prompt_text, wl.prompt_hash, wl.prompt_vec,
-            wl.session_id, wl.space, n.title, n.content,
+            wl.id, wl.node_id,
+            COALESCE(re.prompt_text, wl.prompt_text) AS prompt_text,
+            COALESCE(re.prompt_hash, wl.prompt_hash) AS prompt_hash,
+            COALESCE(re.prompt_vec, wl.prompt_vec) AS prompt_vec,
+            COALESCE(re.session_id, wl.session_id) AS session_id,
+            COALESCE(re.space, wl.space) AS space,
+            n.title, n.content,
             (
                 SELECT s.polarity FROM signals s
                 WHERE s.whisper_log_id = wl.id
@@ -420,6 +425,7 @@ def _record_whisper_usage_signals(
                   AND s.source = ?
             ) AS has_llm_judge
         FROM whisper_log wl
+        LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
         JOIN nodes n ON n.id = wl.node_id
         WHERE wl.session_id = ?
           AND wl.was_injected = 1

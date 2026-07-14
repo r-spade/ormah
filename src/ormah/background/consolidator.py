@@ -151,6 +151,7 @@ def _apply_consolidation(
             new_node = engine.file_store.load(new_id)
             if new_node and "about_self" not in new_node.tags:
                 new_node.tags.append("about_self")
+                new_node.touch_updated()
                 engine.file_store.save(new_node)
                 with engine.db.transaction() as tx_conn:
                     tx_conn.execute(

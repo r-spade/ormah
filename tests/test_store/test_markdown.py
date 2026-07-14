@@ -50,3 +50,27 @@ This is a simple fact."""
     assert node.content == "This is a simple fact."
     assert node.tier == Tier.working  # default
     assert node.connections == []
+    assert node.deleted_at is None  # legacy files without deleted_at parse fine
+
+
+def test_deleted_at_roundtrip():
+    from datetime import datetime, timezone
+
+    stamp = datetime(2026, 7, 12, 10, 30, 0, tzinfo=timezone.utc)
+    node = MemoryNode(
+        type=NodeType.fact,
+        source="agent:test",
+        content="Tombstoned fact.",
+        deleted_at=stamp,
+    )
+
+    text = serialize_node(node)
+    assert "deleted_at" in text
+    parsed = parse_node(text)
+    assert parsed.deleted_at == stamp
+
+
+def test_deleted_at_omitted_when_none():
+    node = MemoryNode(type=NodeType.fact, source="agent:test", content="Live fact.")
+    text = serialize_node(node)
+    assert "deleted_at" not in text

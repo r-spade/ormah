@@ -186,6 +186,7 @@ class FeedbackRequest(BaseModel):
     node_id: str
     signal: Literal[1, -1]
     source: Literal["explicit", "implicit"] = "explicit"
+    whisper_log_id: int | None = None
 
 
 @router.post("/feedback", response_model=TextResponse)
@@ -196,6 +197,7 @@ def submit_feedback(request: Request, body: FeedbackRequest):
         node_id=body.node_id,
         signal=body.signal,
         source=body.source,
+        whisper_log_id=body.whisper_log_id,
     )
     return TextResponse(text=text)
 

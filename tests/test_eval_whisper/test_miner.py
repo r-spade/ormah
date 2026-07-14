@@ -115,6 +115,56 @@ def test_recall_contamination_excluded(tmp_path):
     assert prompts == {"a whisper prompt"}
 
 
+def test_normalized_retrieval_event_supplies_prompt_payload(tmp_path):
+    db = tmp_path / "live.db"
+    _make_db(db)
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE retrieval_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            surface TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            space TEXT,
+            prompt_hash TEXT NOT NULL,
+            prompt_text TEXT,
+            prompt_vec BLOB NOT NULL,
+            logged_at TEXT NOT NULL
+        );
+        ALTER TABLE whisper_log ADD COLUMN retrieval_event_id INTEGER;
+        """
+    )
+    for node in ("n1", "n2"):
+        _node(conn, node, node)
+    cursor = conn.execute(
+        """
+        INSERT INTO retrieval_events
+            (surface, session_id, space, prompt_hash, prompt_text, prompt_vec, logged_at)
+        VALUES ('whisper', 'sess', 'ormah', 'hash', 'normalized prompt', X'01', ?)
+        """,
+        ("2026-07-01T10:00:00Z",),
+    )
+    event_id = cursor.lastrowid
+    for node_id, score, injected in (("n1", 0.7, 1), ("n2", 0.2, 0)):
+        conn.execute(
+            """
+            INSERT INTO whisper_log
+                (session_id, space, prompt_hash, prompt_text, prompt_vec,
+                 node_id, score, was_injected, logged_at, retrieval_event_id)
+            VALUES ('sess', 'ormah', 'hash', NULL, X'', ?, ?, ?, ?, ?)
+            """,
+            (node_id, score, injected, "2026-07-01T10:00:00Z", event_id),
+        )
+    _decision(conn, "sess", "hash", "2026-07-01T10:00:00Z")
+    conn.commit()
+    conn.close()
+
+    cases = _run_mine(tmp_path, db)
+
+    assert len(cases) == 1
+    assert cases[0]["prompts"][0]["text"] == "normalized prompt"
+
+
 def test_deterministic_truncation_keeps_injected_node(tmp_path):
     db = tmp_path / "live.db"
     _make_db(db)

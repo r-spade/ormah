@@ -281,6 +281,7 @@ def run_conflict_detection(engine) -> dict | None:
                 if mem_node is None:
                     continue
                 mem_node.connections.extend(new_connections)
+                mem_node.touch_updated()
                 engine.file_store.save(mem_node)
             except Exception as e:
                 logger.debug("Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)

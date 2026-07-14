@@ -61,6 +61,17 @@ def test_rrf_weights_scale_contribution():
     assert scores["b"] > scores["a"]
 
 
+def test_provided_query_vector_skips_duplicate_encoding(mock_hybrid):
+    query_vec = [0.1, 0.2, 0.3]
+    mock_hybrid.graph.fts_search.return_value = []
+    mock_hybrid.vec_store.search.return_value = []
+
+    mock_hybrid.search("same query", query_vec=query_vec)
+
+    mock_hybrid.encoder.encode_query.assert_not_called()
+    mock_hybrid.vec_store.search.assert_called_once_with(query_vec, limit=30)
+
+
 # ---------------------------------------------------------------------------
 # Fusion: score combination and ranking
 # ---------------------------------------------------------------------------

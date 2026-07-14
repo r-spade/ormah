@@ -97,21 +97,53 @@ CREATE TABLE IF NOT EXISTS audit_log (
     performed_at TEXT NOT NULL
 );
 
+-- Prompt-level payload shared by every candidate produced by one retrieval.
+-- Candidate rows keep their own stable whisper_log.id because feedback and
+-- signals refer to that exact surfaced/rejected event.
+CREATE TABLE IF NOT EXISTS retrieval_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    surface       TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    space         TEXT,
+    prompt_hash   TEXT NOT NULL,
+    prompt_text   TEXT,
+    prompt_vec    BLOB NOT NULL,
+    logged_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_retrieval_events_session ON retrieval_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_retrieval_events_logged  ON retrieval_events(logged_at);
+
 CREATE TABLE IF NOT EXISTS whisper_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id   TEXT NOT NULL,
-    space        TEXT,
-    prompt_hash  TEXT NOT NULL,
-    prompt_text  TEXT,
-    prompt_vec   BLOB NOT NULL,
-    node_id      TEXT NOT NULL,
-    score        REAL NOT NULL,
-    was_injected INTEGER NOT NULL,
-    logged_at    TEXT NOT NULL
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id          TEXT NOT NULL,
+    space               TEXT,
+    prompt_hash         TEXT NOT NULL,
+    prompt_text         TEXT,
+    prompt_vec          BLOB NOT NULL,
+    node_id             TEXT NOT NULL,
+    score               REAL NOT NULL,
+    retrieval_score     REAL,
+    raw_cosine          REAL,
+    cross_encoder_score REAL,
+    ce_absolute         REAL,
+    gate_score          REAL,
+    source              TEXT,
+    retrieval_rank      INTEGER,
+    final_rank          INTEGER,
+    decision_stage      TEXT NOT NULL DEFAULT 'legacy',
+    was_injected        INTEGER NOT NULL,
+    logged_at           TEXT NOT NULL,
+    retrieval_event_id  INTEGER REFERENCES retrieval_events(id) ON DELETE RESTRICT
 );
 CREATE INDEX IF NOT EXISTS idx_whisper_log_session ON whisper_log(session_id);
 CREATE INDEX IF NOT EXISTS idx_whisper_log_node    ON whisper_log(node_id);
 CREATE INDEX IF NOT EXISTS idx_whisper_log_logged  ON whisper_log(logged_at);
+CREATE INDEX IF NOT EXISTS idx_whisper_log_retention
+    ON whisper_log(was_injected, logged_at);
+CREATE INDEX IF NOT EXISTS idx_whisper_log_session_injected
+    ON whisper_log(session_id, was_injected);
+CREATE INDEX IF NOT EXISTS idx_whisper_log_node_injected_logged
+    ON whisper_log(node_id, was_injected, logged_at);
 
 CREATE TABLE IF NOT EXISTS affinity (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

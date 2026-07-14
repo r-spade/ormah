@@ -79,6 +79,7 @@ CLAUDE.md
 .omx/
 .codex
 .codex/
+.npmrc
 
 # Superpowers generated planning artifacts
 /docs/superpowers/

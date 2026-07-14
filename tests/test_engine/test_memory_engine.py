@@ -290,6 +290,62 @@ def test_get_whisper_context_threads_pool_and_content_cap_settings(engine):
     assert build.call_args.kwargs["injected_content_max_chars"] == 450
 
 
+def test_get_whisper_context_threads_preference_applicability_settings(engine):
+    engine._whisper_reranker_available = True
+    engine.settings.whisper_preference_applicability_enabled = True
+    engine.settings.whisper_preference_applicability_gate = 0.42
+    engine.settings.whisper_preference_max_nodes = 1
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value="") as build:
+        engine.get_whisper_context("auth prompt")
+
+    assert build.call_args.kwargs["preference_applicability_enabled"] is True
+    assert build.call_args.kwargs["preference_applicability_gate"] == 0.42
+    assert build.call_args.kwargs["preference_max_nodes"] == 1
+
+
+def test_has_searchable_preferences_ignores_expired_and_archival(engine):
+    now = "2026-07-12T00:00:00+00:00"
+    with engine.db.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO nodes
+                (id, type, tier, source, title, content, created, updated,
+                 last_accessed, file_path, file_hash, valid_until)
+            VALUES ('expired-pref', 'preference', 'working', 'test', 'Expired',
+                    'Expired', ?, ?, ?, '/tmp/expired', 'expired',
+                    '2020-01-01T00:00:00+00:00')
+            """,
+            (now, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO nodes
+                (id, type, tier, source, title, content, created, updated,
+                 last_accessed, file_path, file_hash)
+            VALUES ('archival-pref', 'preference', 'archival', 'test', 'Archival',
+                    'Archival', ?, ?, ?, '/tmp/archival', 'archival')
+            """,
+            (now, now, now),
+        )
+
+    assert engine.has_searchable_preferences() is False
+
+    with engine.db.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO nodes
+                (id, type, tier, source, title, content, created, updated,
+                 last_accessed, file_path, file_hash)
+            VALUES ('active-pref', 'preference', 'working', 'test', 'Active',
+                    'Active', ?, ?, ?, '/tmp/active', 'active')
+            """,
+            (now, now, now),
+        )
+
+    assert engine.has_searchable_preferences() is True
+
+
 def test_startup_seeds_maintenance_grace_period(settings):
     settings.claude_maintenance_enabled = True
     engine = MemoryEngine(settings)
@@ -457,6 +513,7 @@ class TestRecallFloorAndSpaceOrdering:
 
     def test_pool_widened_and_floor_drops_cross_space_noise(self, engine):
         """Cross-space noise penalized below the floor is dropped, not padded."""
+        query_vec = [0.1, 0.2, 0.3]
         results = [
             {"node": self._node("good-1", space="proj"), "score": 0.80, "source": "hybrid"},
             {"node": self._node("good-2", space="proj"), "score": 0.62, "source": "hybrid"},
@@ -467,10 +524,12 @@ class TestRecallFloorAndSpaceOrdering:
         with ctx:
             out = engine.recall_search_structured(
                 "project question", limit=4, default_space="proj", touch_access=False,
+                query_vec=query_vec,
             )
 
         # Pool widened to limit*3
         assert mock_search.search.call_args.kwargs.get("limit") == 12
+        assert mock_search.search.call_args.kwargs["query_vec"] is query_vec
         ids = [r["node"]["id"] for r in out if r.get("source") == "hybrid"]
         # other-space results: 0.50*0.6=0.30 and 0.48*0.6=0.288 < 0.35 floor
         assert ids == ["good-1", "good-2"]
@@ -506,6 +565,21 @@ class TestRecallFloorAndSpaceOrdering:
             )
 
         assert any(r["node"]["id"] == "recent-1" for r in out)
+
+    def test_temporal_preprocessing_invalidates_original_query_vector(self, engine):
+        query_vec = [0.1, 0.2, 0.3]
+        ctx, mock_search = self._search_mock(engine, [])
+
+        with ctx:
+            engine.recall_search_structured(
+                "auth changes yesterday",
+                limit=4,
+                touch_access=False,
+                query_vec=query_vec,
+            )
+
+        assert mock_search.search.call_args.args[0] == "auth changes"
+        assert mock_search.search.call_args.kwargs["query_vec"] is None
 
     def test_temporal_supplements_respect_space_priority(self, engine):
         """A newer other-space node must NOT outrank an older current-space node."""

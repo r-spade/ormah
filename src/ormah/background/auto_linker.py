@@ -302,6 +302,7 @@ def _apply_edge(
                     weight=round(similarity, 2),
                 )
                 mem_node.connections.append(md_conn)
+                mem_node.touch_updated()
                 engine.file_store.save(mem_node)
         except Exception as e:
             logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)

@@ -106,6 +106,7 @@ def run_importance_scoring(engine) -> None:
         node = engine.file_store.load(nid)
         if node is not None:
             node.importance = round(importance, 4)
+            node.touch_updated()
             engine.file_store.save(node)
 
         updated += 1

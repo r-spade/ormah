@@ -5,12 +5,24 @@ from __future__ import annotations
 from typing import Any
 
 
+def _feedback_id_suffix(node: dict[str, Any], *, short: bool = False) -> str:
+    node_id = node.get("id", "")
+    if short:
+        label = f"id: {node_id[:8]}..." if node_id else "id: unknown"
+    else:
+        label = f"ID: {node_id}"
+    whisper_log_id = node.get("_whisper_log_id")
+    if whisper_log_id is not None:
+        label += f" | whisper_log_id: {whisper_log_id}"
+    return label
+
+
 def format_node(node: dict[str, Any], edges: list[dict[str, Any]] | None = None) -> str:
     """Format a single node as readable text."""
     lines = []
     title = node.get("title") or _excerpt(node.get("content", ""))
     lines.append(f"## [{node['type']}] {title}")
-    lines.append(f"ID: {node['id']}")
+    lines.append(_feedback_id_suffix(node))
     lines.append(f"Tier: {node['tier']} | Space: {node.get('space') or 'unassigned'}")
 
     content = node.get("content", "").strip()
@@ -43,7 +55,7 @@ def format_node_with_neighbors(
         lines.append("### Nearby Memories")
         for n in neighbors[:10]:
             title = n.get("title") or _excerpt(n.get("content", ""))
-            lines.append(f"- [{n['type']}] {title} (id: {n['id'][:8]}...)")
+            lines.append(f"- [{n['type']}] {title} ({_feedback_id_suffix(n, short=True)})")
 
     return "\n".join(lines)
 
@@ -76,8 +88,13 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
         title = node.get("title") or _excerpt(node.get("content", ""))
         score = r.get("score", 0)
         parts.append(f"{i}. [{node['type']}] {title}")
+        if r.get("_whisper_log_id") is not None:
+            node = {**node, "_whisper_log_id": r["_whisper_log_id"]}
         created = (node.get("created") or "")[:19]  # YYYY-MM-DDTHH:MM:SS
-        parts.append(f"   ID: {node['id']} | Tier: {node['tier']} | Score: {score:.3f} | Created: {created}")
+        parts.append(
+            f"   {_feedback_id_suffix(node)} | Tier: {node['tier']} | "
+            f"Score: {score:.3f} | Created: {created}"
+        )
         content = node.get("content", "").strip()
         if content:
             parts.append(f"   {content}")
@@ -93,7 +110,12 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
             edge_type = r.get("activation_edge", "related_to")
             seed_id = r.get("activated_by", "")
             parts.append(f"{i}. [{node['type']}] {title}")
-            parts.append(f"   ID: {node['id']} | Score: {score:.3f} | via {edge_type} from {seed_id[:8]}...")
+            if r.get("_whisper_log_id") is not None:
+                node = {**node, "_whisper_log_id": r["_whisper_log_id"]}
+            parts.append(
+                f"   {_feedback_id_suffix(node)} | Score: {score:.3f} | "
+                f"via {edge_type} from {seed_id[:8]}..."
+            )
             content = node.get("content", "").strip()
             if content:
                 parts.append(f"   {content}")
@@ -108,7 +130,12 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
             score = r.get("score", 0)
             seed_id = r.get("activated_by", "")
             parts.append(f"{i}. [{node['type']}] {title}")
-            parts.append(f"   ID: {node['id']} | Score: {score:.3f} | contradicts {seed_id[:8]}...")
+            if r.get("_whisper_log_id") is not None:
+                node = {**node, "_whisper_log_id": r["_whisper_log_id"]}
+            parts.append(
+                f"   {_feedback_id_suffix(node)} | Score: {score:.3f} | "
+                f"contradicts {seed_id[:8]}..."
+            )
             content = node.get("content", "").strip()
             if content:
                 parts.append(f"   {content}")

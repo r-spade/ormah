@@ -49,8 +49,18 @@ def test_whisper_log_columns(db):
         "prompt_vec",
         "node_id",
         "score",
+        "retrieval_score",
+        "raw_cosine",
+        "cross_encoder_score",
+        "ce_absolute",
+        "gate_score",
+        "source",
+        "retrieval_rank",
+        "final_rank",
+        "decision_stage",
         "was_injected",
         "logged_at",
+        "retrieval_event_id",
     ]:
         assert expected in cols, f"Missing column '{expected}' in whisper_log"
 
@@ -59,6 +69,26 @@ def test_whisper_log_indexes(db):
     assert _index_exists(db, "idx_whisper_log_session")
     assert _index_exists(db, "idx_whisper_log_node")
     assert _index_exists(db, "idx_whisper_log_logged")
+    assert _index_exists(db, "idx_whisper_log_event")
+    assert _index_exists(db, "idx_whisper_log_retention")
+    assert _index_exists(db, "idx_whisper_log_session_injected")
+    assert _index_exists(db, "idx_whisper_log_node_injected_logged")
+
+
+def test_retrieval_events_schema(db):
+    assert _table_exists(db, "retrieval_events")
+    assert _table_columns(db, "retrieval_events") == [
+        "id",
+        "surface",
+        "session_id",
+        "space",
+        "prompt_hash",
+        "prompt_text",
+        "prompt_vec",
+        "logged_at",
+    ]
+    assert _index_exists(db, "idx_retrieval_events_session")
+    assert _index_exists(db, "idx_retrieval_events_logged")
 
 
 def test_affinity_table_exists(db):
@@ -204,6 +234,107 @@ def test_migrate_creates_whisper_log(tmp_path):
     assert not _table_exists(db, "whisper_log")
     db._migrate()
     assert _table_exists(db, "whisper_log")
+    db.close()
+
+
+def test_migrate_adds_whisper_candidate_diagnostics(tmp_path):
+    path = tmp_path / "index.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE whisper_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            space TEXT,
+            prompt_hash TEXT NOT NULL,
+            prompt_text TEXT,
+            prompt_vec BLOB NOT NULL,
+            node_id TEXT NOT NULL,
+            score REAL NOT NULL,
+            was_injected INTEGER NOT NULL,
+            logged_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO whisper_log "
+        "(session_id, prompt_hash, prompt_vec, node_id, score, was_injected, logged_at) "
+        "VALUES ('s1', 'h1', X'00', 'n1', 0.5, 0, '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.init_schema()
+
+    cols = _table_columns(db, "whisper_log")
+    assert "decision_stage" in cols
+    assert "ce_absolute" in cols
+    row = db.conn.execute(
+        """
+        SELECT wl.id, wl.node_id, wl.decision_stage, wl.retrieval_event_id,
+               length(wl.prompt_vec), re.prompt_vec
+        FROM whisper_log wl
+        JOIN retrieval_events re ON re.id = wl.retrieval_event_id
+        WHERE wl.node_id = 'n1'
+        """
+    ).fetchone()
+    assert tuple(row[:5]) == (1, "n1", "legacy", 1, 0)
+    assert row["prompt_vec"] == b"\x00"
+    db.close()
+
+
+def test_migrate_normalizes_duplicate_payloads_and_preserves_candidate_ids(tmp_path):
+    path = tmp_path / "index.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE whisper_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            space TEXT,
+            prompt_hash TEXT NOT NULL,
+            prompt_text TEXT,
+            prompt_vec BLOB NOT NULL,
+            node_id TEXT NOT NULL,
+            score REAL NOT NULL,
+            was_injected INTEGER NOT NULL,
+            logged_at TEXT NOT NULL
+        )
+        """
+    )
+    payload = b"x" * 3072
+    for node_id in ("node-a", "node-b"):
+        conn.execute(
+            """
+            INSERT INTO whisper_log
+                (session_id, space, prompt_hash, prompt_text, prompt_vec,
+                 node_id, score, was_injected, logged_at)
+            VALUES ('sess', 'ormah', 'hash', 'shared prompt', ?, ?, 0.5, 0, ?)
+            """,
+            (payload, node_id, "2026-01-01T00:00:00+00:00"),
+        )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.init_schema()
+
+    rows = db.conn.execute(
+        "SELECT id, retrieval_event_id, length(prompt_vec) AS prompt_vec_bytes, prompt_text "
+        "FROM whisper_log ORDER BY id"
+    ).fetchall()
+    assert [row["id"] for row in rows] == [1, 2]
+    assert len({row["retrieval_event_id"] for row in rows}) == 1
+    assert [row["prompt_vec_bytes"] for row in rows] == [0, 0]
+    assert [row["prompt_text"] for row in rows] == [None, None]
+
+    event = db.conn.execute("SELECT * FROM retrieval_events").fetchone()
+    assert event["prompt_text"] == "shared prompt"
+    assert event["prompt_vec"] == payload
+
+    db.init_schema()
+    assert db.conn.execute("SELECT COUNT(*) FROM retrieval_events").fetchone()[0] == 1
     db.close()
 
 

@@ -143,6 +143,17 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.whisper_log_cleanup import run_whisper_log_cleanup
+
+    scheduler.add_job(
+        tracked(tracker, "whisper_log_cleanup", run_whisper_log_cleanup, engine),
+        "interval",
+        hours=s.whisper_log_cleanup_interval_hours,
+        id="whisper_log_cleanup",
+        name="Whisper log cleanup",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     from ormah.backup import run_auto_backup
 
     scheduler.add_job(
@@ -152,6 +163,27 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         id="memory_backup",
         name="Memory backup",
         next_run_time=datetime.now(timezone.utc),
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
+    from ormah.cloud.jobs import run_cloud_backup, run_restore_verification
+
+    scheduler.add_job(
+        tracked(tracker, "cloud_backup", run_cloud_backup, engine),
+        "interval",
+        hours=s.cloud_backup_interval_hours,
+        id="cloud_backup",
+        name="Encrypted cloud backup",
+        next_run_time=datetime.now(timezone.utc),
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
+    scheduler.add_job(
+        tracked(tracker, "restore_verification", run_restore_verification, engine),
+        "interval",
+        hours=168,
+        id="restore_verification",
+        name="Cloud restore verification",
         misfire_grace_time=_MISFIRE_GRACE,
     )
 

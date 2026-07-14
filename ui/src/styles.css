@@ -978,6 +978,37 @@ body.in-app .node-detail.tier-core {
   font-size: 11px;
 }
 
+.admin-cloud-verification {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.admin-cloud-verification span {
+  color: var(--text-muted);
+}
+
+.admin-cloud-verification strong {
+  text-align: right;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.admin-cloud-verification.ok strong {
+  color: var(--edge-supports);
+}
+
+.admin-cloud-verification.failed strong {
+  color: var(--edge-contradicts);
+}
+
 .admin-backup-button {
   width: 100%;
   margin-top: 4px;

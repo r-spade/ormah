@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   createBackup,
   fetchBackupStatus,
+  fetchCloudStatus,
   fetchAdminTasks,
   runAdminTask,
   runAllTasks,
@@ -11,7 +12,7 @@ import {
   resumeAllTasks,
   updateBackupSettings,
 } from "../api";
-import type { AdminTask, BackupStatus } from "../api";
+import type { AdminTask, BackupStatus, CloudStatus } from "../api";
 
 interface Props {
   open: boolean;
@@ -22,6 +23,7 @@ interface Props {
 export default function AdminPanel({ open, onClose, onToast }: Props) {
   const [tasks, setTasks] = useState<AdminTask[]>([]);
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
   const [backupStatusLoaded, setBackupStatusLoaded] = useState(false);
   const [backupSettingsOpen, setBackupSettingsOpen] = useState(false);
   const [backupDirInput, setBackupDirInput] = useState("");
@@ -41,6 +43,7 @@ export default function AdminPanel({ open, onClose, onToast }: Props) {
       .then(setBackupStatus)
       .catch(() => setBackupStatus(null))
       .finally(() => setBackupStatusLoaded(true));
+    fetchCloudStatus().then(setCloudStatus).catch(() => setCloudStatus(null));
   }, [open]);
 
   useEffect(() => {
@@ -201,6 +204,27 @@ export default function AdminPanel({ open, onClose, onToast }: Props) {
             </div>
             {!backupStatus.has_backupable_memory && (
               <div className="admin-backup-note">no memory nodes to auto-backup yet</div>
+            )}
+            {cloudStatus && (
+              <div
+                className={`admin-cloud-verification ${
+                  cloudStatus.last_verify_ok === true
+                    ? "ok"
+                    : cloudStatus.last_verify_ok === false
+                      ? "failed"
+                      : "unknown"
+                }`}
+                title={cloudStatus.last_verify_error || undefined}
+              >
+                <span>Last verified restorable:</span>
+                <strong>
+                  {cloudStatus.last_verify_ok === true
+                    ? `✓ ${cloudStatus.last_verify_at ? formatDate(cloudStatus.last_verify_at) : "date unavailable"}`
+                    : cloudStatus.last_verify_ok === false
+                      ? `✗ ${cloudStatus.last_verify_at ? formatDate(cloudStatus.last_verify_at) : "date unavailable"}`
+                      : "not yet verified"}
+                </strong>
+              </div>
             )}
             <button
               className="review-btn approve admin-backup-button"

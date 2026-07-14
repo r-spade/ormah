@@ -46,6 +46,7 @@ def run_auto_cluster(engine) -> None:
             node = engine.file_store.load(node_id)
             if node:
                 node.space = most_common
+                node.touch_updated()
                 engine.file_store.save(node)
 
             assigned += 1

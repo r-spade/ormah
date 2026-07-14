@@ -68,11 +68,15 @@ def _find_binary(name: str) -> str | None:
     return None
 ENV_PATH = ENV_DIR / ".env"
 WRAPPER_PATH = ENV_DIR / "ormah-server"
+CLOUD_RECOVERY_FILENAMES = frozenset({"cloud.key", "ormah-recovery-kit.md"})
 
 CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
 CODEX_AGENTS_SENTINEL_START = "<!-- ormah:start -->"
 CODEX_AGENTS_SENTINEL_END = "<!-- ormah:end -->"
+PI_AGENTS_MD_SENTINEL_START = "<!-- ormah:start -->"
+PI_AGENTS_MD_SENTINEL_END = "<!-- ormah:end -->"
+PI_PACKAGE_SOURCE = "npm:ormah-pi"
 
 # Provider definitions: (display name, provider, env var for API key, default model)
 LLM_PROVIDERS = [
@@ -825,6 +829,184 @@ def install_claude_commands() -> None:
     ok("Slash command installed — /ormah-maintenance available")
 
 
+def _pi_agent_dir() -> Path:
+    configured = os.environ.get("PI_CODING_AGENT_DIR")
+    return Path(configured).expanduser() if configured else Path.home() / ".pi" / "agent"
+
+
+def _pi_agents_md_target() -> Path:
+    """Return Pi's global instructions file."""
+    return _pi_agent_dir() / "AGENTS.md"
+
+
+def install_pi_md(scope: str = "user", cwd: Path | None = None) -> None:
+    """Install ormah instructions into Pi's AGENTS.md (global or project)."""
+    if scope == "project":
+        base = cwd or Path.cwd()
+        target, label = base / "AGENTS.md", "./AGENTS.md"
+    else:  # user — Pi's global instructions file
+        target, label = _pi_agents_md_target(), "~/.pi/agent/AGENTS.md"
+    _install_markdown_block(
+        target,
+        "pi_instructions.md",
+        PI_AGENTS_MD_SENTINEL_START,
+        PI_AGENTS_MD_SENTINEL_END,
+    )
+    ok(f"Instructions added to {label}")
+
+
+def install_pi_agents() -> None:
+    """Install the Ormah maintenance subagent prompt into Pi's agent directory."""
+    target = _pi_agent_dir() / "agents"
+    target.mkdir(parents=True, exist_ok=True)
+    content = resources.files("ormah").joinpath("agents/ormah-pi-maintenance.md").read_text()
+    (target / "ormah-maintenance.md").write_text(content)
+    ok("Agent definition installed — ormah-maintenance subagent available in Pi")
+
+
+def _pi_settings_path() -> Path:
+    return _pi_agent_dir() / "settings.json"
+
+
+def _pi_source_values(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        return []
+
+    sources: list[str] = []
+    for entry in value:
+        if isinstance(entry, str):
+            sources.append(entry)
+        elif isinstance(entry, dict):
+            for key in ("source", "path", "package"):
+                candidate = entry.get(key)
+                if isinstance(candidate, str):
+                    sources.append(candidate)
+                    break
+    return sources
+
+
+def _is_ormah_pi_source(source: str) -> bool:
+    normalized = source.lower()
+    return (
+        "ormah-pi" in normalized
+        or "r-spade/ormah" in normalized
+        or "integrations/pi-plugin/ormah-pi.ts" in normalized
+    )
+
+
+def _pi_registered_sources() -> list[str]:
+    settings_path = _pi_settings_path()
+    if not settings_path.exists():
+        return []
+    try:
+        data = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    sources = [
+        *_pi_source_values(data.get("packages")),
+        *_pi_source_values(data.get("extensions")),
+    ]
+    return [source for source in sources if _is_ormah_pi_source(source)]
+
+
+def _remove_pi_settings_entries() -> None:
+    settings_path = _pi_settings_path()
+    if not settings_path.exists():
+        return
+    try:
+        data = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+
+    changed = False
+    for key in ("packages", "extensions"):
+        value = data.get(key)
+        if isinstance(value, str):
+            if _is_ormah_pi_source(value):
+                data.pop(key)
+                changed = True
+            continue
+        if not isinstance(value, list):
+            continue
+
+        filtered = [
+            entry
+            for entry in value
+            if not any(_is_ormah_pi_source(source) for source in _pi_source_values([entry]))
+        ]
+        if len(filtered) != len(value):
+            changed = True
+            if filtered:
+                data[key] = filtered
+            else:
+                data.pop(key)
+
+    if changed:
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _pi_extension_registered() -> bool:
+    return bool(_pi_registered_sources())
+
+
+def configure_pi_extension(ormah_bin: str) -> None:
+    """Ensure the official Ormah Pi package is installed.
+
+    Pi has no external hooks.json or MCP config to write — the ormah-pi extension
+    registers its own before_agent_start whisper hook and HTTP-proxied memory tools,
+    so wiring Pi means installing the package plus Ormah's instructions and agent.
+    """
+    del ormah_bin  # Kept for compatibility with other configure_* helpers.
+    if _pi_extension_registered():
+        ok("ormah-pi extension detected — whisper + memory tools active after /reload")
+        return
+
+    pi_bin = _find_binary("pi")
+    if pi_bin is None:
+        raise RuntimeError("Pi is not installed")
+
+    result = subprocess.run(
+        [pi_bin, "install", PI_PACKAGE_SOURCE],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        raise RuntimeError(f"Could not install {PI_PACKAGE_SOURCE}: {detail}")
+    if not _pi_extension_registered():
+        raise RuntimeError(f"Pi did not register {PI_PACKAGE_SOURCE} in settings.json")
+    ok("ormah-pi extension installed — whisper + memory tools active after /reload")
+
+
+def _remove_pi_extension() -> None:
+    sources = _pi_registered_sources()
+    if not sources:
+        return
+
+    pi_bin = _find_binary("pi")
+    if pi_bin is not None:
+        for source in dict.fromkeys(sources):
+            result = subprocess.run(
+                [pi_bin, "remove", source],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "unknown error").strip()
+                raise RuntimeError(f"Could not remove {source}: {detail}")
+    _remove_pi_settings_entries()
+    ok("Removed ormah-pi extension from Pi")
+
+
 def _remove_claude_agents() -> None:
     """Remove ormah agent definitions from ~/.claude/agents/."""
     agent_file = Path.home() / ".claude" / "agents" / "ormah-maintenance.md"
@@ -936,7 +1118,11 @@ def _write_env_file(env: dict[str, str]) -> None:
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.partition("=")[0].strip()
             if key in env and key not in seen:
-                out.append(f"{key}={env[key]}")
+                original_value = stripped.partition("=")[2].strip()
+                if env[key] == original_value:
+                    out.append(line)
+                else:
+                    out.append(f"{key}={env[key]}")
                 seen.add(key)
             # key removed by caller -> drop the line
         else:
@@ -1337,19 +1523,14 @@ def backfill_transcripts() -> None:
     ok(f"Backfill complete: {total_memories} memories from {len(selected)} transcripts")
 
 
-def configure_agent_maintenance(has_claude_code: bool, has_codex: bool) -> bool:
+def configure_agent_maintenance(agents: list[AgentDescriptor]) -> bool:
     """Ask whether to enable automatic agent-backed maintenance.
 
     Returns True if maintenance was enabled, False if skipped.
     """
-    if has_claude_code and has_codex:
-        agent_label = "Claude Code or Codex"
-    elif has_claude_code:
-        agent_label = "Claude Code"
-    elif has_codex:
-        agent_label = "Codex"
-    else:
+    if not agents:
         return False
+    agent_label = " or ".join(agent.name for agent in agents)
 
     print(f"\n  Use {agent_label} for automatic memory maintenance?")
     print("  (Runs judgment-heavy graph maintenance in the background when due,")
@@ -1362,7 +1543,7 @@ def configure_agent_maintenance(has_claude_code: bool, has_codex: bool) -> bool:
         env = _read_env_file()
         env["ORMAH_CLAUDE_MAINTENANCE_ENABLED"] = "true"
         _write_env_file(env)
-        if has_codex:
+        if any(agent.id == "codex" for agent in agents):
             _enable_codex_feature("multi_agent")
         ok(f"Automatic maintenance enabled — {agent_label} can run run_maintenance when signalled")
         return True
@@ -1527,6 +1708,23 @@ def _remove_codex_md_block() -> None:
         target, CODEX_AGENTS_SENTINEL_START, CODEX_AGENTS_SENTINEL_END, str(target)
     ):
         ok(f"Removed ormah block from {target}")
+
+
+def _remove_pi_md_block() -> None:
+    """Remove the ormah instructions block from ~/.pi/agent/AGENTS.md."""
+    target = _pi_agents_md_target()
+    if _remove_markdown_block(
+        target, PI_AGENTS_MD_SENTINEL_START, PI_AGENTS_MD_SENTINEL_END, "~/.pi/agent/AGENTS.md"
+    ):
+        ok("Removed ormah block from ~/.pi/agent/AGENTS.md")
+
+
+def _remove_pi_agents() -> None:
+    """Remove the Ormah maintenance subagent from Pi's agent directory."""
+    agent_file = _pi_agent_dir() / "agents" / "ormah-maintenance.md"
+    if agent_file.exists():
+        agent_file.unlink()
+        ok("Removed ormah-maintenance Pi agent definition")
 
 
 def _get_running_server_data_dir() -> Path | None:
@@ -1727,9 +1925,209 @@ def _remove_uv_tool_install_files() -> bool:
     return removed
 
 
+def _cloud_recovery_paths(config_dir: Path) -> tuple[Path, ...]:
+    """Return recovery artifacts that uninstall must never delete."""
+    return tuple(
+        path
+        for name in sorted(CLOUD_RECOVERY_FILENAMES)
+        if (path := config_dir / name).exists() or path.is_symlink()
+    )
+
+
+class CloudRecoveryPreflightError(RuntimeError):
+    """Raised when uninstall cannot prove cloud backups remain recoverable."""
+
+
+@dataclass(frozen=True)
+class CloudRecoveryPreflight:
+    """Recovery artifacts verified before destructive uninstall work begins."""
+
+    paths: tuple[Path, ...]
+    kit_regenerated: bool = False
+
+
+def _store_id_for_uninstall(memory_dirs: list[Path]) -> str | None:
+    """Return the single store id uninstall is about to remove, if present."""
+    from ormah.cloud.keys import CloudKeyError, extract_store_id
+
+    store_ids: dict[str, list[Path]] = {}
+    for memory_dir in dict.fromkeys(memory_dirs):
+        store_path = memory_dir / ".store_id"
+        if not store_path.is_file():
+            continue
+        try:
+            value = store_path.read_text(encoding="utf-8").strip()
+            store_id = extract_store_id(f"store_id: {value}")
+        except (CloudKeyError, OSError) as exc:
+            raise CloudRecoveryPreflightError(
+                f"Cannot validate cloud store identity at {store_path}: {exc}"
+            ) from exc
+        if store_id is None:  # Defensive: an explicit store_id line must parse or raise.
+            raise CloudRecoveryPreflightError(
+                f"Cannot validate cloud store identity at {store_path}."
+            )
+        store_ids.setdefault(store_id, []).append(store_path)
+
+    if len(store_ids) > 1:
+        paths = ", ".join(str(path) for found in store_ids.values() for path in found)
+        raise CloudRecoveryPreflightError(
+            "Multiple cloud store IDs would be deleted, but one recovery kit can only "
+            f"represent one store: {paths}"
+        )
+    return next(iter(store_ids), None)
+
+
+def _validated_identity_strings(path: Path) -> list[str]:
+    """Read and cryptographically validate every age identity in a file."""
+    from ormah.cloud.keys import load_identities, load_identity_strings
+
+    strings = load_identity_strings(path)
+    load_identities(path)
+    return strings
+
+
+def _prepare_cloud_recovery(
+    config_dir: Path,
+    memory_dirs: list[Path],
+) -> CloudRecoveryPreflight:
+    """Ensure uninstall leaves a complete key + store-id recovery path.
+
+    A valid kit is left byte-for-byte untouched. A missing or stale kit is
+    regenerated only when the current key and one authoritative store id are
+    both available. Valid mismatched store ids fail closed because overwriting
+    that kit could orphan a different store.
+    """
+    from ormah.cloud.crypto import CloudCryptoError
+    from ormah.cloud.keys import CloudKeyError, extract_store_id, write_recovery_kit
+
+    paths = _cloud_recovery_paths(config_dir)
+    if not paths:
+        return CloudRecoveryPreflight(())
+
+    key_path = config_dir / "cloud.key"
+    kit_path = config_dir / "ormah-recovery-kit.md"
+    expected_store_id = _store_id_for_uninstall(memory_dirs)
+
+    key_identities: list[str] | None = None
+    if key_path.exists() or key_path.is_symlink():
+        if not key_path.is_file():
+            raise CloudRecoveryPreflightError(
+                f"Cloud key is not a readable file: {key_path}"
+            )
+        try:
+            key_identities = _validated_identity_strings(key_path)
+        except (CloudKeyError, CloudCryptoError, OSError) as exc:
+            raise CloudRecoveryPreflightError(
+                f"Cloud key validation failed at {key_path}: {exc}"
+            ) from exc
+
+    kit_identities: list[str] | None = None
+    kit_store_id: str | None = None
+    kit_error: Exception | None = None
+    if kit_path.exists() or kit_path.is_symlink():
+        if not kit_path.is_file():
+            kit_error = CloudRecoveryPreflightError(
+                f"Recovery kit is not a readable file: {kit_path}"
+            )
+        else:
+            try:
+                kit_identities = _validated_identity_strings(kit_path)
+            except (CloudKeyError, CloudCryptoError, OSError) as exc:
+                kit_error = exc
+            try:
+                kit_store_id = extract_store_id(str(kit_path))
+            except (CloudKeyError, OSError) as exc:
+                kit_error = exc
+
+    if (
+        kit_identities
+        and kit_store_id
+        and (key_identities is None or kit_identities == key_identities)
+        and (expected_store_id is None or kit_store_id == expected_store_id)
+    ):
+        return CloudRecoveryPreflight(_cloud_recovery_paths(config_dir))
+
+    if key_identities is None:
+        detail = f": {kit_error}" if kit_error else ""
+        raise CloudRecoveryPreflightError(
+            "No valid cloud key is available to repair the incomplete recovery "
+            f"kit at {kit_path}{detail}"
+        )
+    if (
+        expected_store_id is not None
+        and kit_store_id is not None
+        and kit_store_id != expected_store_id
+    ):
+        raise CloudRecoveryPreflightError(
+            f"Recovery kit store ID {kit_store_id} does not match the store being "
+            f"removed ({expected_store_id}); refusing to overwrite either store's kit."
+        )
+    target_store_id = expected_store_id or kit_store_id
+    if target_store_id is None:
+        raise CloudRecoveryPreflightError(
+            "The cloud key exists, but no store ID is available in either the "
+            "recovery kit or the memory store. Uninstall cannot guarantee recovery."
+        )
+
+    try:
+        write_recovery_kit(
+            target_store_id,
+            key_path=key_path,
+            kit_path=kit_path,
+        )
+        regenerated_identities = _validated_identity_strings(kit_path)
+        regenerated_store_id = extract_store_id(str(kit_path))
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        raise CloudRecoveryPreflightError(
+            f"Could not create a complete recovery kit at {kit_path}: {exc}"
+        ) from exc
+    if regenerated_identities != key_identities or regenerated_store_id != target_store_id:
+        raise CloudRecoveryPreflightError(
+            f"Recovery-kit verification failed after writing {kit_path}."
+        )
+    return CloudRecoveryPreflight(_cloud_recovery_paths(config_dir), kit_regenerated=True)
+
+
+def _remove_config_preserving_cloud_recovery(config_dir: Path) -> tuple[Path, ...]:
+    """Delete Ormah config while retaining zero-knowledge recovery material."""
+    preserved = _cloud_recovery_paths(config_dir)
+    if not preserved:
+        shutil.rmtree(config_dir)
+        return ()
+
+    preserved_names = {path.name for path in preserved}
+    for child in config_dir.iterdir():
+        if child.name in preserved_names:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+    ok(f"Deleted Ormah config from {config_dir}")
+    for path in preserved:
+        warn(f"Preserved cloud recovery material: {path}")
+    return preserved
+
+
 def run_uninstall(yes: bool = False) -> None:
-    """Remove all ormah integrations, data, and optionally the package itself."""
-    print("This will remove all ormah integrations and data.\n")
+    """Remove Ormah while preserving zero-knowledge cloud recovery material."""
+    print(
+        "This will remove Ormah integrations, local memory, caches, and account "
+        "configuration. Cloud recovery files are preserved.\n"
+    )
+
+    config_dir = Path.home() / ".config" / "ormah"
+    recovery_paths = _cloud_recovery_paths(config_dir)
+    if recovery_paths:
+        warn("Cloud recovery material detected; uninstall will not delete it:")
+        for path in recovery_paths:
+            warn(f"  {path}")
+        warn(
+            "Keep these files safe. Deleting them can make encrypted cloud backups "
+            "permanently unreadable."
+        )
+        print()
 
     if not yes:
         try:
@@ -1756,6 +2154,29 @@ def run_uninstall(yes: bool = False) -> None:
     # that resolves differently depending on the invoking binary's config).
     live_data_dir = _get_running_server_data_dir()
 
+    from ormah.config import settings as _settings
+
+    config_mem_dir = _settings.memory_dir
+    if not config_mem_dir.is_absolute():
+        config_mem_dir = Path.home() / config_mem_dir
+    config_mem_dir = config_mem_dir.resolve()
+
+    if recovery_paths:
+        step("Verifying cloud recovery")
+        try:
+            recovery = _prepare_cloud_recovery(
+                config_dir,
+                list(filter(None, [live_data_dir, config_mem_dir])),
+            )
+        except CloudRecoveryPreflightError as exc:
+            warn(str(exc))
+            warn("Uninstall cancelled before removing any data or integrations.")
+            return
+        if recovery.kit_regenerated:
+            ok(f"Recovery kit refreshed and verified: {config_dir / 'ormah-recovery-kit.md'}")
+        else:
+            ok("Cloud recovery material is complete and verified")
+
     # a. Stop daemon
     step("Stopping server")
     from ormah.server_manager import uninstall_autostart
@@ -1770,6 +2191,13 @@ def run_uninstall(yes: bool = False) -> None:
     step("Removing MCP registration")
     _remove_mcp_registration()
 
+    # c.5 Remove the Pi package registration before deleting Ormah's own files.
+    step("Removing Pi extension")
+    try:
+        _remove_pi_extension()
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Could not remove ormah-pi automatically: {exc}")
+
     # d. Remove CLAUDE.md block
     step("Removing CLAUDE.md instructions")
     _remove_claude_md_block()
@@ -1777,6 +2205,8 @@ def run_uninstall(yes: bool = False) -> None:
     _remove_codex_agents()
     _remove_claude_agents()
     _remove_claude_commands()
+    _remove_pi_md_block()
+    _remove_pi_agents()
 
     # e. Delete data directories
     step("Deleting data directories")
@@ -1784,18 +2214,12 @@ def run_uninstall(yes: bool = False) -> None:
     xdg_dirs = [
         Path.home() / ".local" / "share" / "ormah",
         Path.home() / ".cache" / "ormah",
-        Path.home() / ".config" / "ormah",
+        config_dir,
     ]
     data_dirs: list[Path] = list(xdg_dirs)
 
     # Add the live server's actual data dir if it falls outside the XDG tree.
     # Also add the config-derived path as a safety net (handles custom ORMAH_MEMORY_DIR).
-    from ormah.config import settings as _settings
-    config_mem_dir = _settings.memory_dir
-    if not config_mem_dir.is_absolute():
-        config_mem_dir = Path.home() / config_mem_dir
-    config_mem_dir = config_mem_dir.resolve()
-
     for candidate in filter(None, [live_data_dir, config_mem_dir]):
         if not any(candidate == d or str(candidate).startswith(str(d) + "/")
                    for d in xdg_dirs):
@@ -1804,8 +2228,13 @@ def run_uninstall(yes: bool = False) -> None:
 
     for d in data_dirs:
         if d.exists():
-            shutil.rmtree(d)
-            ok(f"Deleted {d}")
+            if d == config_dir:
+                preserved = _remove_config_preserving_cloud_recovery(d)
+                if not preserved:
+                    ok(f"Deleted {d}")
+            else:
+                shutil.rmtree(d)
+                ok(f"Deleted {d}")
         else:
             info(f"{d} not found — skipping")
 
@@ -1851,6 +2280,7 @@ class AgentDescriptor:
     is_wired_fn: Callable[[], bool]
     wire_fn: Callable[[], None]
     unwire_fn: Callable[[], None]
+    supports_maintenance: bool = False
     # None = available on all platforms; ["darwin"] = macOS only, etc.
     platform: list[str] | None = field(default=None)
 
@@ -1925,6 +2355,31 @@ def _claude_desktop_is_wired() -> bool:
         return False
 
 
+def _pi_detected() -> bool:
+    return _find_binary("pi") is not None
+
+
+def _pi_guidance_installed() -> bool:
+    target = _pi_agents_md_target()
+    try:
+        text = target.read_text()
+    except OSError:
+        return False
+    return PI_AGENTS_MD_SENTINEL_START in text and PI_AGENTS_MD_SENTINEL_END in text
+
+
+def _pi_agent_installed() -> bool:
+    agent_file = _pi_agent_dir() / "agents" / "ormah-maintenance.md"
+    try:
+        return "ormah_run_maintenance" in agent_file.read_text()
+    except OSError:
+        return False
+
+
+def _pi_is_wired() -> bool:
+    return _pi_extension_registered() and _pi_guidance_installed() and _pi_agent_installed()
+
+
 def _claude_code_wire() -> None:
     ormah_bin = get_ormah_bin_path()
     configure_claude_hooks(ormah_bin)
@@ -1969,6 +2424,18 @@ def _claude_desktop_unwire() -> None:
     _remove_mcp_from_json(desktop_config)
 
 
+def _pi_wire() -> None:
+    configure_pi_extension(get_ormah_bin_path())
+    install_pi_md()
+    install_pi_agents()
+
+
+def _pi_unwire() -> None:
+    _remove_pi_extension()
+    _remove_pi_md_block()
+    _remove_pi_agents()
+
+
 AGENT_REGISTRY: list[AgentDescriptor] = [
     AgentDescriptor(
         id="claude_code",
@@ -1977,6 +2444,7 @@ AGENT_REGISTRY: list[AgentDescriptor] = [
         is_wired_fn=_claude_code_is_wired,
         wire_fn=_claude_code_wire,
         unwire_fn=_claude_code_unwire,
+        supports_maintenance=True,
     ),
     AgentDescriptor(
         id="codex",
@@ -1985,6 +2453,7 @@ AGENT_REGISTRY: list[AgentDescriptor] = [
         is_wired_fn=_codex_is_wired,
         wire_fn=_codex_wire,
         unwire_fn=_codex_unwire,
+        supports_maintenance=True,
     ),
     AgentDescriptor(
         id="claude_desktop",
@@ -1995,6 +2464,15 @@ AGENT_REGISTRY: list[AgentDescriptor] = [
         unwire_fn=_claude_desktop_unwire,
         platform=["darwin"],
     ),
+    AgentDescriptor(
+        id="pi",
+        name="Pi",
+        detect_fn=_pi_detected,
+        is_wired_fn=_pi_is_wired,
+        wire_fn=_pi_wire,
+        unwire_fn=_pi_unwire,
+        supports_maintenance=True,
+    ),
 ]
 
 
@@ -2003,6 +2481,17 @@ def _get_agent(agent_id: str) -> AgentDescriptor:
         if agent.id == agent_id:
             return agent
     raise ValueError(f"Unknown agent: {agent_id!r}")
+
+
+def _detected_agents() -> list[AgentDescriptor]:
+    import platform as _platform
+
+    current_os = _platform.system().lower()
+    return [
+        agent
+        for agent in AGENT_REGISTRY
+        if (agent.platform is None or current_os in agent.platform) and agent.detect_fn()
+    ]
 
 
 def wire_agent(agent_id: str) -> dict:
@@ -2076,8 +2565,6 @@ def run_setup_json() -> dict:
     helpers is sent to stderr so stdout stays clean JSON for the caller to
     parse.
     """
-    import platform as _platform
-    current_os = _platform.system().lower()
     ormah_bin = get_ormah_bin_path()
     detected_ids: list[str] = []
     wired: list[str] = []
@@ -2090,10 +2577,7 @@ def run_setup_json() -> dict:
         except Exception as exc:  # noqa: BLE001
             warnings["models"] = f"{type(exc).__name__}: {exc}"
 
-        for agent in AGENT_REGISTRY:
-            available = agent.platform is None or current_os in agent.platform
-            if not available or not agent.detect_fn():
-                continue
+        for agent in _detected_agents():
             detected_ids.append(agent.id)
             try:
                 agent.wire_fn()
@@ -2128,18 +2612,13 @@ def run_setup(
     # 1. Find absolute path to ormah binary
     ormah_bin = get_ormah_bin_path()
 
-    # 2. Detect supported coding agents and offer maintenance upfront — no API key needed
-    has_claude_code = _find_binary("claude") is not None
-    has_codex = _find_binary("codex") is not None or (Path.home() / ".codex").exists()
+    # 2. Detect supported agents and offer maintenance upfront — no API key needed
+    detected_agents = _detected_agents()
+    maintenance_agents = [agent for agent in detected_agents if agent.supports_maintenance]
     agent_maintenance = False
-    if (has_claude_code or has_codex) and not ci and not update and not skip_client_setup:
-        if has_claude_code and has_codex:
-            step("Claude Code and Codex detected")
-        elif has_claude_code:
-            step("Claude Code detected")
-        else:
-            step("Codex detected")
-        agent_maintenance = configure_agent_maintenance(has_claude_code, has_codex)
+    if maintenance_agents and not ci and not update and not skip_client_setup:
+        step(f"{' and '.join(agent.name for agent in maintenance_agents)} detected")
+        agent_maintenance = configure_agent_maintenance(maintenance_agents)
 
     # 3. Configure LLM — skip if agent-backed maintenance is handling background jobs
     if ci:
@@ -2196,30 +2675,17 @@ def run_setup(
             _diagnose_server_failure()
             server_ok = False
 
-    desktop_configured = False
     if not skip_client_setup:
-        if has_claude_code:
-            step("Hooking up Claude Code")
-            configure_claude_hooks(ormah_bin)
-            configure_claude_code_mcp(ormah_bin)
-            install_claude_md()
-            install_claude_agents()
-            install_claude_commands()
+        for agent in detected_agents:
+            step(f"Hooking up {agent.name}")
+            agent.wire_fn()
 
-        if has_codex:
-            step("Hooking up Codex")
-            configure_codex_hooks(ormah_bin)
-            configure_codex_mcp(ormah_bin)
-            install_codex_md()
-            install_codex_agents()
-
-        desktop_configured = configure_claude_desktop(ormah_bin)
-
-        if not has_claude_code and not has_codex and not desktop_configured:
-            warn("No Claude Code, Claude Desktop, or Codex detected")
+        if not detected_agents:
+            supported = ", ".join(agent.name for agent in AGENT_REGISTRY)
+            warn(f"No supported agents detected ({supported})")
             info("You can manually configure MCP in your AI client:")
             print(f"    Command: {ormah_bin} mcp")
-            info("Or run 'ormah setup' again after installing Claude Code, Claude Desktop, or Codex")
+            info("Or run 'ormah setup' again after installing a supported agent")
 
     # 7. Cold start backfill (needs server + LLM)
     if server_ok and not ci:
