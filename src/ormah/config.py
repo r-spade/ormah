@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     duplicate_check_interval_minutes: int = 1440
     auto_cluster_interval_minutes: int = 60
 
+    # Embedding backfill / vector-store reconciliation (#32).
+    # Set the interval to a very large value (e.g. 999999) to disable the
+    # in-process recurring job and let the 02:00 sleep-cycle (run-all) drive it.
+    embedding_backfill_interval_minutes: int = 60
+    embedding_index_max_retries: int = 2
+    embedding_index_retry_backoff_seconds: float = 0.5
+
     # Hippocampus (file watching & auto-ingestion)
     hippocampus_watch_dirs: list[Path] = []
     hippocampus_debounce_seconds: float = 2.0
@@ -366,11 +373,26 @@ class Settings(BaseSettings):
         "conflict_check_interval_minutes",
         "duplicate_check_interval_minutes",
         "auto_cluster_interval_minutes",
+        "embedding_backfill_interval_minutes",
     )
     @classmethod
     def _interval_minutes_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"interval must be >= 1 minute, got {v}")
+        return v
+
+    @field_validator("embedding_index_max_retries")
+    @classmethod
+    def _embedding_index_max_retries_nonneg(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"embedding_index_max_retries must be >= 0, got {v}")
+        return v
+
+    @field_validator("embedding_index_retry_backoff_seconds")
+    @classmethod
+    def _embedding_index_backoff_nonneg(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"embedding_index_retry_backoff_seconds must be >= 0, got {v}")
         return v
 
     @field_validator("hippocampus_debounce_seconds")

@@ -284,3 +284,27 @@ def test_consolidation_max_nodes_zero_rejected():
 def test_consolidation_inverted_bounds_rejected():
     with pytest.raises(ValidationError, match="consolidation_max_cluster_nodes"):
         _settings(consolidation_min_cluster_size=3, consolidation_max_cluster_nodes=2)
+
+
+# --- Embedding backfill / vector-store reconciliation (#32) ---
+
+def test_embedding_backfill_settings_defaults():
+    s = _settings()
+    assert s.embedding_backfill_interval_minutes == 60
+    assert s.embedding_index_max_retries == 2
+    assert s.embedding_index_retry_backoff_seconds == 0.5
+
+
+def test_embedding_backfill_interval_rejects_zero():
+    with pytest.raises(ValidationError):
+        _settings(embedding_backfill_interval_minutes=0)
+
+
+def test_embedding_index_max_retries_rejects_negative():
+    with pytest.raises(ValidationError):
+        _settings(embedding_index_max_retries=-1)
+
+
+def test_embedding_index_retry_backoff_rejects_negative():
+    with pytest.raises(ValidationError):
+        _settings(embedding_index_retry_backoff_seconds=-0.1)

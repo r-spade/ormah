@@ -115,9 +115,17 @@ export default function AdminPanel({ open, onClose, onToast }: Props) {
     setRunningAll(true);
     setLastResult(null);
     try {
-      await runAllTasks();
-      setLastResult({ task: "__all__", ok: true });
-      onToast("Sleep cycle complete", "success");
+      const result = await runAllTasks();
+      if (result.status === "completed") {
+        setLastResult({ task: "__all__", ok: true });
+        onToast("Sleep cycle complete", "success");
+      } else {
+        const failed = Object.entries(result.results)
+          .filter(([, v]) => v.startsWith("error:"))
+          .map(([task]) => task);
+        setLastResult({ task: "__all__", ok: false });
+        onToast(`Sleep cycle degraded — failed: ${failed.join(", ")}`, "error");
+      }
     } catch {
       setLastResult({ task: "__all__", ok: false });
       onToast("Sleep cycle failed", "error");

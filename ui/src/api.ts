@@ -132,8 +132,17 @@ export function runAdminTask(taskId: string): Promise<{ status: string; task: st
   return post(`/admin/tasks/${taskId}/run`);
 }
 
-export function runAllTasks(): Promise<{ status: string; results: Record<string, string> }> {
-  return post("/admin/tasks/run-all");
+export async function runAllTasks(): Promise<{ status: string; results: Record<string, string> }> {
+  // A 503 with a degraded body is an expected partial-failure signal (C1/I1),
+  // not a transport error — read the body instead of throwing on it.
+  const res = await fetch(`${BASE}/admin/tasks/run-all`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok && res.status !== 503) {
+    throw new Error(`POST /admin/tasks/run-all: ${res.status}`);
+  }
+  return res.json();
 }
 
 export function pauseTask(taskId: string): Promise<{ status: string; task: string }> {

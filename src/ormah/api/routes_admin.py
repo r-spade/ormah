@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -28,6 +29,7 @@ _TASK_RUNNERS = {
     "memory_backup": ("ormah.backup", "run_auto_backup"),
     "cloud_backup": ("ormah.cloud.jobs", "run_cloud_backup"),
     "restore_verification": ("ormah.cloud.jobs", "run_restore_verification"),
+    "embedding_backfill": ("ormah.background.embedding_backfill", "run_embedding_backfill"),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -43,12 +45,14 @@ _TASK_DESCRIPTIONS = {
     "memory_backup": "Creates a local backup of memory source files when one is due.",
     "cloud_backup": "Encrypts and uploads a due cloud backup without changing the sync head.",
     "restore_verification": "Downloads, decrypts, rebuilds, and searches the latest cloud backup.",
+    "embedding_backfill": "Backfills missing vector embeddings (delta) or re-embeds all on an embedding-schema bump. Keeps vector search complete after restarts and overnight ingest (#32).",
 }
 
 # Order for sleep cycle (full maintenance pass)
 _SLEEP_CYCLE_ORDER = [
     "importance_scorer",
     "index_updater",
+    "embedding_backfill",
     "duplicate_merger",
     "conflict_detector",
     "auto_linker",
@@ -106,7 +110,26 @@ def health(request: Request):
     tracker = getattr(request.app.state, "job_tracker", None)
     result: dict = {"status": "ok"}
     if tracker is not None:
-        result["jobs"] = tracker.snapshot()
+        snap = tracker.snapshot()
+        result["jobs"] = snap
+        # CR2: promote to degraded when embedding_backfill's most recent run
+        # failed — otherwise a scheduler-backed outage stays invisible to callers
+        # that only read the top-level status.
+        job = snap.get("embedding_backfill")
+        if job and job.get("last_error"):
+            ls = job.get("last_success")
+            let = job.get("last_error_time")
+            if ls is None or (let is not None and let > ls):
+                result["status"] = "degraded"
+                result["embedding_backfill"] = "degraded: last run failed"
+    else:
+        # No scheduler: the backfill fallback is the only healer. Surface a
+        # persistent outage that would otherwise be invisible (council CH2).
+        from ormah import main as _main
+
+        if getattr(_main, "_fallback_degraded", False):
+            result["status"] = "degraded"
+            result["embedding_backfill"] = "degraded: fallback retrying"
     manager = getattr(request.app.state, "maintenance_manager", None)
     if manager is not None:
         result["maintenance"] = manager.get_status()
@@ -273,11 +296,14 @@ def run_task(task_id: str, request: Request):
 def run_all_tasks(request: Request):
     """Run all background tasks sequentially in sleep-cycle order."""
     import importlib
+    import time as _time
 
     engine = request.app.state.engine
+    tracker = getattr(request.app.state, "job_tracker", None)
     results: dict[str, str] = {}
 
     for task_id in _SLEEP_CYCLE_ORDER:
+        t0 = _time.monotonic()
         try:
             if task_id == "index_updater":
                 engine.builder.incremental_update()
@@ -287,7 +313,21 @@ def run_all_tasks(request: Request):
                 runner = getattr(module, func_name)
                 runner(engine)
             results[task_id] = "ok"
+            if tracker is not None:
+                tracker.record_success(task_id, (_time.monotonic() - t0) * 1000)
         except Exception as exc:
             results[task_id] = f"error: {exc}"
+            # CRC: persist the failure so /admin/health reflects this manual run
+            # instead of reverting to a stale ok.
+            if tracker is not None:
+                tracker.record_failure(task_id, str(exc), (_time.monotonic() - t0) * 1000)
 
+    has_errors = any(v.startswith("error:") for v in results.values())
+    if has_errors:
+        # I1: a partial failure must not look like success to HTTP-only callers
+        # (cron, scripts). Surface it as 503 while keeping the per-task body.
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "results": results},
+        )
     return {"status": "completed", "results": results}
