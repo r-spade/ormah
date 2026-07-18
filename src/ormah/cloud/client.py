@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import socket
+import time
 import uuid
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,15 @@ DATA_DIR = Path.home() / ".local" / "share" / "ormah"
 DEVICE_ID_PATH = DATA_DIR / "device_id"
 ACCOUNT_TOKEN_KEY = "ORMAH_ACCOUNT_TOKEN"
 ACCOUNT_EMAIL_KEY = "ORMAH_ACCOUNT_EMAIL"
+PROTOCOL_CACHE_SECONDS = 300
+DEFAULT_MAX_CIPHERTEXT_BYTES = 512 * 1024 * 1024
+
+
+def _client_version() -> str:
+    try:
+        return package_version("ormah")
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 class CloudError(RuntimeError):
@@ -96,6 +107,7 @@ class CloudClient:
         self.base_url = base_url.rstrip("/") + "/"
         self.token = token
         self.device_id = device_id
+        self._protocol_cache: tuple[float, dict[str, Any]] | None = None
         self._http = httpx.Client(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout),
@@ -111,10 +123,14 @@ class CloudClient:
     def __exit__(self, *args) -> None:
         self.close()
 
-    def _headers(self) -> dict[str, str]:
-        if not self.token:
-            return {}
-        return {"Authorization": f"Bearer {self.token}"}
+    def _headers(self, authenticated: bool) -> dict[str, str]:
+        headers = {
+            "X-Ormah-Client-Version": _client_version(),
+            "X-Request-ID": str(uuid.uuid4()),
+        }
+        if authenticated and self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def _request_json(
         self,
@@ -125,10 +141,14 @@ class CloudClient:
         **kwargs,
     ) -> dict[str, Any]:
         try:
+            headers = self._headers(authenticated)
+            supplied_headers = kwargs.pop("headers", None)
+            if supplied_headers:
+                headers.update(supplied_headers)
             response = self._http.request(
                 method,
                 path,
-                headers=self._headers() if authenticated else {},
+                headers=headers,
                 **kwargs,
             )
         except httpx.HTTPError as exc:
@@ -193,6 +213,39 @@ class CloudClient:
     def get_entitlements(self) -> dict[str, Any]:
         return self._request_json("GET", "me/entitlements")
 
+    def get_protocol(self, *, refresh: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if (
+            not refresh
+            and self._protocol_cache is not None
+            and now - self._protocol_cache[0] < PROTOCOL_CACHE_SECONDS
+        ):
+            return self._protocol_cache[1]
+        payload = self._request_json("GET", "protocol", authenticated=False)
+        self._protocol_cache = (now, payload)
+        return payload
+
+    def processing_limit(self, *, require_hardened_write: bool) -> int:
+        try:
+            protocol = self.get_protocol()
+        except CloudError:
+            if require_hardened_write:
+                raise
+            return DEFAULT_MAX_CIPHERTEXT_BYTES
+        capabilities = protocol.get("capabilities")
+        limit = protocol.get("max_ciphertext_bytes")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise CloudError("Ormah Cloud advertised an invalid ciphertext processing limit.")
+        if require_hardened_write and (
+            protocol.get("protocol_version") != 2
+            or not isinstance(capabilities, list)
+            or "immutable-promotion" not in capabilities
+        ):
+            raise CloudError(
+                "Ormah Cloud does not advertise immutable upload promotion; upload stopped."
+            )
+        return min(limit, DEFAULT_MAX_CIPHERTEXT_BYTES)
+
     def revoke_token(self) -> dict[str, Any]:
         device_id = self.device_id or get_or_create_device_id()
         payload = self._request_json("GET", "me/tokens")
@@ -214,6 +267,11 @@ class CloudClient:
         return self._request_json("POST", "me/tokens/revoke", json={"token_id": token_id})
 
     def create_upload(self, store_id: str, size: int, sha256: str) -> dict[str, Any]:
+        limit = self.processing_limit(require_hardened_write=True)
+        if size > limit:
+            raise CloudError(
+                f"Encrypted bundle is larger than the supported {limit}-byte processing limit."
+            )
         return self._request_json(
             "POST",
             f"stores/{store_id}/uploads",

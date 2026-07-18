@@ -34,6 +34,8 @@ class FakeCloudClient:
             "upload_id": "upload-1",
             "snapshot_id": "01SNAPSHOT",
             "put_url": "https://objects.example/put",
+            "expires_at": (NOW + timedelta(minutes=15)).isoformat(),
+            "required_headers": {"x-amz-checksum-sha256": "signed-checksum"},
         }
 
     def finalize_upload(self, *args):
@@ -49,6 +51,9 @@ class FakeCloudClient:
 
     def presign_download(self, store_id, snapshot_id):
         return {"get_url": "https://objects.example/get"}
+
+    def processing_limit(self, *, require_hardened_write):
+        return 512 * 1024 * 1024
 
     def close(self):
         self.closed = True
@@ -106,7 +111,7 @@ def _patch_upload_prerequisites(monkeypatch, client: FakeCloudClient):
         return out_path
 
     monkeypatch.setattr(jobs, "build_bundle", fake_bundle)
-    monkeypatch.setattr(jobs, "put_file", lambda url, path: None)
+    monkeypatch.setattr(jobs, "put_file", lambda url, path, headers: None)
 
 
 def test_cloud_backup_disabled_is_first_guard(tmp_path, monkeypatch):
@@ -213,7 +218,11 @@ def test_failed_put_records_error_and_never_finalizes(
     settings, store_id = _settings(tmp_path)
     client = FakeCloudClient()
     _patch_upload_prerequisites(monkeypatch, client)
-    monkeypatch.setattr(jobs, "put_file", lambda url, path: (_ for _ in ()).throw(OSError("PUT failed")))
+    monkeypatch.setattr(
+        jobs,
+        "put_file",
+        lambda url, path, headers: (_ for _ in ()).throw(OSError("PUT failed")),
+    )
 
     assert jobs.run_cloud_backup(SimpleNamespace(settings=settings)) is None
     assert client.finalized == []

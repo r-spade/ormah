@@ -43,6 +43,9 @@ class RestoreClient:
     def presign_download(self, store_id, snapshot_id):
         return {"get_url": "https://objects.example/restore"}
 
+    def processing_limit(self, *, require_hardened_write):
+        return 512 * 1024 * 1024
+
     def close(self):
         self.closed = True
 
@@ -122,6 +125,32 @@ def test_cloud_restore_does_not_check_entitlement(tmp_path, monkeypatch):
     )
 
     with pytest.raises(restore.CloudRestoreError, match="No committed"):
+        restore_cloud_snapshot(settings)
+
+
+def test_cloud_restore_rejects_oversized_snapshot_before_download(tmp_path, monkeypatch):
+    from ormah.cloud import restore
+
+    store_id = str(uuid.uuid4())
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    settings = Settings(
+        memory_dir=memory_dir,
+        backup_dir=tmp_path / "backups",
+        account_token="test-token",
+    )
+    client = RestoreClient()
+    client.processing_limit = lambda **kwargs: 50
+    monkeypatch.setattr(restore, "key_file_exists", lambda: True)
+    monkeypatch.setattr(restore, "client_from_settings", lambda settings: client)
+    monkeypatch.setattr(
+        restore,
+        "download_file",
+        lambda *args: (_ for _ in ()).throw(AssertionError("download must not start")),
+    )
+
+    with pytest.raises(restore.CloudRestoreError, match="safe processing limit"):
         restore_cloud_snapshot(settings)
 
 

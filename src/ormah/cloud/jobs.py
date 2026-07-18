@@ -11,7 +11,7 @@ import tempfile
 
 from ormah.backup import BackupInfo, service_from_settings
 from ormah.cloud.bundle import open_bundle, build_bundle
-from ormah.cloud.client import client_from_settings
+from ormah.cloud.client import CloudError, client_from_settings
 from ormah.cloud.entitlements import EntitlementStatus, check_entitlement
 from ormah.cloud.keys import (
     STORE_ID_NAME,
@@ -150,10 +150,22 @@ def run_cloud_backup(engine) -> str | None:
             upload_id = upload.get("upload_id")
             snapshot_id = upload.get("snapshot_id")
             put_url = upload.get("put_url")
+            expires_at = upload.get("expires_at")
+            required_headers = upload.get("required_headers", {})
             if not all(isinstance(value, str) and value for value in (upload_id, snapshot_id, put_url)):
                 raise RuntimeError("Cloud upload reservation response was malformed.")
+            if not isinstance(expires_at, str):
+                raise RuntimeError("Cloud upload reservation did not include an expiry.")
+            parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if parsed_expiry.tzinfo is None or parsed_expiry <= _utc_now():
+                raise RuntimeError("Cloud upload reservation is already expired.")
+            if not isinstance(required_headers, dict) or not all(
+                isinstance(name, str) and isinstance(value, str)
+                for name, value in required_headers.items()
+            ):
+                raise RuntimeError("Cloud upload reservation headers were malformed.")
 
-            put_file(put_url, bundle)
+            put_file(put_url, bundle, required_headers)
             finalized = client.finalize_upload(store_id, upload_id)
             finalized_snapshot = finalized.get("snapshot_id")
             if finalized.get("status") != "committed" or finalized_snapshot != snapshot_id:
@@ -246,6 +258,11 @@ def run_restore_verification(engine) -> bool:
         snapshot_id = latest.get("snapshot_id") if isinstance(latest, dict) else None
         if not isinstance(snapshot_id, str) or not snapshot_id:
             raise RuntimeError("Cloud snapshot listing was malformed.")
+        size_bytes = latest.get("size_bytes") if isinstance(latest, dict) else None
+        if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes <= 0:
+            raise RuntimeError("Cloud snapshot listing did not include a valid size.")
+        if size_bytes > client.processing_limit(require_hardened_write=False):
+            raise CloudError("Cloud snapshot exceeds this client's safe processing limit.")
 
         presigned = client.presign_download(store_id, snapshot_id)
         get_url = presigned.get("get_url")

@@ -80,6 +80,16 @@ def test_revoke_resolves_server_token_id_from_device():
 @respx.mock
 def test_upload_blob_and_head_methods_match_service_shapes():
     store_id = str(uuid.uuid4())
+    protocol_route = respx.get(f"{BASE_URL}/protocol").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "protocol_version": 2,
+                "capabilities": ["immutable-promotion"],
+                "max_ciphertext_bytes": 1024,
+            },
+        )
+    )
     create_route = respx.post(f"{BASE_URL}/stores/{store_id}/uploads").mock(
         return_value=httpx.Response(
             201,
@@ -118,6 +128,9 @@ def test_upload_blob_and_head_methods_match_service_shapes():
     assert create_route.calls[0].request.content == (
         b'{"size_bytes":42,"sha256":"' + b"a" * 64 + b'"}'
     )
+    assert create_route.calls[0].request.headers["x-ormah-client-version"]
+    assert uuid.UUID(create_route.calls[0].request.headers["x-request-id"])
+    assert protocol_route.call_count == 1
     assert finalize_route.calls[0].request.content == b'{"advance_head":{"expected_seq":3}}'
     assert download_route.calls[0].request.content == b'{"snapshot_id":"snapshot"}'
 
@@ -174,6 +187,42 @@ def test_non_cas_conflict_still_raises():
 
 
 @respx.mock
+def test_upload_fails_closed_without_immutable_protocol():
+    respx.get(f"{BASE_URL}/protocol").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "protocol_version": 1,
+                "capabilities": [],
+                "max_ciphertext_bytes": 1024,
+            },
+        )
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="immutable"):
+            client.create_upload(str(uuid.uuid4()), 42, "a" * 64)
+
+
+@respx.mock
+def test_upload_rejects_bundle_above_negotiated_limit_before_reservation():
+    respx.get(f"{BASE_URL}/protocol").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "protocol_version": 2,
+                "capabilities": ["immutable-promotion"],
+                "max_ciphertext_bytes": 10,
+            },
+        )
+    )
+    create = respx.post(f"{BASE_URL}/stores/{uuid.uuid4()}/uploads")
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="processing limit"):
+            client.create_upload(str(uuid.uuid4()), 11, "a" * 64)
+    assert not create.called
+
+
+@respx.mock
 def test_network_errors_are_wrapped():
     respx.get(f"{BASE_URL}/me/entitlements").mock(
         side_effect=httpx.ConnectError("offline")
@@ -181,6 +230,15 @@ def test_network_errors_are_wrapped():
     with CloudClient(BASE_URL, TOKEN) as client:
         with pytest.raises(CloudError, match="Could not reach"):
             client.get_entitlements()
+
+
+@respx.mock
+def test_read_processing_limit_falls_back_offline_but_write_does_not():
+    respx.get(f"{BASE_URL}/protocol").mock(side_effect=httpx.ConnectError("offline"))
+    with CloudClient(BASE_URL, TOKEN) as client:
+        assert client.processing_limit(require_hardened_write=False) == 512 * 1024 * 1024
+        with pytest.raises(CloudError, match="Could not reach"):
+            client.processing_limit(require_hardened_write=True)
 
 
 def test_device_id_is_stable_uuid4_and_mode_0600(tmp_path):

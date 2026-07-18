@@ -47,17 +47,17 @@ def _committed_blobs(client, store_id: str) -> list[dict[str, Any]]:
     return [blob for blob in blobs if isinstance(blob, dict)]
 
 
-def _select_snapshot(blobs: list[dict[str, Any]], requested: str | None) -> str:
+def _select_snapshot(blobs: list[dict[str, Any]], requested: str | None) -> dict[str, Any]:
     if not blobs:
         raise CloudRestoreError("No committed cloud snapshots are available for this store.")
     if requested:
         if any(blob.get("snapshot_id") == requested for blob in blobs):
-            return requested
+            return next(blob for blob in blobs if blob.get("snapshot_id") == requested)
         raise CloudRestoreError(f"Cloud snapshot not found: {requested}")
     snapshot_id = blobs[0].get("snapshot_id")
     if not isinstance(snapshot_id, str) or not snapshot_id:
         raise CloudRestoreError("Cloud snapshot listing was malformed.")
-    return snapshot_id
+    return blobs[0]
 
 
 def restore_cloud_snapshot(
@@ -81,7 +81,13 @@ def restore_cloud_snapshot(
     client = None
     try:
         client = client_from_settings(settings)
-        chosen = _select_snapshot(_committed_blobs(client, store_id), snapshot_id)
+        chosen_blob = _select_snapshot(_committed_blobs(client, store_id), snapshot_id)
+        chosen = chosen_blob.get("snapshot_id")
+        size_bytes = chosen_blob.get("size_bytes")
+        if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes <= 0:
+            raise CloudRestoreError("Cloud snapshot listing did not include a valid size.")
+        if size_bytes > client.processing_limit(require_hardened_write=False):
+            raise CloudRestoreError("Cloud snapshot exceeds this client's safe processing limit.")
         presigned = client.presign_download(store_id, chosen)
         get_url = presigned.get("get_url")
         if not isinstance(get_url, str) or not get_url:
