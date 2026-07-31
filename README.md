@@ -143,8 +143,13 @@ gate local backups or cloud downloads.
 ### Cloud Backup (Paid)
 
 Ormah can encrypt local memory backups on your machine and upload only the
-ciphertext to Ormah Cloud. Sign in, initialize the store key, and enable the
-scheduled uploader:
+ciphertext to Ormah Cloud. In Ormah Desktop, open **Protection** and select
+**Protect this memory**. The app guides email-code sign-in, opens Stripe
+Checkout in the system browser when a subscription is needed, then immediately
+creates an encrypted backup and proves it restorable in scratch space. It does
+not report the memory as protected until that exact snapshot passes verification.
+
+The equivalent CLI setup remains available:
 
 ```bash
 ormah account login

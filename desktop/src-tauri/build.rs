@@ -19,5 +19,8 @@ fn main() {
     println!("cargo:rustc-env=ORMAH_PY_VERSION={version}");
     println!("cargo:rerun-if-changed={}", pyproject.display());
 
-    tauri_build::build()
+    tauri_build::try_build(
+        tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new()),
+    )
+    .expect("failed to build Tauri context")
 }

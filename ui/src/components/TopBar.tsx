@@ -1,9 +1,11 @@
 import { useCallback, useRef, useState } from "react";
+import { ShieldCheck } from "lucide-react";
 import { searchNodes } from "../api";
 import SearchResults from "./SearchResults";
 import type { MemoryNode } from "../types";
+import type { ProtectionState } from "../productBridge";
 
-type PanelId = "settings" | "insights" | "admin" | "agents";
+type PanelId = "protection" | "settings" | "insights" | "admin" | "agents";
 
 interface Props {
   nodeCount: number;
@@ -13,6 +15,7 @@ interface Props {
   onSearchHover: (nodeId: string) => void;
   onSearchHoverEnd: () => void;
   searchInputRef: React.RefObject<HTMLInputElement>;
+  protectionState: ProtectionState | null;
 }
 
 export default function TopBar({
@@ -23,6 +26,7 @@ export default function TopBar({
   onSearchHover,
   onSearchHoverEnd,
   searchInputRef,
+  protectionState,
 }: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<MemoryNode[] | null>(null);
@@ -57,6 +61,14 @@ export default function TopBar({
 
   const actionButtons = (
     <>
+      <button
+        className={`top-bar-btn protection-entry ${activePanel === "protection" ? "active" : ""} ${protectionState === "protected" ? "protected" : ""}`}
+        onClick={() => onTogglePanel("protection")}
+        title="Cloud protection"
+      >
+        <ShieldCheck size={14} aria-hidden="true" />
+        {protectionState === "protected" ? "protected" : "protect"}
+      </button>
       <button
         className={`top-bar-btn ${activePanel === "settings" ? "active" : ""}`}
         onClick={() => onTogglePanel("settings")}

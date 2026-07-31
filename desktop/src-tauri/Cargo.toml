@@ -25,6 +25,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["time", "rt", "macros"] }
 once_cell = "1"
 semver = "1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
 
 # Single-instance guard: macOS uses this plugin (Unix socket). On Linux the
 # plugin relies on claiming a D-Bus name, which fails silently and lets

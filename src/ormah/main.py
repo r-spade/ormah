@@ -18,6 +18,7 @@ from ormah.api.routes_account import router as account_router
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
 from ormah.api.routes_ingest import router as ingest_router
+from ormah.api.routes_protection import router as protection_router
 from ormah.api.routes_stats import router as stats_router
 from ormah.api.routes_ui import router as ui_router
 from ormah.background.maintenance_manager import MaintenanceManager
@@ -68,6 +69,13 @@ async def lifespan(app: FastAPI):
     engine = MemoryEngine(settings)
     engine.startup()
     app.state.engine = engine
+    from ormah.cloud.operations import (
+        ProtectionOperationCoordinator,
+        resume_interrupted_enable,
+    )
+
+    app.state.protection_operations = ProtectionOperationCoordinator()
+    resume_interrupted_enable(engine, app.state.protection_operations)
     logger.info("Memory engine ready.")
 
     # Start background scheduler if available
@@ -135,6 +143,8 @@ async def lifespan(app: FastAPI):
     # Shutdown — wait for running jobs to finish
     if hasattr(app.state, "scheduler"):
         app.state.scheduler.shutdown(wait=True)
+    if hasattr(app.state, "protection_operations"):
+        app.state.protection_operations.shutdown(wait=True)
     engine.shutdown()
     logger.info("Ormah stopped")
 
@@ -159,6 +169,7 @@ app.add_middleware(AgentMiddleware)
 app.include_router(agent_router)
 app.include_router(admin_router)
 app.include_router(account_router)
+app.include_router(protection_router)
 app.include_router(stats_router)
 app.include_router(ui_router)
 app.include_router(ingest_router)

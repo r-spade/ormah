@@ -279,13 +279,11 @@ def _format_iso_time(value: str | None) -> str:
 
 
 def _cmd_account_login(args):
-    from ormah.cloud.client import (
-        CloudError,
-        get_device_name,
-        get_or_create_device_id,
-        persist_account_credentials,
+    from ormah.cloud.account import (
+        AccountError,
+        request_login_code,
+        verify_login_code,
     )
-    from ormah.cloud.entitlements import refresh_entitlements, status_from_cache
     from ormah.config import settings
     from ormah.console import info, ok, warn
 
@@ -296,18 +294,11 @@ def _cmd_account_login(args):
     client = None
     try:
         client = _cloud_client()
-        client.request_code(email)
+        request_login_code(settings, email, client=client)
         info(f"Sign-in code requested for {email}")
         code = (args.code or input("Sign-in code: ")).strip()
-        device_id = get_or_create_device_id()
-        device_name = get_device_name()
-        token = client.verify_code(email, code, device_id, device_name)
-        persist_account_credentials(token, email)
-        try:
-            cache = refresh_entitlements(settings, client=client)
-        except Exception:
-            cache = None
-    except (CloudError, OSError) as exc:
+        status = verify_login_code(settings, email, code, client=client)
+    except (AccountError, OSError) as exc:
         _print_account_error(str(exc))
     finally:
         close = getattr(client, "close", None) if client is not None else None
@@ -315,42 +306,32 @@ def _cmd_account_login(args):
             close()
 
     ok(f"Signed in as {email}")
-    if cache is None:
+    if not status.entitlement_available:
         warn("Entitlement status is unavailable while offline; it will refresh later.")
         return
-    print(f"Plan status: {cache.plan_status or 'unknown'}")
-    print(f"Cloud backup entitlement: {status_from_cache(cache).value}")
+    print(f"Plan status: {status.plan_status or 'unknown'}")
+    print(f"Cloud backup entitlement: {status.entitlement.value}")
 
 
 def _cmd_account_status(args):
-    from ormah.cloud.client import get_device_name
-    from ormah.cloud.entitlements import check_entitlement, load_entitlement_cache
+    from ormah.cloud.account import get_account_status
     from ormah.config import settings
 
-    state = check_entitlement(settings)
-    cache = load_entitlement_cache()
-    age_seconds = int(cache.age().total_seconds()) if cache is not None else None
-    result = {
-        "cache_age_seconds": age_seconds,
-        "device_name": get_device_name(),
-        "email": settings.account_email,
-        "entitlement": state.value,
-        "plan_status": cache.plan_status if cache is not None else None,
-    }
+    status = get_account_status(settings)
+    result = status.to_payload()
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
         return
 
-    print(f"Account: {settings.account_email or 'not signed in'}")
-    print(f"Entitlement: {state.value}")
+    print(f"Account: {status.email or 'not signed in'}")
+    print(f"Entitlement: {status.entitlement.value}")
     print(f"Plan status: {result['plan_status'] or 'unknown'}")
-    print(f"Cache age: {_format_cache_age(age_seconds)}")
+    print(f"Cache age: {_format_cache_age(status.cache_age_seconds)}")
     print(f"Device: {result['device_name']}")
 
 
 def _cmd_account_logout(args):
-    from ormah.cloud.client import remove_account_credentials
-    from ormah.cloud.entitlements import clear_entitlement_cache
+    from ormah.cloud.account import AccountError, logout_account
     from ormah.config import settings
     from ormah.console import info, ok, warn
 
@@ -362,20 +343,12 @@ def _cmd_account_logout(args):
             info("Logout cancelled")
             return
 
-    if settings.account_token:
-        client = None
-        try:
-            client = _cloud_client()
-            client.revoke_token()
-        except Exception as exc:
-            warn(f"Could not revoke the server token while offline: {exc}")
-        finally:
-            close = getattr(client, "close", None) if client is not None else None
-            if close:
-                close()
-
-    remove_account_credentials()
-    clear_entitlement_cache()
+    try:
+        result = logout_account(settings, client_factory=_cloud_client)
+    except AccountError as exc:
+        _print_account_error(str(exc))
+    if result.warning:
+        warn(result.warning)
     ok("Signed out locally")
 
 

@@ -3,6 +3,7 @@
   "identifier": "graph-window-controls",
   "description": "Lets the graph page (served from localhost) drive the custom window title bar.",
   "windows": ["main"],
+  "local": false,
   "remote": {
     "urls": ["http://localhost:*", "http://127.0.0.1:*"]
   },
@@ -10,6 +11,7 @@
     "core:window:allow-minimize",
     "core:window:allow-close",
     "core:window:allow-toggle-maximize",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "desktop-product-bridge"
   ]
 }
