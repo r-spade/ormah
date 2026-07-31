@@ -114,6 +114,7 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
   const [confirmStop, setConfirmStop] = useState(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const checkoutCheckInFlight = useRef(false);
+  const offerRequested = useRef(false);
   const desktop = isDesktopApp();
 
   const refresh = useCallback(async () => {
@@ -126,23 +127,27 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
       } catch {
         throw new Error("Update Ormah Desktop to use cloud protection.");
       }
-      const [nextAccount, nextStatus] = await Promise.all([
-        productBridge.accountStatus(),
-        productBridge.status(),
-      ]);
+      // Account status refreshes a stale entitlement cache. Read protection
+      // after it so an active subscriber is never painted as paused from an
+      // expired cache entry on first open.
+      const nextAccount = await productBridge.accountStatus();
+      const nextStatus = await productBridge.status();
       setAccount(nextAccount);
       setStatus(nextStatus);
       onStatusChange?.(nextStatus);
       setError(null);
-      if (nextAccount.signed_in && !offer) {
-        productBridge.offer().then(setOffer).catch(() => undefined);
+      if (nextAccount.signed_in && !offerRequested.current) {
+        offerRequested.current = true;
+        productBridge.offer().then(setOffer).catch(() => {
+          offerRequested.current = false;
+        });
       }
     } catch (err) {
       setError(errorMessage(err, "Protection status is unavailable."));
     } finally {
       setLoading(false);
     }
-  }, [desktop, offer, onStatusChange]);
+  }, [desktop, onStatusChange]);
 
   useEffect(() => {
     if (!open) return;
@@ -231,11 +236,16 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
     setError(null);
     try {
       const intent = await productBridge.createIntent();
+      if (intent.reason_code && intent.reason_code !== "sign_in_required") {
+        throw new Error(intent.message || "Protection could not start.");
+      }
+      const intentId = intent.protection_intent_id;
+      if (!intentId) throw new Error("Protection could not create a durable request.");
       setOperation(intent);
       if (!account?.signed_in || intent.protection_state === "sign_in_required") {
         setView("email");
       } else {
-        await bindAndContinue(intent.protection_intent_id || intent.operation_id);
+        await bindAndContinue(intentId);
       }
     } catch (err) {
       setError(errorMessage(err, "Protection could not start."));
@@ -266,7 +276,11 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
       const nextAccount = await productBridge.verifyCode(email.trim().toLowerCase(), code);
       setAccount(nextAccount);
       const intentId = operation?.protection_intent_id || status?.protection_intent_id;
-      if (!intentId) throw new Error("The protection request expired. Start again.");
+      if (!intentId) {
+        setOperation(null);
+        setView("summary");
+        throw new Error("The protection request expired. Start again.");
+      }
       await bindAndContinue(intentId);
       await refresh();
     } catch (err) {

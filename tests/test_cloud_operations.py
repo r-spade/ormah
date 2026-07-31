@@ -202,3 +202,30 @@ def test_startup_ignores_non_running_or_uninitialized_stores(tmp_path, monkeypat
         assert resume_interrupted_enable(initialized_engine, coordinator) is None
     finally:
         coordinator.shutdown()
+
+
+def test_startup_resume_failure_never_blocks_server_start(tmp_path, monkeypatch):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    monkeypatch.setattr(state, "CLOUD_STATE_DIR", tmp_path / "cloud-state")
+    store_id = get_or_create_store_id(memory_dir)
+    intent_id = str(uuid.uuid4())
+    state.update_state(
+        store_id,
+        memory_dir=memory_dir,
+        protection_state=ProtectionState.INITIALIZING,
+        pending_protection_intent_id=intent_id,
+        pending_protection_store_id=store_id,
+        pending_protection_status=ProtectionIntentStatus.RUNNING,
+    )
+    monkeypatch.setattr(
+        protection.CloudProtectionService,
+        "from_engine",
+        lambda engine: (_ for _ in ()).throw(RuntimeError("startup failure")),
+    )
+    engine = SimpleNamespace(settings=SimpleNamespace(memory_dir=memory_dir))
+    coordinator = ProtectionOperationCoordinator(max_workers=1)
+    try:
+        assert resume_interrupted_enable(engine, coordinator) is None
+    finally:
+        coordinator.shutdown()

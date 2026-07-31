@@ -90,6 +90,13 @@ export default function App() {
     setActivePanel((p) => (p === id ? null : id));
   }, []);
 
+  const handleProtectionStatusChange = useCallback(
+    (cloud: { protection_state: ProtectionState }) => {
+      setProtectionState(cloud.protection_state);
+    },
+    [],
+  );
+
   useKeyboardShortcuts({
     onTogglePanel: togglePanel as (id: "settings" | "insights" | "admin" | "agents") => void,
     onClosePanel: useCallback(() => setActivePanel(null), []),
@@ -310,7 +317,7 @@ export default function App() {
         open={activePanel === "protection"}
         onClose={() => setActivePanel(null)}
         onToast={addToast}
-        onStatusChange={(cloud) => setProtectionState(cloud.protection_state)}
+        onStatusChange={handleProtectionStatusChange}
       />
       {themeTransition && (
         <div

@@ -240,14 +240,21 @@ def resume_interrupted_enable(
     ):
         return None
 
-    from ormah.cloud.protection import CloudProtectionService
+    try:
+        from ormah.cloud.protection import CloudProtectionService
 
-    service = CloudProtectionService.from_engine(engine)
-    operation, deduplicated = coordinator.submit(
-        key=(str(memory_dir), f"enable:{intent_id}"),
-        kind=ProtectionOperationKind.ENABLE,
-        action=lambda: service.enable(intent_id),
-    )
+        service = CloudProtectionService.from_engine(engine)
+        operation, deduplicated = coordinator.submit(
+            key=(str(memory_dir), f"enable:{intent_id}"),
+            kind=ProtectionOperationKind.ENABLE,
+            action=lambda: service.enable(intent_id),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Interrupted cloud protection could not be resumed at startup; error_type=%s",
+            type(exc).__name__,
+        )
+        return None
     logger.info(
         "%s interrupted cloud protection intent %s",
         "Reused" if deduplicated else "Resuming",

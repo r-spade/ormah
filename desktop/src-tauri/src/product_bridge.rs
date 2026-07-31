@@ -17,7 +17,10 @@ use crate::commands::base_url;
 
 const BRIDGE_VERSION: u16 = 1;
 const LOCAL_ADMIN_HEADER: &str = "X-Ormah-Local-Token";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+// Synchronous intent routes may wait for the canonical store lock for up to
+// 30 seconds. Keep the native request alive long enough to receive their
+// typed store_busy outcome instead of abandoning a request that may proceed.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 const MAX_HOSTED_URL_CHARS: usize = 2048;
 const CHECKOUT_HOST: &str = "checkout.stripe.com";
 const PORTAL_HOST: &str = "billing.stripe.com";
