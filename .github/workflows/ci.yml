@@ -72,7 +72,9 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: ui/package-lock.json
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/ui/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux desktop dependencies
         run: |
@@ -86,6 +88,18 @@ jobs:
           npm ci
           npm test
           npm run build
+      - name: Build desktop bootstrap UI
+        working-directory: desktop/ui
+        run: npm ci && npm run build
+      - name: Download uv sidecar
+        run: |
+          curl -fsSL \
+            https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C /tmp
+          mkdir -p desktop/src-tauri/binaries
+          cp /tmp/uv-x86_64-unknown-linux-gnu/uv \
+            desktop/src-tauri/binaries/uv-x86_64-unknown-linux-gnu
+          chmod +x desktop/src-tauri/binaries/uv-x86_64-unknown-linux-gnu
       - name: Test and check native desktop bridge
         working-directory: desktop/src-tauri
         run: |
