@@ -131,8 +131,8 @@ def import_key(source: str, key_path: Path | None = None) -> list[str]:
     return strings
 
 
-def rotate_key(key_path: Path | None = None) -> str:
-    """Generate a new current identity, retaining all previous ones."""
+def _rotate_key_without_recovery_kit(key_path: Path | None = None) -> str:
+    """Test/migration helper; product rotation must update the recovery kit first."""
     key_path = KEY_PATH if key_path is None else key_path
     existing = load_identity_strings(key_path)
     new_identity = identity_to_str(generate_identity())
@@ -324,6 +324,8 @@ def _serialize_recovery_kit(
     identity_strings: list[str],
     account_email: str | None,
 ) -> str:
+    if account_email is not None and account_email.splitlines() != [account_email]:
+        raise CloudKeyError("The account email cannot be represented safely in the recovery kit.")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     identities_block = "\n".join(identity_strings)
     return f"""# Ormah Recovery Kit

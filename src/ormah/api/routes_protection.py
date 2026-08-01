@@ -11,7 +11,7 @@ from ormah.api.local_auth import require_local_admin
 from ormah.cloud.billing import validate_protection_intent_id
 from ormah.cloud.entitlements import load_entitlement_cache, status_from_cache
 from ormah.cloud.operations import ProtectionOperationCoordinator
-from ormah.cloud.protection import CloudProtectionService, safe_error_message
+from ormah.cloud.protection import CloudProtectionService, safe_product_error_message
 from ormah.cloud.recovery import RecoveryKitError, RecoveryKitService
 from ormah.cloud.state import (
     CloudStateError,
@@ -146,11 +146,11 @@ def protection_status(request: Request):
         "last_error_message",
     ):
         if payload.get(field) is not None:
-            payload[field] = safe_error_message(
+            payload[field] = safe_product_error_message(
                 payload[field], getattr(settings, "account_token", None)
             )
     payload["warnings"] = [
-        safe_error_message(warning, getattr(settings, "account_token", None))
+        safe_product_error_message(warning, getattr(settings, "account_token", None))
         for warning in payload.get("warnings", [])
     ]
     return payload

@@ -4,6 +4,7 @@ import {
   operationPhaseIsActive,
   protectionRepairAction,
   protectionPresentation,
+  recoveryKitSectionVisible,
   type ProtectionStatus,
   type ProtectionState,
 } from "./productBridge";
@@ -94,5 +95,17 @@ describe("protectionRepairAction", () => {
       last_error_code: "operation_interrupted",
       protection_intent_status: "running",
     }))).toBe("resume");
+  });
+});
+
+describe("recoveryKitSectionVisible", () => {
+  it("keeps recovery export available while protection needs attention", () => {
+    expect(recoveryKitSectionVisible(status({
+      enabled: true,
+      protection_state: "attention_required",
+      last_successful_verify_at: null,
+    }))).toBe(true);
+    expect(recoveryKitSectionVisible(status({ enabled: false }))).toBe(false);
+    expect(recoveryKitSectionVisible(null)).toBe(false);
   });
 });

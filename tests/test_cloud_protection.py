@@ -549,6 +549,22 @@ def test_safe_error_message_redacts_windows_node_paths():
     assert message == "Hash mismatch for nodes/<redacted>.md"
 
 
+def test_persisted_error_keeps_nonsecret_path_for_cli_diagnostics():
+    message = protection.safe_error_message(
+        "Could not write /home/person/.local/share/ormah/cloud/state.json"
+    )
+
+    assert "/home/person/.local/share/ormah/cloud/state.json" in message
+
+
+def test_product_error_redacts_nonsecret_local_path():
+    message = protection.safe_product_error_message(
+        "Could not write /home/person/.local/share/ormah/cloud/state.json"
+    )
+
+    assert message == "Could not write <redacted-path>"
+
+
 def test_offline_upload_preserves_verification_health_and_redacts_persisted_error(
     tmp_path, monkeypatch, cloud_state_dir
 ):

@@ -108,6 +108,7 @@ def normalize_email(value: str) -> str:
         or len(email) > 320
         or "@" not in email
         or any(ord(char) < 0x20 or ord(char) == 0x7F for char in email)
+        or any(char in "\x85\u2028\u2029" for char in email)
     ):
         raise AccountError(AccountErrorCode.INVALID_REQUEST)
     return email

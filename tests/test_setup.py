@@ -3074,10 +3074,10 @@ class TestRunUninstall:
 
     def test_recovery_preflight_refreshes_stale_kit_after_rotation(self, tmp_path):
         from ormah.cloud.keys import (
+            _rotate_key_without_recovery_kit,
             get_or_create_store_id,
             init_key,
             load_identity_strings,
-            rotate_key,
             write_recovery_kit,
         )
 
@@ -3088,7 +3088,7 @@ class TestRunUninstall:
         init_key(key_path)
         store_id = get_or_create_store_id(memory_dir)
         write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
-        rotate_key(key_path)
+        _rotate_key_without_recovery_kit(key_path)
 
         result = _prepare_cloud_recovery(config_dir, [memory_dir])
 

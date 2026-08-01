@@ -12,6 +12,7 @@ from ormah.cloud.bundle import build_bundle, open_bundle
 from ormah.cloud.crypto import encrypt_bytes, decrypt_bytes
 from ormah.cloud.keys import (
     CloudKeyError,
+    _rotate_key_without_recovery_kit,
     current_recipient,
     get_or_create_store_id,
     import_key,
@@ -19,7 +20,6 @@ from ormah.cloud.keys import (
     key_file_exists,
     load_identities,
     load_identity_strings,
-    rotate_key,
     rotate_key_and_recovery_kit,
     write_recovery_kit,
 )
@@ -55,7 +55,7 @@ def test_rotate_retains_old_identities_and_old_bundles_decrypt(key_path):
     old_recipient = current_recipient(key_path)
     old_bundle = encrypt_bytes(b"pre-rotation", [old_recipient])
 
-    new_str = rotate_key(key_path)
+    new_str = _rotate_key_without_recovery_kit(key_path)
 
     strings = load_identity_strings(key_path)
     assert strings[0] == new_str
@@ -71,14 +71,14 @@ def test_rotate_retains_old_identities_and_old_bundles_decrypt(key_path):
 
 def test_double_rotation_keeps_all_three(key_path):
     first = init_key(key_path)
-    second = rotate_key(key_path)
-    third = rotate_key(key_path)
+    second = _rotate_key_without_recovery_kit(key_path)
+    third = _rotate_key_without_recovery_kit(key_path)
     assert load_identity_strings(key_path) == [third, second, first]
 
 
 def test_rotate_without_key_fails(key_path):
     with pytest.raises(CloudKeyError, match="cloud init"):
-        rotate_key(key_path)
+        _rotate_key_without_recovery_kit(key_path)
 
 
 def test_recovery_first_rotation_leaves_key_untouched_when_kit_write_fails(
@@ -165,12 +165,77 @@ def test_older_client_never_overwrites_newer_recovery_kit(tmp_path, key_path):
     assert load_identity_strings(key_path) == [original_identity]
 
 
+@pytest.mark.parametrize(
+    "format_text",
+    [
+        "format_version: invalid",
+        "format_version: 0",
+        "format_version: 1\nformat_version: 1",
+    ],
+)
+def test_malformed_existing_kit_is_never_overwritten(
+    tmp_path,
+    key_path,
+    format_text,
+):
+    init_key(key_path)
+    kit_path = tmp_path / "kit.md"
+    damaged = f"# Ormah Recovery Kit\n{format_text}\nfuture_field: preserve-me\n"
+    kit_path.write_text(damaged, encoding="utf-8")
+
+    with pytest.raises(CloudKeyError, match="format version"):
+        write_recovery_kit(
+            "22222222-3333-4444-9555-666666666666",
+            key_path,
+            kit_path,
+        )
+
+    assert kit_path.read_text(encoding="utf-8") == damaged
+
+
+def test_non_utf8_oversized_or_non_file_kit_is_never_overwritten(tmp_path, key_path):
+    init_key(key_path)
+    store_id = "22222222-3333-4444-9555-666666666666"
+
+    non_utf8 = tmp_path / "non-utf8.md"
+    non_utf8.write_bytes(b"format_version: 1\n\xff")
+    with pytest.raises(CloudKeyError, match="invalid"):
+        write_recovery_kit(store_id, key_path, non_utf8)
+
+    oversized = tmp_path / "oversized.md"
+    oversized.write_bytes(b"x" * (keys.MAX_RECOVERY_KIT_BYTES + 1))
+    with pytest.raises(CloudKeyError, match="invalid"):
+        write_recovery_kit(store_id, key_path, oversized)
+
+    directory = tmp_path / "directory.md"
+    directory.mkdir()
+    with pytest.raises(CloudKeyError, match="invalid"):
+        write_recovery_kit(store_id, key_path, directory)
+
+
+@pytest.mark.parametrize("separator", ["\n", "\x85", "\u2028", "\u2029"])
+def test_recovery_kit_refuses_multiline_account_email(
+    tmp_path,
+    key_path,
+    separator,
+):
+    init_key(key_path)
+
+    with pytest.raises(CloudKeyError, match="account email"):
+        write_recovery_kit(
+            "22222222-3333-4444-9555-666666666666",
+            key_path,
+            tmp_path / "kit.md",
+            account_email=f"person@example.com{separator}format_version: 99",
+        )
+
+
 # --- import ---
 
 
 def test_import_key_roundtrip_from_kit(tmp_path, key_path):
     init_key(key_path)
-    rotate_key(key_path)
+    _rotate_key_without_recovery_kit(key_path)
     originals = load_identity_strings(key_path)
     kit = write_recovery_kit("store-1", key_path, tmp_path / "kit.md")
 
@@ -230,7 +295,7 @@ def test_store_id_corrupt_raises(tmp_path):
 
 def test_recovery_kit_contains_everything_and_no_passphrase(tmp_path, key_path):
     init_key(key_path)
-    rotate_key(key_path)
+    _rotate_key_without_recovery_kit(key_path)
     strings = load_identity_strings(key_path)
 
     kit_path = write_recovery_kit(

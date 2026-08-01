@@ -19,6 +19,7 @@ import {
   productBridge,
   protectionPresentation,
   protectionRepairAction,
+  recoveryKitSectionVisible,
   type AccountStatus,
   type BillingOffer,
   type ProtectionOperation,
@@ -406,7 +407,7 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
     try {
       const result = await productBridge.openPrintableRecoveryKit();
       if (!result.opened) throw new Error("The printable copy could not be opened.");
-      onToast("Printable recovery kit opened in your system viewer.", "info");
+      onToast("Recovery kit sent to your system viewer.", "info");
     } catch (err) {
       setRecoveryError(errorMessage(err, "The printable copy could not be opened."));
     } finally {
@@ -617,10 +618,10 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
             </section>
           )}
 
-          {status?.enabled && status.last_successful_verify_at && view === "summary" && (
+          {recoveryKitSectionVisible(status) && view === "summary" && (
             <RecoveryKitSection
-              ready={status.device_loss_recovery_ready}
-              verifiedAt={formatDate(status.recovery_kit_verified_at)}
+              ready={Boolean(status?.device_loss_recovery_ready)}
+              verifiedAt={formatDate(status?.recovery_kit_verified_at ?? null)}
               busy={recoveryBusy}
               error={recoveryError}
               onSave={() => void saveRecoveryKit()}

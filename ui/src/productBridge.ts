@@ -95,6 +95,12 @@ export type RecoveryKitActionResult =
     recovery_kit_verified_at: null;
   };
 
+export function recoveryKitSectionVisible(
+  status: ProtectionStatus | null | undefined,
+): boolean {
+  return Boolean(status?.enabled);
+}
+
 export interface ProtectionOperation {
   operation_id: string;
   kind: "enable" | "disable" | "backup" | "verify" | "restore";

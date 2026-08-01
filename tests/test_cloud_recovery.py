@@ -192,6 +192,31 @@ def test_rotation_state_failure_leaves_key_and_kit_untouched(
     assert kit_path.read_bytes() == kit_before
 
 
+def test_partially_applied_rotation_is_not_confirmable(
+    recovery_store,
+    monkeypatch,
+):
+    _, store_id, key_path, kit_path, state_dir, service = recovery_store
+    service.confirm_saved_digest(hashlib.sha256(kit_path.read_bytes()).hexdigest())
+    active_identity = load_identity_strings(key_path)[0]
+    atomic_write = recovery.cloud_keys._atomic_write_0600
+
+    def fail_key(path, text):
+        if path == key_path:
+            raise OSError("key unavailable")
+        atomic_write(path, text)
+
+    monkeypatch.setattr(recovery.cloud_keys, "_atomic_write_0600", fail_key)
+
+    with pytest.raises(OSError, match="key unavailable"):
+        service.rotate_current_key()
+
+    assert active_identity in kit_path.read_text(encoding="utf-8")
+    assert load_state(store_id, state_dir=state_dir).recovery_kit_verified_at is None
+    with pytest.raises(RecoveryKitError, match="not current"):
+        service.validate_canonical_kit()
+
+
 def test_canonical_read_is_bounded(recovery_store):
     _, _, _, kit_path, _, service = recovery_store
     kit_path.write_bytes(b"x" * (recovery.MAX_RECOVERY_KIT_BYTES + 1))

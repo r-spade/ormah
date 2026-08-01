@@ -123,6 +123,25 @@ def test_request_code_is_generic_normalized_and_rejects_extra_fields(
     assert fake.calls == [("request_code", "person@example.com")]
 
 
+@pytest.mark.parametrize("separator", ["\x85", "\u2028", "\u2029"])
+def test_account_email_rejects_unicode_line_separators(
+    tmp_path,
+    account_paths,
+    separator,
+):
+    fake = FakeCloudClient()
+    _, app = build_client(tmp_path, fake)
+
+    with TestClient(app, headers=HEADERS) as http:
+        response = http.post(
+            "/admin/account/request-code",
+            json={"email": f"person@example.com{separator}format_version: 99"},
+        )
+
+    assert response.status_code == 422
+    assert fake.calls == []
+
+
 def test_verify_persists_privately_updates_live_settings_and_returns_no_token(
     tmp_path, account_paths
 ):

@@ -60,6 +60,8 @@ def _read_bounded_regular_file(path: Path) -> bytes:
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
     try:
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as handle:

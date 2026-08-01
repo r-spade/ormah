@@ -30,6 +30,7 @@ const CHECKOUT_HOST: &str = "checkout.stripe.com";
 const PORTAL_HOST: &str = "billing.stripe.com";
 const RECOVERY_KIT_FILENAME: &str = "ormah-recovery-kit.md";
 const MAX_RECOVERY_KIT_BYTES: u64 = 256 * 1024;
+const RECOVERY_CONFIRM_PATH: &str = "/admin/cloud/protection/recovery-kit/confirm";
 
 #[derive(Debug, Serialize)]
 pub struct DesktopBridgeInfo {
@@ -260,7 +261,14 @@ pub async fn save_recovery_kit<R: Runtime>(
         .set_file_name(RECOVERY_KIT_FILENAME)
         .add_filter("Markdown document", &["md"])
         .blocking_save_file();
-    let destination = selected.and_then(|selection| selection.into_path().ok());
+    let destination = match selected {
+        Some(selection) => Some(
+            selection
+                .into_path()
+                .map_err(|_| "Could not use the selected save location.".to_string())?,
+        ),
+        None => None,
+    };
     let canonical = recovery_kit_path()?;
     let digest = match save_selected_recovery_kit(&canonical, destination.as_deref())? {
         RecoveryKitSaveOutcome::Canceled => {
@@ -274,7 +282,7 @@ pub async fn save_recovery_kit<R: Runtime>(
     };
     let readiness: RecoveryKitReadiness = request_json(
         "POST",
-        "/admin/cloud/protection/recovery-kit/confirm",
+        RECOVERY_CONFIRM_PATH,
         Some(json!({ "sha256_digest": digest })),
     )
     .await?;
@@ -481,6 +489,7 @@ fn save_selected_recovery_kit(
         .and_then(|_| output.sync_all())
         .map_err(|_| "Could not save the recovery kit.".to_string())?;
     drop(output);
+    sync_parent_directory(destination)?;
 
     let reopened = read_bounded_recovery_kit(destination)
         .map_err(|_| "The saved recovery kit could not be reopened.".to_string())?;
@@ -489,6 +498,21 @@ fn save_selected_recovery_kit(
     }
     let digest = format!("{:x}", Sha256::digest(&reopened));
     Ok(RecoveryKitSaveOutcome::Saved { digest })
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Could not secure the saved recovery kit.".to_string())?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "Could not secure the saved recovery kit.".to_string())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -604,23 +628,30 @@ async fn request_json<T: for<'de> Deserialize<'de>>(
         .await
         .map_err(|_| "Could not reach the local Ormah service.".to_string())?;
     if !response.status().is_success() {
-        let message = match response.status().as_u16() {
-            401 if path == "/admin/account/verify" => {
-                "That code is wrong, expired, or already used."
-            }
-            401 => "Sign in to Ormah before continuing.",
-            403 => "This local Ormah operation is not allowed.",
-            404 => "This Ormah Desktop feature requires a newer Ormah runtime.",
-            409 => "The protection state changed; refresh and try again.",
-            429 => "Too many requests; wait briefly and try again.",
-            _ => "The local Ormah operation could not be completed.",
-        };
+        let message = local_error_message(response.status().as_u16(), path);
         return Err(message.to_string());
     }
     response
         .json::<T>()
         .await
         .map_err(|_| "The local Ormah service returned an invalid response.".to_string())
+}
+
+fn local_error_message(status: u16, path: &str) -> &'static str {
+    match status {
+        401 if path == "/admin/account/verify" => {
+            "That code is wrong, expired, or already used."
+        }
+        401 => "Sign in to Ormah before continuing.",
+        403 => "This local Ormah operation is not allowed.",
+        404 => "This Ormah Desktop feature requires a newer Ormah runtime.",
+        409 if path == RECOVERY_CONFIRM_PATH => {
+            "The saved recovery kit no longer matches current recovery material. Run `ormah cloud kit`, then save it again."
+        }
+        409 => "The protection state changed; refresh and try again.",
+        429 => "Too many requests; wait briefly and try again.",
+        _ => "The local Ormah operation could not be completed.",
+    }
 }
 
 fn local_admin_token_path() -> Result<PathBuf, String> {
@@ -1093,5 +1124,18 @@ mod tests {
         ] {
             assert!(!serialized.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn recovery_confirmation_conflict_has_a_specific_repair_message() {
+        let recovery = local_error_message(409, RECOVERY_CONFIRM_PATH);
+        let generic = local_error_message(409, "/admin/cloud/protection/backup");
+
+        assert!(recovery.contains("ormah cloud kit"));
+        assert!(recovery.contains("saved recovery kit"));
+        assert_eq!(
+            generic,
+            "The protection state changed; refresh and try again."
+        );
     }
 }

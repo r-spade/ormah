@@ -102,11 +102,17 @@ def safe_error_message(value: object, *sensitive_values: str | None) -> str:
     message = _BEARER_RE.sub("Bearer <redacted>", message)
     message = _AGE_SECRET_RE.sub("<redacted-age-key>", message)
     message = _NODE_PATH_RE.sub(r"\1/<redacted>.md", message)
-    message = _ABSOLUTE_PATH_RE.sub("<redacted-path>", message)
     for sensitive in sensitive_values:
         if sensitive:
             message = message.replace(sensitive, "<redacted>")
     return message[:1000]
+
+
+def safe_product_error_message(value: object, *sensitive_values: str | None) -> str:
+    """Redact local paths in addition to secrets before crossing into the webview."""
+
+    message = safe_error_message(value, *sensitive_values)
+    return _ABSOLUTE_PATH_RE.sub("<redacted-path>", message)
 
 
 def _existing_store_id(memory_dir: Path) -> str | None:
