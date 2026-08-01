@@ -102,6 +102,35 @@ class RecoveryKitService:
         with StoreLock(self.settings.memory_dir):
             self._validate_canonical_kit_locked()
 
+    def ensure_current_kit(self) -> bool:
+        """Repair a stale canonical kit before a native save operation.
+
+        Returns ``True`` only when the canonical file had to be regenerated.
+        A regenerated file invalidates the proof for any previously saved copy;
+        the native save-and-reopen flow establishes a new proof immediately.
+        """
+
+        with StoreLock(self.settings.memory_dir):
+            try:
+                self._validate_canonical_kit_locked()
+                return False
+            except RecoveryKitError:
+                store_id = self._active_store_id()
+                update_state(
+                    store_id,
+                    memory_dir=self.settings.memory_dir,
+                    state_dir=self.state_dir,
+                    recovery_kit_verified_at=None,
+                )
+                cloud_keys.write_recovery_kit(
+                    store_id,
+                    key_path=self.key_path,
+                    kit_path=self.kit_path,
+                    account_email=getattr(self.settings, "account_email", None),
+                )
+                self._validate_canonical_kit_locked()
+                return True
+
     def confirm_saved_digest(self, digest: str) -> RecoveryReadiness:
         """Record a saved-copy proof only when its bytes equal the current valid kit."""
 

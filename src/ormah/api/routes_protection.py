@@ -62,6 +62,15 @@ class RecoveryReadinessResponse(BaseModel):
     recovery_kit_verified_at: str
 
 
+class RecoveryKitPrepareResponse(BaseModel):
+    """Secret-free readiness result for the native save dialog."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    regenerated: bool
+
+
 def _service(request: Request) -> CloudProtectionService:
     injected = getattr(request.app.state, "protection_service", None)
     return injected or CloudProtectionService.from_engine(request.app.state.engine)
@@ -206,14 +215,14 @@ def disable_protection(body: EmptyRequest, request: Request):
 
 @router.post("/backup", status_code=status.HTTP_202_ACCEPTED)
 def backup_now(body: EmptyRequest, request: Request):
-    """Start one user-requested encrypted backup."""
+    """Create a recovery point and restore-test that exact snapshot."""
     del body
     service = _service(request)
     return _submit(
         request,
         operation="backup",
         kind=ProtectionOperationKind.BACKUP,
-        action=lambda: service.backup_now(reason="manual-ui"),
+        action=lambda: service.backup_and_verify(reason="manual-ui"),
     )
 
 
@@ -228,6 +237,24 @@ def verify_now(body: VerifyRequest, request: Request):
         kind=ProtectionOperationKind.VERIFY,
         action=lambda: service.verify_now(body.snapshot_id),
     )
+
+
+@router.post(
+    "/recovery-kit/prepare",
+    response_model=RecoveryKitPrepareResponse,
+)
+def prepare_recovery_kit(body: EmptyRequest, request: Request):
+    """Ensure the canonical kit matches current keys before native save."""
+
+    del body
+    try:
+        regenerated = _recovery_service(request).ensure_current_kit()
+    except (RecoveryKitError, CloudStateError, StoreLockTimeout, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The recovery kit could not be prepared for saving.",
+        ) from exc
+    return {"status": "ready_to_save", "regenerated": regenerated}
 
 
 @router.post(

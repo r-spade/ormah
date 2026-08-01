@@ -20,9 +20,13 @@ export type ProtectionState =
 export type OperationPhase =
   | "pending"
   | "running"
+  | "preparing"
+  | "encrypting"
   | "uploading"
   | "finalizing"
+  | "downloading"
   | "verifying"
+  | "rebuilding"
   | "completed"
   | "failed"
   | "canceled";
@@ -30,9 +34,13 @@ export type OperationPhase =
 const ACTIVE_OPERATION_PHASES = new Set<OperationPhase>([
   "pending",
   "running",
+  "preparing",
+  "encrypting",
   "uploading",
   "finalizing",
+  "downloading",
   "verifying",
+  "rebuilding",
 ]);
 
 export function operationPhaseIsActive(phase: OperationPhase | null | undefined): boolean {
@@ -111,6 +119,16 @@ export interface ProtectionOperation {
   message: string | null;
   snapshot_id: string | null;
   protection_intent_id: string | null;
+}
+
+export function effectiveProtectionState(
+  operation: ProtectionOperation | null | undefined,
+  status: ProtectionStatus | null | undefined,
+): ProtectionState {
+  const operationActive = operation?.status === "queued" || operation?.status === "running";
+  return (operationActive ? operation.protection_state : null)
+    || status?.protection_state
+    || "local_only";
 }
 
 export interface BillingHandoff {
@@ -209,6 +227,7 @@ const BACKUP_FAILURES = new Set([
 ]);
 
 export function protectionRepairAction(status: ProtectionStatus): ProtectionRepairAction {
+  if (status.protection_state === "verification_pending") return "verify";
   const reason = status.last_error_code;
   if (reason === "sign_in_required") return "signin";
   if (reason === "subscription_required" || reason === "entitlement_expired") {
@@ -258,12 +277,18 @@ export function protectionPresentation(state: ProtectionState): ProtectionPresen
         action: "wait",
       };
     case "verifying_first_backup":
-    case "verification_pending":
       return {
         tone: "working",
         title: "Checking recovery",
         detail: "Downloading, decrypting, rebuilding, and probing a temporary copy.",
         action: "wait",
+      };
+    case "verification_pending":
+      return {
+        tone: "warning",
+        title: "Recovery check needed",
+        detail: "The encrypted backup is uploaded but has not yet passed a restore test.",
+        action: "retry",
       };
     case "protected":
       return {

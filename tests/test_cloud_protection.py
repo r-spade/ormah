@@ -65,6 +65,81 @@ def test_backup_now_returns_typed_completed_operation(tmp_path, monkeypatch, clo
     assert durable.pending_upload_phase is None
 
 
+def test_backup_records_truthful_processing_phases(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, _store_id = _settings(tmp_path)
+    client = FakeCloudClient()
+    _patch_upload_prerequisites(monkeypatch, client)
+    observed = []
+    real_update = state.update_state
+
+    def capture_update(*args, **kwargs):
+        phase = kwargs.get("last_operation_phase")
+        if phase is not None:
+            observed.append(phase)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(protection, "update_state", capture_update)
+
+    result = CloudProtectionService(settings).backup_now()
+
+    assert result.phase is ProtectionOperationPhase.COMPLETED
+    assert observed == [
+        ProtectionOperationPhase.PREPARING,
+        ProtectionOperationPhase.ENCRYPTING,
+        ProtectionOperationPhase.UPLOADING,
+        ProtectionOperationPhase.FINALIZING,
+        ProtectionOperationPhase.COMPLETED,
+    ]
+
+
+def test_backup_and_verify_checks_the_exact_uploaded_snapshot(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, _store_id = _settings(tmp_path)
+    service = CloudProtectionService(settings)
+    calls = []
+    backup = ProtectionOperation(
+        "backup-op",
+        ProtectionOperationKind.BACKUP,
+        ProtectionOperationPhase.COMPLETED,
+        ProtectionState.VERIFICATION_PENDING,
+        snapshot_id=SNAPSHOT_ID,
+    )
+    verified = ProtectionOperation(
+        "backup-op",
+        ProtectionOperationKind.VERIFY,
+        ProtectionOperationPhase.COMPLETED,
+        ProtectionState.PROTECTED,
+        snapshot_id=SNAPSHOT_ID,
+    )
+
+    monkeypatch.setattr(
+        service,
+        "_backup_now",
+        lambda operation_id, **kwargs: calls.append(("backup", operation_id, kwargs)) or backup,
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_now",
+        lambda operation_id, **kwargs: calls.append(("verify", operation_id, kwargs)) or verified,
+    )
+
+    result = service.backup_and_verify()
+
+    assert result.kind is ProtectionOperationKind.BACKUP
+    assert result.phase is ProtectionOperationPhase.COMPLETED
+    assert result.state is ProtectionState.PROTECTED
+    assert result.snapshot_id == SNAPSHOT_ID
+    assert calls[0][0] == "backup"
+    assert calls[1] == (
+        "verify",
+        calls[0][1],
+        {"requested_snapshot_id": SNAPSHOT_ID},
+    )
+
+
 def test_legacy_opted_in_store_reaches_protected_after_first_backup_and_verification(
     tmp_path, monkeypatch, cloud_state_dir
 ):
@@ -689,6 +764,16 @@ def test_verify_now_accepts_snapshot_id_after_entitlement_lapse(
             AssertionError("downloads must not check upload entitlement")
         ),
     )
+    observed = []
+    real_update = state.update_state
+
+    def capture_update(*args, **kwargs):
+        phase = kwargs.get("last_operation_phase")
+        if phase is not None:
+            observed.append(phase)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(protection, "update_state", capture_update)
 
     result = CloudProtectionService(settings).verify_now(SNAPSHOT_ID)
 
@@ -698,6 +783,12 @@ def test_verify_now_accepts_snapshot_id_after_entitlement_lapse(
     assert result.state is ProtectionState.PROTECTED
     assert result.snapshot_id == SNAPSHOT_ID
     assert load_state(store_id).last_verified_snapshot_id == SNAPSHOT_ID
+    assert observed == [
+        ProtectionOperationPhase.DOWNLOADING,
+        ProtectionOperationPhase.VERIFYING,
+        ProtectionOperationPhase.REBUILDING,
+        ProtectionOperationPhase.COMPLETED,
+    ]
 
 
 def test_verifying_an_older_snapshot_does_not_claim_latest_backup_is_protected(

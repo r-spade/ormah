@@ -80,9 +80,13 @@ class ProtectionOperationKind(StrEnum):
 class ProtectionOperationPhase(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    PREPARING = "preparing"
+    ENCRYPTING = "encrypting"
     UPLOADING = "uploading"
     FINALIZING = "finalizing"
+    DOWNLOADING = "downloading"
     VERIFYING = "verifying"
+    REBUILDING = "rebuilding"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"

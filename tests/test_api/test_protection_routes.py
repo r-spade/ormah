@@ -72,8 +72,8 @@ class FakeProtectionService:
         self.calls.append(("disable",))
         return _operation(ProtectionOperationKind.DISABLE)
 
-    def backup_now(self, *, reason):
-        self.calls.append(("backup_now", reason))
+    def backup_and_verify(self, *, reason):
+        self.calls.append(("backup_and_verify", reason))
         if self.release_backup is not None:
             assert self.release_backup.wait(timeout=2)
         return _operation(ProtectionOperationKind.BACKUP)
@@ -88,6 +88,12 @@ class FakeRecoveryKitService:
         self.calls: list[str] = []
         self.fail = False
         self.ready = True
+
+    def ensure_current_kit(self):
+        self.calls.append("prepare")
+        if self.fail:
+            raise RecoveryKitError("secret path and AGE-SECRET-KEY-private")
+        return True
 
     def confirm_saved_digest(self, digest):
         self.calls.append(digest)
@@ -161,6 +167,7 @@ def test_all_protection_routes_require_local_capability(protection_app):
         ("POST", "/admin/cloud/protection/disable", {}),
         ("POST", "/admin/cloud/protection/backup", {}),
         ("POST", "/admin/cloud/protection/verify", {}),
+        ("POST", "/admin/cloud/protection/recovery-kit/prepare", {}),
         (
             "POST",
             "/admin/cloud/protection/recovery-kit/confirm",
@@ -251,6 +258,10 @@ def test_product_status_redacts_paths_credentials_and_secret_material(
         ("/admin/cloud/protection/backup", {"advance_head": True}),
         ("/admin/cloud/protection/verify", {"presigned_url": "https://example.test"}),
         (
+            "/admin/cloud/protection/recovery-kit/prepare",
+            {"path": "/secret"},
+        ),
+        (
             "/admin/cloud/protection/recovery-kit/confirm",
             {"sha256_digest": "a" * 64, "path": "/secret"},
         ),
@@ -271,7 +282,7 @@ def test_long_operations_return_202_and_poll_safe_results(protection_app):
             ("enable", INTENT_ID),
         ),
         ("/admin/cloud/protection/disable", {}, ("disable",)),
-        ("/admin/cloud/protection/backup", {}, ("backup_now", "manual-ui")),
+        ("/admin/cloud/protection/backup", {}, ("backup_and_verify", "manual-ui")),
         (
             "/admin/cloud/protection/verify",
             {"snapshot_id": SNAPSHOT_ID},
@@ -303,7 +314,7 @@ def test_repeated_active_backup_joins_one_operation(protection_app):
     assert second.json()["deduplicated"] is True
     service.release_backup.set()
     assert _poll(client, first.json()["operation_id"])["status"] == "completed"
-    assert service.calls.count(("backup_now", "manual-ui")) == 1
+    assert service.calls.count(("backup_and_verify", "manual-ui")) == 1
 
 
 def test_unknown_operation_returns_404(protection_app):
@@ -371,6 +382,40 @@ def test_recovery_confirmation_is_typed_and_secret_free(protection_app):
     serialized = str(response.json()).lower()
     for forbidden in ["age-secret-key", "path", "token", "digest", "identity"]:
         assert forbidden not in serialized
+
+
+def test_recovery_kit_prepare_repairs_server_side_without_returning_material(
+    protection_app,
+):
+    client, _, _, recovery_service = protection_app
+
+    response = client.post(
+        "/admin/cloud/protection/recovery-kit/prepare",
+        headers=HEADERS,
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready_to_save", "regenerated": True}
+    assert recovery_service.calls == ["prepare"]
+    serialized = str(response.json()).lower()
+    for forbidden in ["age-secret-key", "path", "token", "identity", "store_id"]:
+        assert forbidden not in serialized
+
+
+def test_recovery_kit_prepare_failure_is_generic(protection_app):
+    client, _, _, recovery_service = protection_app
+    recovery_service.fail = True
+
+    response = client.post(
+        "/admin/cloud/protection/recovery-kit/prepare",
+        headers=HEADERS,
+        json={},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "The recovery kit could not be prepared for saving."}
+    assert "secret" not in response.text.lower()
 
 
 def test_recovery_confirmation_does_not_invent_readiness(protection_app):

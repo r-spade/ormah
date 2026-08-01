@@ -1314,6 +1314,45 @@ class CloudProtectionService:
         except Exception as exc:
             return self._backup_failure(operation_id, exc)
 
+    def backup_and_verify(self, reason: str = "manual-ui") -> ProtectionOperation:
+        """Upload one recovery point and restore-test that exact snapshot.
+
+        This is the product-facing manual action. Scheduled backups continue to
+        use :meth:`backup_now` so they do not download every uploaded snapshot.
+        """
+
+        operation_id = str(uuid.uuid4())
+        try:
+            with StoreLock(self.settings.memory_dir):
+                backup = self._backup_now(
+                    operation_id,
+                    reason=reason,
+                    only_if_due=False,
+                    entitlement_verified=False,
+                )
+                if backup.phase is not ProtectionOperationPhase.COMPLETED:
+                    return backup
+                verification = self._verify_now(
+                    operation_id,
+                    requested_snapshot_id=backup.snapshot_id,
+                )
+                return ProtectionOperation(
+                    operation_id,
+                    ProtectionOperationKind.BACKUP,
+                    verification.phase,
+                    verification.state,
+                    verification.reason_code,
+                    verification.message,
+                    verification.snapshot_id,
+                )
+        except StoreLockTimeout:
+            return self._store_busy_operation(
+                operation_id,
+                ProtectionOperationKind.BACKUP,
+            )
+        except Exception as exc:
+            return self._verification_failure(operation_id, exc)
+
     def _record_upload_success(
         self,
         *,
@@ -1545,9 +1584,28 @@ class CloudProtectionService:
                     snapshot_id=state.last_upload_snapshot_id,
                 )
 
+            operation_kind = (
+                ProtectionOperationKind.ENABLE
+                if protection_intent_id is not None
+                else ProtectionOperationKind.BACKUP
+            )
+            update_state(
+                store_id,
+                memory_dir=settings.memory_dir,
+                last_operation_id=operation_id,
+                last_operation_kind=operation_kind,
+                last_operation_phase=ProtectionOperationPhase.PREPARING,
+            )
             backup = _backup_for_upload(backup_service, reason=reason)
             with tempfile.TemporaryDirectory(prefix="ormah-cloud-upload-") as tmp:
                 bundle = Path(tmp) / f"{backup.name}.age"
+                update_state(
+                    store_id,
+                    memory_dir=settings.memory_dir,
+                    last_operation_id=operation_id,
+                    last_operation_kind=operation_kind,
+                    last_operation_phase=ProtectionOperationPhase.ENCRYPTING,
+                )
                 build_bundle(
                     backup.path,
                     bundle,
@@ -1582,6 +1640,9 @@ class CloudProtectionService:
                 update_state(
                     store_id,
                     memory_dir=settings.memory_dir,
+                    last_operation_id=operation_id,
+                    last_operation_kind=operation_kind,
+                    last_operation_phase=ProtectionOperationPhase.UPLOADING,
                     pending_upload_id=upload_id,
                     pending_upload_snapshot_id=snapshot_id,
                     pending_upload_operation_id=operation_id,
@@ -1593,6 +1654,9 @@ class CloudProtectionService:
                 update_state(
                     store_id,
                     memory_dir=settings.memory_dir,
+                    last_operation_id=operation_id,
+                    last_operation_kind=operation_kind,
+                    last_operation_phase=ProtectionOperationPhase.FINALIZING,
                     pending_upload_phase=UploadJournalPhase.FINALIZING,
                 )
                 finalize_attempted = True
@@ -1771,6 +1835,13 @@ class CloudProtectionService:
                     ProtectionReasonCode.SIGN_IN_REQUIRED,
                 )
 
+            update_state(
+                store_id,
+                memory_dir=settings.memory_dir,
+                last_operation_id=operation_id,
+                last_operation_kind=ProtectionOperationKind.VERIFY,
+                last_operation_phase=ProtectionOperationPhase.DOWNLOADING,
+            )
             client = client_from_settings(settings)
             listing = client.list_blobs(store_id)
             blobs = listing.get("blobs")
@@ -1845,6 +1916,13 @@ class CloudProtectionService:
                     "The downloaded ciphertext hash did not match cloud metadata.",
                     ProtectionReasonCode.CIPHERTEXT_HASH_MISMATCH,
                 )
+            update_state(
+                store_id,
+                memory_dir=settings.memory_dir,
+                last_operation_id=operation_id,
+                last_operation_kind=ProtectionOperationKind.VERIFY,
+                last_operation_phase=ProtectionOperationPhase.VERIFYING,
+            )
             try:
                 info = open_bundle(bundle, extracted, load_identities())
             except CloudCryptoError as exc:
@@ -1862,6 +1940,13 @@ class CloudProtectionService:
                     "The decrypted snapshot failed manifest and file-integrity verification.",
                     ProtectionReasonCode.MANIFEST_VERIFICATION_FAILED,
                 ) from exc
+            update_state(
+                store_id,
+                memory_dir=settings.memory_dir,
+                last_operation_id=operation_id,
+                last_operation_kind=ProtectionOperationKind.VERIFY,
+                last_operation_phase=ProtectionOperationPhase.REBUILDING,
+            )
             _verify_extracted_bundle(extracted, store_id, info)
 
             verified_at = _utc_now()

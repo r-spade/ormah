@@ -74,6 +74,32 @@ def test_wrong_digest_fails_without_updating_state(recovery_store):
     assert load_state(store_id, state_dir=state_dir).recovery_kit_verified_at is None
 
 
+def test_ensure_current_kit_keeps_valid_material_and_existing_readiness(recovery_store):
+    _, store_id, _, kit_path, state_dir, service = recovery_store
+    original = kit_path.read_bytes()
+    service.confirm_saved_digest(hashlib.sha256(original).hexdigest())
+
+    assert service.ensure_current_kit() is False
+
+    assert kit_path.read_bytes() == original
+    assert load_state(store_id, state_dir=state_dir).recovery_kit_verified_at == NOW
+
+
+def test_ensure_current_kit_repairs_stale_material_before_native_save(recovery_store):
+    settings, store_id, key_path, kit_path, state_dir, service = recovery_store
+    service.confirm_saved_digest(hashlib.sha256(kit_path.read_bytes()).hexdigest())
+    replacement_key = key_path.with_suffix(".replacement")
+    init_key(replacement_key)
+    key_path.write_bytes(replacement_key.read_bytes())
+    settings.account_email = "person@example.com"
+
+    assert service.ensure_current_kit() is True
+
+    service.validate_canonical_kit()
+    assert "person@example.com" in kit_path.read_text(encoding="utf-8")
+    assert load_state(store_id, state_dir=state_dir).recovery_kit_verified_at is None
+
+
 def test_saved_copy_proof_does_not_claim_ready_without_current_protection(
     recovery_store,
 ):

@@ -847,9 +847,9 @@ body.in-app .node-detail.tier-core {
 }
 
 .protection-panel {
-  width: min(430px, 100vw);
+  width: min(450px, 100vw);
   z-index: 90;
-  padding: 22px;
+  padding: 22px 24px 26px;
 }
 
 .protection-eyebrow {
@@ -883,7 +883,7 @@ body.in-app .node-detail.tier-core {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
   gap: 12px;
-  padding: 14px 0 18px;
+  padding: 16px 0 20px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -935,9 +935,84 @@ body.in-app .node-detail.tier-core {
 .protection-account,
 .protection-facts,
 .protection-warnings,
+.protection-progress,
 .recovery-kit-section {
   padding: 18px 0;
   border-bottom: 1px solid var(--border);
+}
+
+.protection-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.protection-progress-heading span {
+  color: var(--text-bright);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.protection-progress-heading strong {
+  color: var(--node-self);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.protection-progress ol {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.protection-progress li {
+  position: relative;
+  min-height: 31px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.protection-progress li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 18px;
+  bottom: 0;
+  left: 7px;
+  width: 1px;
+  background: var(--border);
+}
+
+.protection-progress li > span:first-child {
+  width: 15px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.protection-progress li.complete,
+.protection-progress li.current {
+  color: var(--text-bright);
+}
+
+.protection-progress li.complete > span:first-child { color: var(--edge-supports); }
+.protection-progress li.current > span:first-child { color: var(--node-self); }
+
+.protection-progress > p {
+  margin: 6px 0 0 24px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .recovery-kit-heading {
@@ -1186,13 +1261,16 @@ body.in-app .node-detail.tier-core {
 
 .protection-stop {
   width: 100%;
-  margin-top: 18px;
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
+  margin-top: 22px;
+  border: 1px solid rgba(209, 94, 94, 0.42);
+  background: rgba(209, 94, 94, 0.08);
+  color: var(--edge-contradicts);
 }
 
-.protection-stop:hover { color: var(--edge-contradicts); }
+.protection-stop:hover:not(:disabled) {
+  border-color: rgba(209, 94, 94, 0.68);
+  background: rgba(209, 94, 94, 0.14);
+}
 
 .protection-stop-confirm {
   margin-top: 18px;

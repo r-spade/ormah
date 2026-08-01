@@ -30,6 +30,7 @@ const CHECKOUT_HOST: &str = "checkout.stripe.com";
 const PORTAL_HOST: &str = "billing.stripe.com";
 const RECOVERY_KIT_FILENAME: &str = "ormah-recovery-kit.md";
 const MAX_RECOVERY_KIT_BYTES: u64 = 256 * 1024;
+const RECOVERY_PREPARE_PATH: &str = "/admin/cloud/protection/recovery-kit/prepare";
 const RECOVERY_CONFIRM_PATH: &str = "/admin/cloud/protection/recovery-kit/confirm";
 
 #[derive(Debug, Serialize)]
@@ -254,6 +255,7 @@ pub async fn save_recovery_kit<R: Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<RecoveryKitActionResult, String> {
     require_product_origin(&window)?;
+    let _: Value = request_json("POST", RECOVERY_PREPARE_PATH, Some(json!({}))).await?;
     let selected = app
         .dialog()
         .file()

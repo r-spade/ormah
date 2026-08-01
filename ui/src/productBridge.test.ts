@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  effectiveProtectionState,
   operationPhaseIsActive,
   protectionRepairAction,
   protectionPresentation,
@@ -14,12 +15,19 @@ describe("protectionPresentation", () => {
     "initializing",
     "uploading_first_backup",
     "verifying_first_backup",
-    "verification_pending",
   ])("never calls incomplete state %s protected", (state) => {
     const result = protectionPresentation(state);
 
     expect(result.title.toLowerCase()).not.toContain("protected");
     expect(result.action).toBe("wait");
+  });
+
+  it("makes an uploaded but unchecked backup an explicit recovery action", () => {
+    const result = protectionPresentation("verification_pending");
+
+    expect(result.title).toBe("Recovery check needed");
+    expect(result.tone).toBe("warning");
+    expect(result.action).toBe("retry");
   });
 
   it("uses the verified claim only for the protected state", () => {
@@ -46,7 +54,17 @@ describe("protectionPresentation", () => {
 
 describe("operationPhaseIsActive", () => {
   it("distinguishes durable progress from terminal and absent phases", () => {
-    for (const phase of ["pending", "running", "uploading", "finalizing", "verifying"] as const) {
+    for (const phase of [
+      "pending",
+      "running",
+      "preparing",
+      "encrypting",
+      "uploading",
+      "finalizing",
+      "downloading",
+      "verifying",
+      "rebuilding",
+    ] as const) {
       expect(operationPhaseIsActive(phase)).toBe(true);
     }
     for (const phase of ["completed", "failed", "canceled", null, undefined] as const) {
@@ -88,6 +106,10 @@ describe("protectionRepairAction", () => {
     expect(protectionRepairAction(status({ last_error_code: "entitlement_expired" }))).toBe("subscribe");
     expect(protectionRepairAction(status({ last_error_code: "key_missing" }))).toBe("none");
     expect(protectionRepairAction(status({ last_error_code: "quota_exceeded" }))).toBe("none");
+    expect(protectionRepairAction(status({
+      protection_state: "verification_pending",
+      last_error_code: null,
+    }))).toBe("verify");
   });
 
   it("resumes an interrupted initial protection intent", () => {
@@ -95,6 +117,42 @@ describe("protectionRepairAction", () => {
       last_error_code: "operation_interrupted",
       protection_intent_status: "running",
     }))).toBe("resume");
+  });
+});
+
+describe("effectiveProtectionState", () => {
+  it("does not let a completed operation hide newer durable status", () => {
+    const durable = status({ protection_state: "protected" });
+    const completed = {
+      operation_id: "operation",
+      kind: "backup" as const,
+      status: "completed" as const,
+      phase: "completed" as const,
+      protection_state: "verification_pending" as const,
+      reason_code: null,
+      message: null,
+      snapshot_id: "snapshot",
+      protection_intent_id: null,
+    };
+
+    expect(effectiveProtectionState(completed, durable)).toBe("protected");
+  });
+
+  it("uses live operation state while work is active", () => {
+    const durable = status({ protection_state: "protected" });
+    const running = {
+      operation_id: "operation",
+      kind: "backup" as const,
+      status: "running" as const,
+      phase: null,
+      protection_state: "verifying_first_backup" as const,
+      reason_code: null,
+      message: null,
+      snapshot_id: null,
+      protection_intent_id: null,
+    };
+
+    expect(effectiveProtectionState(running, durable)).toBe("verifying_first_backup");
   });
 });
 
