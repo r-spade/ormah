@@ -109,6 +109,28 @@ def test_wrong_store_key_or_kit_fails_closed(recovery_store, damage):
     assert load_state(store_id, state_dir=state_dir).recovery_kit_verified_at is None
 
 
+@pytest.mark.parametrize(
+    "replacement",
+    ["", "format_version: 2"],
+    ids=["missing", "unsupported"],
+)
+def test_unversioned_or_unsupported_kit_cannot_be_confirmed(
+    recovery_store,
+    replacement,
+):
+    _, store_id, _, kit_path, state_dir, service = recovery_store
+    kit_text = kit_path.read_text(encoding="utf-8")
+    kit_path.write_text(
+        kit_text.replace("format_version: 1", replacement),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RecoveryKitError, match="not current"):
+        service.confirm_saved_digest(hashlib.sha256(kit_path.read_bytes()).hexdigest())
+
+    assert load_state(store_id, state_dir=state_dir).recovery_kit_verified_at is None
+
+
 def test_malformed_digest_is_rejected_before_kit_work(recovery_store, monkeypatch):
     *_, service = recovery_store
     calls = []

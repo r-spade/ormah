@@ -24,6 +24,8 @@ CONFIG_DIR = Path.home() / ".config" / "ormah"
 KEY_PATH = CONFIG_DIR / "cloud.key"
 RECOVERY_KIT_PATH = CONFIG_DIR / "ormah-recovery-kit.md"
 STORE_ID_NAME = ".store_id"
+RECOVERY_KIT_FORMAT_VERSION = 1
+MAX_RECOVERY_KIT_BYTES = 256 * 1024
 
 
 class CloudKeyError(RuntimeError):
@@ -141,6 +143,40 @@ def rotate_key(key_path: Path | None = None) -> str:
     return new_identity
 
 
+def rotate_key_and_recovery_kit(
+    store_id: str,
+    *,
+    key_path: Path | None = None,
+    kit_path: Path | None = None,
+    account_email: str | None = None,
+) -> tuple[str, Path]:
+    """Rotate the active identity without leaving recovery material behind.
+
+    The recovery kit is installed first and contains both the prospective new
+    identity and every existing identity. If the process stops before the key
+    file is replaced, the old active identity is still present in that kit. A
+    failure can therefore make the files temporarily disagree, but cannot make
+    a successfully used encryption identity unrecoverable.
+    """
+
+    key_path = (KEY_PATH if key_path is None else key_path).expanduser()
+    kit_path = (RECOVERY_KIT_PATH if kit_path is None else kit_path).expanduser()
+    _ensure_recovery_kit_can_be_rewritten(kit_path)
+    existing = load_identity_strings(key_path)
+    new_identity = identity_to_str(generate_identity())
+    identity_strings = [new_identity, *existing]
+
+    _atomic_write_0600(
+        kit_path,
+        _serialize_recovery_kit(store_id, identity_strings, account_email),
+    )
+    _atomic_write_0600(
+        key_path,
+        _serialize_key_file(identity_strings, rotated=True),
+    )
+    return new_identity, kit_path
+
+
 # --- store_id (E08 §1) ---
 
 
@@ -244,23 +280,55 @@ def install_store_id(memory_dir: Path, store_id: str) -> str:
 # --- Recovery kit ---
 
 
-def write_recovery_kit(
-    store_id: str,
-    key_path: Path | None = None,
-    kit_path: Path | None = None,
-    account_email: str | None = None,
-) -> Path:
-    """(Re)generate the recovery kit with ALL identities.
+def extract_recovery_kit_format_version(text: str) -> int | None:
+    """Return one declared kit format version, or None for a legacy kit."""
 
-    The kit is the entire recovery story: anyone with this file can read the
-    backups; without it, nobody can — including us.
-    """
-    kit_path = RECOVERY_KIT_PATH if kit_path is None else kit_path
-    identity_strings = load_identity_strings(key_path)
+    claims = [
+        line.strip().split(":", 1)[1].strip()
+        for line in text.splitlines()
+        if line.strip().startswith("format_version:")
+    ]
+    if not claims:
+        return None
+    if len(claims) != 1:
+        raise CloudKeyError("Recovery kit contains multiple format versions.")
+    try:
+        version = int(claims[0])
+    except ValueError as exc:
+        raise CloudKeyError("Recovery kit format version is invalid.") from exc
+    if version < 1:
+        raise CloudKeyError("Recovery kit format version is invalid.")
+    return version
+
+
+def _ensure_recovery_kit_can_be_rewritten(kit_path: Path) -> None:
+    """Prevent an older client from discarding a newer kit envelope."""
+
+    if not kit_path.exists():
+        return
+    try:
+        if not kit_path.is_file() or kit_path.stat().st_size > MAX_RECOVERY_KIT_BYTES:
+            raise CloudKeyError("The existing recovery kit is invalid.")
+        version = extract_recovery_kit_format_version(kit_path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        raise CloudKeyError("The existing recovery kit is invalid.") from exc
+    if version is not None and version > RECOVERY_KIT_FORMAT_VERSION:
+        raise CloudKeyError(
+            "The recovery kit was created by a newer Ormah version; update Ormah before "
+            "regenerating or rotating recovery material."
+        )
+
+
+def _serialize_recovery_kit(
+    store_id: str,
+    identity_strings: list[str],
+    account_email: str | None,
+) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     identities_block = "\n".join(identity_strings)
-    kit = f"""# Ormah Recovery Kit
+    return f"""# Ormah Recovery Kit
 
+format_version: {RECOVERY_KIT_FORMAT_VERSION}
 Generated: {now}
 
 > **Anyone with this file can read your backups; without it, nobody can —
@@ -292,6 +360,19 @@ Email: {account_email or "<your ormah account email>"}
 That's the whole procedure. Every identity listed above is needed to read
 backups made before key rotations — never trim this list.
 """
-    kit_path = kit_path.expanduser()
+
+
+def write_recovery_kit(
+    store_id: str,
+    key_path: Path | None = None,
+    kit_path: Path | None = None,
+    account_email: str | None = None,
+) -> Path:
+    """(Re)generate the versioned recovery kit with every identity."""
+
+    kit_path = (RECOVERY_KIT_PATH if kit_path is None else kit_path).expanduser()
+    _ensure_recovery_kit_can_be_rewritten(kit_path)
+    identity_strings = load_identity_strings(key_path)
+    kit = _serialize_recovery_kit(store_id, identity_strings, account_email)
     _atomic_write_0600(kit_path, kit)
     return kit_path

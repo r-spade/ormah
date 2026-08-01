@@ -20,18 +20,19 @@ from typing import Callable
 from ormah.cloud import keys as cloud_keys
 from ormah.cloud.crypto import identity_from_str
 from ormah.cloud.keys import (
+    MAX_RECOVERY_KIT_BYTES,
+    RECOVERY_KIT_FORMAT_VERSION,
     STORE_ID_NAME,
     CloudKeyError,
+    extract_recovery_kit_format_version,
     extract_store_id_from_text,
     load_identity_strings,
-    rotate_key,
-    write_recovery_kit,
+    rotate_key_and_recovery_kit,
 )
 from ormah.cloud.state import is_device_loss_recovery_ready, update_state
 from ormah.cloud.store_lock import StoreLock
 
 
-MAX_RECOVERY_KIT_BYTES = 256 * 1024
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -126,12 +127,12 @@ class RecoveryKitService:
             )
 
     def rotate_current_key(self, *, account_email: str | None = None) -> Path:
-        """Clear readiness before rotating and atomically rewriting the current files.
+        """Clear readiness before installing a recovery-first key rotation.
 
         The ordering is deliberately fail-safe: if cloud state cannot be made
-        writable, neither key nor kit is touched. Once readiness is cleared,
-        any later failure remains conservative and atomic file writers prevent a
-        partially written key or kit from replacing the prior file.
+        writable, neither key nor kit is touched. The prospective kit is then
+        installed before the key becomes active, so every identity that could
+        encrypt a bundle is recoverable even if the process stops between files.
         """
 
         with StoreLock(self.settings.memory_dir):
@@ -142,8 +143,7 @@ class RecoveryKitService:
                 state_dir=self.state_dir,
                 recovery_kit_verified_at=None,
             )
-            rotate_key(self.key_path)
-            kit_path = write_recovery_kit(
+            _, kit_path = rotate_key_and_recovery_kit(
                 store_id,
                 key_path=self.key_path,
                 kit_path=self.kit_path,
@@ -181,6 +181,7 @@ class RecoveryKitService:
                 for line in kit_text.splitlines()
                 if line.strip().startswith("store_id:")
             ]
+            kit_format_version = extract_recovery_kit_format_version(kit_text)
             active_identity_strings = load_identity_strings(self.key_path)
             for identity in active_identity_strings:
                 identity_from_str(identity)
@@ -197,6 +198,7 @@ class RecoveryKitService:
         if (
             kit_store_id != store_id
             or len(store_claims) != 1
+            or kit_format_version != RECOVERY_KIT_FORMAT_VERSION
             or kit_identity_strings != active_identity_strings
         ):
             raise RecoveryKitError("The recovery kit is not current for this memory.")

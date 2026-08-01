@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 
+from ormah.cloud import keys
 from ormah.cloud.bundle import build_bundle, open_bundle
 from ormah.cloud.crypto import encrypt_bytes, decrypt_bytes
 from ormah.cloud.keys import (
@@ -19,6 +20,7 @@ from ormah.cloud.keys import (
     load_identities,
     load_identity_strings,
     rotate_key,
+    rotate_key_and_recovery_kit,
     write_recovery_kit,
 )
 
@@ -77,6 +79,90 @@ def test_double_rotation_keeps_all_three(key_path):
 def test_rotate_without_key_fails(key_path):
     with pytest.raises(CloudKeyError, match="cloud init"):
         rotate_key(key_path)
+
+
+def test_recovery_first_rotation_leaves_key_untouched_when_kit_write_fails(
+    tmp_path, key_path, monkeypatch
+):
+    original_identity = init_key(key_path)
+    kit_path = write_recovery_kit(
+        "22222222-3333-4444-9555-666666666666",
+        key_path,
+        tmp_path / "kit.md",
+    )
+    key_before = key_path.read_bytes()
+    kit_before = kit_path.read_bytes()
+    atomic_write = keys._atomic_write_0600
+
+    def fail_kit(path, text):
+        if path == kit_path:
+            raise OSError("kit unavailable")
+        atomic_write(path, text)
+
+    monkeypatch.setattr(keys, "_atomic_write_0600", fail_kit)
+
+    with pytest.raises(OSError, match="kit unavailable"):
+        rotate_key_and_recovery_kit(
+            "22222222-3333-4444-9555-666666666666",
+            key_path=key_path,
+            kit_path=kit_path,
+        )
+
+    assert key_path.read_bytes() == key_before
+    assert kit_path.read_bytes() == kit_before
+    assert load_identity_strings(key_path) == [original_identity]
+
+
+def test_recovery_first_rotation_keeps_active_key_recoverable_when_key_write_fails(
+    tmp_path, key_path, monkeypatch
+):
+    original_identity = init_key(key_path)
+    kit_path = tmp_path / "kit.md"
+    key_before = key_path.read_bytes()
+    atomic_write = keys._atomic_write_0600
+
+    def fail_key(path, text):
+        if path == key_path:
+            raise OSError("key unavailable")
+        atomic_write(path, text)
+
+    monkeypatch.setattr(keys, "_atomic_write_0600", fail_key)
+
+    with pytest.raises(OSError, match="key unavailable"):
+        rotate_key_and_recovery_kit(
+            "22222222-3333-4444-9555-666666666666",
+            key_path=key_path,
+            kit_path=kit_path,
+        )
+
+    assert key_path.read_bytes() == key_before
+    kit_identities = [
+        line.strip()
+        for line in kit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("AGE-SECRET-KEY-")
+    ]
+    assert kit_identities[1:] == [original_identity]
+
+
+def test_older_client_never_overwrites_newer_recovery_kit(tmp_path, key_path):
+    original_identity = init_key(key_path)
+    store_id = "22222222-3333-4444-9555-666666666666"
+    kit_path = write_recovery_kit(store_id, key_path, tmp_path / "kit.md")
+    newer_kit = kit_path.read_text(encoding="utf-8").replace(
+        "format_version: 1",
+        "format_version: 2\nfuture_recovery_token: opaque",
+    )
+    kit_path.write_text(newer_kit, encoding="utf-8")
+    key_before = key_path.read_bytes()
+
+    with pytest.raises(CloudKeyError, match="newer Ormah version"):
+        write_recovery_kit(store_id, key_path, kit_path)
+    with pytest.raises(CloudKeyError, match="newer Ormah version"):
+        rotate_key_and_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
+
+    assert kit_path.read_text(encoding="utf-8") == newer_kit
+    assert key_path.read_bytes() == key_before
+    assert load_identity_strings(key_path) == [original_identity]
 
 
 # --- import ---
@@ -157,6 +243,7 @@ def test_recovery_kit_contains_everything_and_no_passphrase(tmp_path, key_path):
         assert s in text
     assert "22222222-3333-4444-5555-666666666666" in text
     assert "rishi@example.com" in text
+    assert "format_version: 1" in text
     assert "ormah cloud init --import-key" in text
     assert "ormah backup restore --cloud" in text
     assert "including us" in text
