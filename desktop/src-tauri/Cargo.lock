@@ -2509,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "ormah-desktop"
-version = "0.3.16"
+version = "0.3.17"
 dependencies = [
  "libc",
  "once_cell",
