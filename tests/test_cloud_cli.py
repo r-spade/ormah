@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from unittest.mock import patch
 
@@ -9,6 +10,8 @@ import pytest
 
 from ormah import cli
 from ormah.cloud import keys as cloud_keys
+from ormah.cloud import state as cloud_state
+from ormah.cloud.state import CloudState, load_state, save_state
 
 
 @pytest.fixture
@@ -19,6 +22,7 @@ def cloud_paths(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memory"
     monkeypatch.setattr(cloud_keys, "KEY_PATH", key_path)
     monkeypatch.setattr(cloud_keys, "RECOVERY_KIT_PATH", kit_path)
+    monkeypatch.setattr(cloud_state, "CLOUD_STATE_DIR", tmp_path / "cloud-state")
     from ormah.config import settings
 
     monkeypatch.setattr(settings, "memory_dir", memory_dir)
@@ -84,6 +88,22 @@ def test_cloud_rotate_key_json(cloud_paths, capsys):
     strings = cloud_keys.load_identity_strings(key_path)
     assert strings[1:] == first  # old identity retained
     assert strings[0] in kit_path.read_text()  # kit regenerated with new key
+
+
+def test_cloud_rotate_key_clears_recovery_readiness(cloud_paths, capsys):
+    _, _, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    store_id = (memory_dir / ".store_id").read_text(encoding="utf-8").strip()
+    save_state(
+        store_id,
+        CloudState(recovery_kit_verified_at=datetime.now(timezone.utc)),
+        memory_dir=memory_dir,
+    )
+    capsys.readouterr()
+
+    _run(["cloud", "rotate-key", "--yes", "--json"])
+
+    assert load_state(store_id).recovery_kit_verified_at is None
 
 
 def test_cloud_rotate_key_requires_confirmation_non_tty(cloud_paths, capsys, monkeypatch):

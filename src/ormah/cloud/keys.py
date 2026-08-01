@@ -173,19 +173,14 @@ def get_or_create_store_id(memory_dir: Path) -> str:
     return store_id
 
 
-def extract_store_id(source: str) -> str | None:
-    """Pull the store id out of recovery-kit material (path or raw text).
+def extract_store_id_from_text(text: str) -> str | None:
+    """Pull the store id out of already-loaded recovery-kit material.
 
     Fails closed: an explicit ``store_id:`` line that does not carry a valid
     UUIDv4 raises — a damaged kit must abort the import, not silently mint a
     new namespace. Returns None only when the material genuinely contains no
     store identifier (e.g. a bare key file).
     """
-    source_path = Path(source).expanduser()
-    try:
-        text = source_path.read_text(encoding="utf-8") if source_path.is_file() else source
-    except OSError:
-        text = source
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("store_id:"):
@@ -208,6 +203,17 @@ def extract_store_id(source: str) -> str | None:
             except CloudKeyError:
                 continue  # arbitrary 36-char line, not a store id claim
     return None
+
+
+def extract_store_id(source: str) -> str | None:
+    """Pull the store id out of recovery-kit material (path or raw text)."""
+
+    source_path = Path(source).expanduser()
+    try:
+        text = source_path.read_text(encoding="utf-8") if source_path.is_file() else source
+    except OSError:
+        text = source
+    return extract_store_id_from_text(text)
 
 
 def install_store_id(memory_dir: Path, store_id: str) -> str:

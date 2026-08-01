@@ -544,6 +544,15 @@ def is_protected_and_verified(state: CloudState, *, enabled: bool) -> bool:
     )
 
 
+def is_device_loss_recovery_ready(state: CloudState, *, enabled: bool) -> bool:
+    """Require both a saved-kit proof and the current verified snapshot invariant."""
+
+    return state.recovery_kit_verified_at is not None and is_protected_and_verified(
+        state,
+        enabled=enabled,
+    )
+
+
 def cloud_status_payload(
     settings,
     *,
@@ -674,6 +683,11 @@ def cloud_status_payload(
         "last_successful_backup_snapshot_id": state.last_successful_backup_snapshot_id,
         "last_successful_verify_at": _serialize_time(state.last_successful_verify_at),
         "last_verified_snapshot_id": state.last_verified_snapshot_id,
+        "recovery_kit_verified_at": _serialize_time(state.recovery_kit_verified_at),
+        "device_loss_recovery_ready": is_device_loss_recovery_ready(
+            state,
+            enabled=settings.cloud_backup_enabled,
+        ),
         "last_error_code": _serialize_enum(state.last_error_code),
         "last_error_message": state.last_error_message,
         "warnings": warnings,

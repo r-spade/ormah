@@ -609,11 +609,11 @@ def _cmd_cloud_rotate_key(args):
     from ormah.cloud.crypto import CloudCryptoError
     from ormah.cloud.keys import (
         CloudKeyError,
-        get_or_create_store_id,
         load_identity_strings,
-        rotate_key,
-        write_recovery_kit,
     )
+    from ormah.cloud.recovery import RecoveryKitError, RecoveryKitService
+    from ormah.cloud.state import CloudStateError
+    from ormah.cloud.store_lock import StoreLockTimeout
     from ormah.config import settings
     from ormah.console import info, ok, warn
 
@@ -627,18 +627,21 @@ def _cmd_cloud_rotate_key(args):
             return
 
     try:
-        rotate_key()
-    except (CloudKeyError, CloudCryptoError, OSError) as exc:
-        _print_backup_error(str(exc))
-
-    try:
-        store_id = get_or_create_store_id(settings.memory_dir)
-        kit_path = write_recovery_kit(store_id)
+        kit_path = RecoveryKitService(settings).rotate_current_key(
+            account_email=getattr(settings, "account_email", None),
+        )
         identity_count = len(load_identity_strings())
-    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+    except (
+        RecoveryKitError,
+        CloudKeyError,
+        CloudCryptoError,
+        CloudStateError,
+        StoreLockTimeout,
+        OSError,
+    ) as exc:
         _print_backup_error(
-            f"Key was rotated, but recovery-kit regeneration failed: {exc}\n"
-            "Your stored kit is now MISSING the new key — run `ormah cloud kit` immediately."
+            f"Key rotation could not be completed safely: {exc}\n"
+            "Check `ormah cloud kit` before relying on a previously saved recovery kit."
         )
 
     if args.json:

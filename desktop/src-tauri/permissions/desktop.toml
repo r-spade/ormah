@@ -36,4 +36,6 @@ commands.allow = [
   "operation_status",
   "open_checkout",
   "open_billing_portal",
+  "save_recovery_kit",
+  "open_printable_recovery_kit",
 ]

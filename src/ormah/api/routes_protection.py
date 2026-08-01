@@ -11,12 +11,15 @@ from ormah.api.local_auth import require_local_admin
 from ormah.cloud.billing import validate_protection_intent_id
 from ormah.cloud.entitlements import load_entitlement_cache, status_from_cache
 from ormah.cloud.operations import ProtectionOperationCoordinator
-from ormah.cloud.protection import CloudProtectionService
+from ormah.cloud.protection import CloudProtectionService, safe_error_message
+from ormah.cloud.recovery import RecoveryKitError, RecoveryKitService
 from ormah.cloud.state import (
+    CloudStateError,
     ProtectionOperation,
     ProtectionOperationKind,
     cloud_status_payload,
 )
+from ormah.cloud.store_lock import StoreLockTimeout
 
 router = APIRouter(
     prefix="/admin/cloud/protection",
@@ -42,6 +45,23 @@ class VerifyRequest(BaseModel):
     )
 
 
+class ConfirmRecoveryKitRequest(BaseModel):
+    """Proof from the trusted native save/reopen flow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sha256_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RecoveryReadinessResponse(BaseModel):
+    """Purpose-bound response containing no recovery material or locations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_loss_recovery_ready: bool
+    recovery_kit_verified_at: str
+
+
 def _service(request: Request) -> CloudProtectionService:
     injected = getattr(request.app.state, "protection_service", None)
     return injected or CloudProtectionService.from_engine(request.app.state.engine)
@@ -52,6 +72,11 @@ def _coordinator(request: Request) -> ProtectionOperationCoordinator:
     if not isinstance(coordinator, ProtectionOperationCoordinator):
         raise HTTPException(status_code=503, detail="Protection operations are unavailable.")
     return coordinator
+
+
+def _recovery_service(request: Request) -> RecoveryKitService:
+    injected = getattr(request.app.state, "recovery_kit_service", None)
+    return injected or RecoveryKitService(request.app.state.engine.settings)
 
 
 def _store_key(request: Request, operation: str) -> tuple[str, ...]:
@@ -111,7 +136,24 @@ def _submit(
 def protection_status(request: Request):
     """Return durable, token-free protection state for this memory."""
     settings = request.app.state.engine.settings
-    return cloud_status_payload(settings, entitlement=_cached_entitlement(settings))
+    payload = cloud_status_payload(settings, entitlement=_cached_entitlement(settings))
+    # The shared payload also serves the local CLI, where detailed state paths
+    # are useful. The product webview receives only redacted diagnostics.
+    payload.pop("state_error", None)
+    for field in (
+        "last_upload_error",
+        "last_verify_error",
+        "last_error_message",
+    ):
+        if payload.get(field) is not None:
+            payload[field] = safe_error_message(
+                payload[field], getattr(settings, "account_token", None)
+            )
+    payload["warnings"] = [
+        safe_error_message(warning, getattr(settings, "account_token", None))
+        for warning in payload.get("warnings", [])
+    ]
+    return payload
 
 
 @router.post("/intents")
@@ -186,6 +228,26 @@ def verify_now(body: VerifyRequest, request: Request):
         kind=ProtectionOperationKind.VERIFY,
         action=lambda: service.verify_now(body.snapshot_id),
     )
+
+
+@router.post(
+    "/recovery-kit/confirm",
+    response_model=RecoveryReadinessResponse,
+)
+def confirm_recovery_kit(body: ConfirmRecoveryKitRequest, request: Request):
+    """Confirm only the digest produced after the native destination was reopened."""
+
+    try:
+        result = _recovery_service(request).confirm_saved_digest(body.sha256_digest)
+    except (RecoveryKitError, CloudStateError, StoreLockTimeout, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The saved recovery kit could not be verified.",
+        ) from exc
+    return {
+        "device_loss_recovery_ready": result.device_loss_recovery_ready,
+        "recovery_kit_verified_at": result.recovery_kit_verified_at.isoformat(),
+    }
 
 
 @router.get("/operations/{operation_id}")

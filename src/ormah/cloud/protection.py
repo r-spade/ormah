@@ -43,6 +43,7 @@ from ormah.cloud.keys import (
     load_identities,
     write_recovery_kit,
 )
+from ormah.cloud.recovery import RecoveryKitService
 from ormah.cloud.settings import set_cloud_backup_enabled
 from ormah.cloud.state import (
     CURRENT_CLOUD_STATE_SCHEMA_VERSION,
@@ -81,6 +82,10 @@ _QUERY_SECRET_RE = re.compile(
 _SNAPSHOT_ID_RE = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _NODE_PATH_RE = re.compile(r"\b(nodes|deleted)[/\\][^\s'\",)\]]+\.md\b")
+_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:/[A-Za-z0-9._~+@%=-]+)+|"
+    r"(?<![A-Za-z0-9])[A-Za-z]:\\(?:[^\\\s:;,]+\\)*[^\\\s:;,]+"
+)
 _DISK_FULL_ERRNOS = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
 
@@ -97,6 +102,7 @@ def safe_error_message(value: object, *sensitive_values: str | None) -> str:
     message = _BEARER_RE.sub("Bearer <redacted>", message)
     message = _AGE_SECRET_RE.sub("<redacted-age-key>", message)
     message = _NODE_PATH_RE.sub(r"\1/<redacted>.md", message)
+    message = _ABSOLUTE_PATH_RE.sub("<redacted-path>", message)
     for sensitive in sensitive_values:
         if sensitive:
             message = message.replace(sensitive, "<redacted>")
@@ -823,6 +829,7 @@ class CloudProtectionService:
                         store_id,
                         account_email=getattr(self.settings, "account_email", None),
                     )
+                    RecoveryKitService(self.settings).validate_canonical_kit()
                 except _EnablePrerequisiteError:
                     raise
                 except CloudKeyError as exc:

@@ -7,9 +7,13 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::fs::{Metadata, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Runtime, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::ShellExt;
 use url::Url;
 
@@ -24,6 +28,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 const MAX_HOSTED_URL_CHARS: usize = 2048;
 const CHECKOUT_HOST: &str = "checkout.stripe.com";
 const PORTAL_HOST: &str = "billing.stripe.com";
+const RECOVERY_KIT_FILENAME: &str = "ormah-recovery-kit.md";
+const MAX_RECOVERY_KIT_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct DesktopBridgeInfo {
@@ -85,6 +91,31 @@ struct PortalHandoff {
 #[derive(Debug, Serialize)]
 pub struct OpenedResult {
     opened: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryKitReadiness {
+    device_loss_recovery_ready: bool,
+    recovery_kit_verified_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecoveryKitActionResult {
+    status: &'static str,
+    device_loss_recovery_ready: Option<bool>,
+    recovery_kit_verified_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PrintableRecoveryKitResult {
+    opened: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryKitSaveOutcome {
+    Canceled,
+    Saved { digest: String },
 }
 
 #[tauri::command]
@@ -217,6 +248,65 @@ pub async fn operation_status(
 }
 
 #[tauri::command]
+pub async fn save_recovery_kit<R: Runtime>(
+    app: AppHandle<R>,
+    window: WebviewWindow<R>,
+) -> Result<RecoveryKitActionResult, String> {
+    require_product_origin(&window)?;
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Save sensitive Ormah recovery kit")
+        .set_file_name(RECOVERY_KIT_FILENAME)
+        .add_filter("Markdown document", &["md"])
+        .blocking_save_file();
+    let destination = selected.and_then(|selection| selection.into_path().ok());
+    let canonical = recovery_kit_path()?;
+    let digest = match save_selected_recovery_kit(&canonical, destination.as_deref())? {
+        RecoveryKitSaveOutcome::Canceled => {
+            return Ok(RecoveryKitActionResult {
+                status: "canceled",
+                device_loss_recovery_ready: None,
+                recovery_kit_verified_at: None,
+            });
+        }
+        RecoveryKitSaveOutcome::Saved { digest } => digest,
+    };
+    let readiness: RecoveryKitReadiness = request_json(
+        "POST",
+        "/admin/cloud/protection/recovery-kit/confirm",
+        Some(json!({ "sha256_digest": digest })),
+    )
+    .await?;
+    if readiness.recovery_kit_verified_at.is_empty()
+        || readiness.recovery_kit_verified_at.len() > 64
+    {
+        return Err("The saved recovery kit could not be verified.".to_string());
+    }
+    Ok(RecoveryKitActionResult {
+        status: "saved",
+        device_loss_recovery_ready: Some(readiness.device_loss_recovery_ready),
+        recovery_kit_verified_at: Some(readiness.recovery_kit_verified_at),
+    })
+}
+
+#[tauri::command]
+pub async fn open_printable_recovery_kit<R: Runtime>(
+    app: AppHandle<R>,
+    window: WebviewWindow<R>,
+) -> Result<PrintableRecoveryKitResult, String> {
+    require_product_origin(&window)?;
+    let canonical = recovery_kit_path()?;
+    read_bounded_recovery_kit(&canonical)?;
+    let printable = canonical
+        .to_str()
+        .ok_or_else(|| "The printable recovery kit is unavailable.".to_string())?;
+    open_external(&app, printable)
+        .map_err(|_| "Could not open the printable recovery kit.".to_string())?;
+    Ok(PrintableRecoveryKitResult { opened: true })
+}
+
+#[tauri::command]
 pub async fn open_checkout<R: Runtime>(
     app: AppHandle<R>,
     window: WebviewWindow<R>,
@@ -287,6 +377,176 @@ fn open_external<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<(), String
     app.shell()
         .open(url, None)
         .map_err(|_| "Could not open the system browser.".to_string())
+}
+
+fn recovery_kit_path() -> Result<PathBuf, String> {
+    Ok(user_home()?
+        .join(".config/ormah")
+        .join(RECOVERY_KIT_FILENAME))
+}
+
+fn user_home() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "The local Ormah configuration is unavailable.".to_string())
+}
+
+fn read_bounded_recovery_kit(path: &Path) -> Result<Vec<u8>, String> {
+    read_bounded_recovery_kit_with_metadata(path).map(|(bytes, _)| bytes)
+}
+
+fn read_bounded_recovery_kit_with_metadata(path: &Path) -> Result<(Vec<u8>, Metadata), String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|_| "The recovery kit is unavailable.".to_string())?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "The recovery kit is unavailable.".to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_RECOVERY_KIT_BYTES {
+        return Err("The recovery kit is invalid.".to_string());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_RECOVERY_KIT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "The recovery kit is unavailable.".to_string())?;
+    if bytes.len() as u64 > MAX_RECOVERY_KIT_BYTES {
+        return Err("The recovery kit is invalid.".to_string());
+    }
+    Ok((bytes, metadata))
+}
+
+fn save_selected_recovery_kit(
+    canonical: &Path,
+    destination: Option<&Path>,
+) -> Result<RecoveryKitSaveOutcome, String> {
+    let Some(destination) = destination else {
+        return Ok(RecoveryKitSaveOutcome::Canceled);
+    };
+    let (canonical_bytes, canonical_metadata) = read_bounded_recovery_kit_with_metadata(canonical)?;
+    if paths_resolve_to_same_file(canonical, destination)? {
+        return Err("Choose a separate location for the recovery kit.".to_string());
+    }
+
+    let mut options = OpenOptions::new();
+    options.create(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut output = options
+        .open(destination)
+        .map_err(|_| "Could not save the recovery kit.".to_string())?;
+    let metadata = output
+        .metadata()
+        .map_err(|_| "Could not save the recovery kit.".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Could not save the recovery kit.".to_string());
+    }
+    if metadata_is_same_file(&canonical_metadata, &metadata) {
+        return Err("Choose a separate location for the recovery kit.".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        output
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| "Could not secure the saved recovery kit.".to_string())?;
+    }
+    output
+        .set_len(0)
+        .and_then(|_| output.write_all(&canonical_bytes))
+        .and_then(|_| output.sync_all())
+        .map_err(|_| "Could not save the recovery kit.".to_string())?;
+    drop(output);
+
+    let reopened = read_bounded_recovery_kit(destination)
+        .map_err(|_| "The saved recovery kit could not be reopened.".to_string())?;
+    if reopened != canonical_bytes {
+        return Err("The saved recovery kit did not match the current kit.".to_string());
+    }
+    let digest = format!("{:x}", Sha256::digest(&reopened));
+    Ok(RecoveryKitSaveOutcome::Saved { digest })
+}
+
+#[cfg(unix)]
+fn metadata_is_same_file(left: &Metadata, right: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn metadata_is_same_file(left: &Metadata, right: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    match (
+        (left.volume_serial_number(), left.file_index()),
+        (right.volume_serial_number(), right.file_index()),
+    ) {
+        ((Some(left_volume), Some(left_index)), (Some(right_volume), Some(right_index))) => {
+            left_volume == right_volume && left_index == right_index
+        }
+        _ => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_is_same_file(_left: &Metadata, _right: &Metadata) -> bool {
+    false
+}
+
+fn paths_resolve_to_same_file(canonical: &Path, destination: &Path) -> Result<bool, String> {
+    let source = std::fs::canonicalize(canonical)
+        .map_err(|_| "The recovery kit is unavailable.".to_string())?;
+    if destination.exists() {
+        let resolved_destination = std::fs::canonicalize(destination)
+            .map_err(|_| "Could not inspect the save location.".to_string())?;
+        if resolved_destination == source {
+            return Ok(true);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let source_metadata = std::fs::metadata(&source)
+                .map_err(|_| "The recovery kit is unavailable.".to_string())?;
+            let destination_metadata = std::fs::metadata(&resolved_destination)
+                .map_err(|_| "Could not inspect the save location.".to_string())?;
+            return Ok(source_metadata.dev() == destination_metadata.dev()
+                && source_metadata.ino() == destination_metadata.ino());
+        }
+        #[cfg(not(unix))]
+        return Ok(false);
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Could not inspect the save location.".to_string())?;
+    let filename = destination
+        .file_name()
+        .ok_or_else(|| "Could not inspect the save location.".to_string())?;
+    let resolved_parent = std::fs::canonicalize(parent)
+        .map_err(|_| "Could not inspect the save location.".to_string())?;
+    Ok(resolved_parent.join(filename) == source)
 }
 
 fn require_product_origin<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
@@ -364,12 +624,7 @@ async fn request_json<T: for<'de> Deserialize<'de>>(
 }
 
 fn local_admin_token_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| "The local Ormah capability is unavailable.".to_string())?;
-    Ok(home.join(".local/share/ormah/local_api_token"))
+    Ok(user_home()?.join(".local/share/ormah/local_api_token"))
 }
 
 fn load_local_admin_token(path: &Path) -> Result<String, String> {
@@ -529,6 +784,21 @@ mod tests {
     }
 
     #[test]
+    fn remote_graph_has_no_generic_dialog_file_or_shell_permission() {
+        let capability: Value =
+            serde_json::from_str(include_str!("../capabilities/graph.json")).unwrap();
+        let permissions = capability["permissions"].as_array().unwrap();
+        assert!(permissions
+            .iter()
+            .any(|permission| permission == "desktop-product-bridge"));
+        for permission in permissions.iter().filter_map(Value::as_str) {
+            assert!(!permission.starts_with("dialog:"), "{permission}");
+            assert!(!permission.starts_with("fs:"), "{permission}");
+            assert!(!permission.starts_with("shell:"), "{permission}");
+        }
+    }
+
+    #[test]
     fn hosted_urls_require_exact_stripe_origin() {
         assert!(validate_hosted_url(
             "https://checkout.stripe.com/c/pay/cs_test_123?x=1",
@@ -679,6 +949,149 @@ mod tests {
                 "message": value
             }))
             .is_err());
+        }
+    }
+
+    #[test]
+    fn recovery_kit_save_reopens_exact_bytes_and_hashes_them() {
+        let root = std::env::temp_dir().join(format!("ormah-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let canonical = root.join("canonical.md");
+        let destination = root.join("saved.md");
+        let contents = b"# Ormah Recovery Kit\nAGE-SECRET-KEY-TEST-MATERIAL\n";
+        fs::write(&canonical, contents).unwrap();
+
+        let outcome = save_selected_recovery_kit(&canonical, Some(&destination)).unwrap();
+
+        let expected = format!("{:x}", Sha256::digest(contents));
+        assert_eq!(outcome, RecoveryKitSaveOutcome::Saved { digest: expected });
+        assert_eq!(fs::read(&destination).unwrap(), contents);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn canceled_recovery_kit_save_does_no_file_work() {
+        let missing = PathBuf::from("/definitely/not/a/recovery-kit");
+        assert_eq!(
+            save_selected_recovery_kit(&missing, None).unwrap(),
+            RecoveryKitSaveOutcome::Canceled
+        );
+    }
+
+    #[test]
+    fn recovery_kit_reads_are_bounded_and_save_must_be_separate() {
+        let root = std::env::temp_dir().join(format!("ormah-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let canonical = root.join("canonical.md");
+        fs::write(&canonical, vec![b'x'; MAX_RECOVERY_KIT_BYTES as usize + 1]).unwrap();
+        assert!(read_bounded_recovery_kit(&canonical).is_err());
+
+        fs::write(&canonical, b"current kit").unwrap();
+        assert!(save_selected_recovery_kit(&canonical, Some(&canonical)).is_err());
+        assert_eq!(fs::read(&canonical).unwrap(), b"current kit");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_kit_save_refuses_symlink_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("ormah-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let canonical = root.join("canonical.md");
+        let target = root.join("target.md");
+        let destination = root.join("destination.md");
+        fs::write(&canonical, b"current kit").unwrap();
+        fs::write(&target, b"do not overwrite").unwrap();
+        symlink(&target, &destination).unwrap();
+
+        assert!(save_selected_recovery_kit(&canonical, Some(&destination)).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"do not overwrite");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_kit_save_refuses_hard_links_to_the_canonical_file() {
+        let root = std::env::temp_dir().join(format!("ormah-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let canonical = root.join("canonical.md");
+        let destination = root.join("destination.md");
+        fs::write(&canonical, b"current kit").unwrap();
+        fs::hard_link(&canonical, &destination).unwrap();
+
+        assert!(save_selected_recovery_kit(&canonical, Some(&destination)).is_err());
+        assert_eq!(fs::read(&canonical).unwrap(), b"current kit");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_kit_file_identity_is_checked_from_open_handles() {
+        let root = std::env::temp_dir().join(format!("ormah-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let canonical = root.join("canonical.md");
+        let alias = root.join("alias.md");
+        fs::write(&canonical, b"current kit").unwrap();
+        fs::hard_link(&canonical, &alias).unwrap();
+
+        assert!(metadata_is_same_file(
+            &fs::File::open(&canonical).unwrap().metadata().unwrap(),
+            &fs::File::open(&alias).unwrap().metadata().unwrap(),
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_action_results_are_purpose_bound_and_secret_free() {
+        let canceled = serde_json::to_value(RecoveryKitActionResult {
+            status: "canceled",
+            device_loss_recovery_ready: None,
+            recovery_kit_verified_at: None,
+        })
+        .unwrap();
+        let saved = serde_json::to_value(RecoveryKitActionResult {
+            status: "saved",
+            device_loss_recovery_ready: Some(false),
+            recovery_kit_verified_at: Some("2026-07-31T12:00:00+00:00".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            canceled,
+            json!({
+                "status": "canceled",
+                "device_loss_recovery_ready": null,
+                "recovery_kit_verified_at": null
+            })
+        );
+        assert_eq!(
+            saved,
+            json!({
+                "status": "saved",
+                "device_loss_recovery_ready": false,
+                "recovery_kit_verified_at": "2026-07-31T12:00:00+00:00"
+            })
+        );
+        let serialized = serde_json::to_string(&saved).unwrap().to_ascii_lowercase();
+        for forbidden in [
+            "age-secret-key",
+            "sha256",
+            "digest",
+            "filepath",
+            "presigned",
+            "accounttoken",
+        ] {
+            assert!(!serialized.contains(forbidden));
         }
     }
 }

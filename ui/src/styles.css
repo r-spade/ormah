@@ -934,9 +934,86 @@ body.in-app .node-detail.tier-core {
 .protection-actions,
 .protection-account,
 .protection-facts,
-.protection-warnings {
+.protection-warnings,
+.recovery-kit-section {
   padding: 18px 0;
   border-bottom: 1px solid var(--border);
+}
+
+.recovery-kit-heading {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.recovery-kit-heading > span {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+}
+
+.recovery-kit-section.action-required .recovery-kit-heading > span {
+  color: var(--accent);
+}
+
+.recovery-kit-section.is-ready .recovery-kit-heading > span {
+  color: var(--edge-supports);
+}
+
+.recovery-kit-heading h3 {
+  margin: 0 0 2px;
+  color: var(--text-bright);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.recovery-kit-heading strong {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.recovery-kit-section > p {
+  margin: 0 0 12px;
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.recovery-kit-warning {
+  margin: 12px 0;
+  padding: 9px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--bg-surface);
+  color: var(--text-bright);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.recovery-kit-error {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 7px;
+  align-items: start;
+  margin: 0 0 12px;
+  padding: 9px 10px;
+  background: var(--danger-bg);
+  color: var(--text-bright);
+  line-height: 1.45;
+}
+
+.recovery-kit-section .recovery-print-note {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.45;
 }
 
 .step-back {

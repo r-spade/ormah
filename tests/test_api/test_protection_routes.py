@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 from ormah.api import routes_protection
 from ormah.api.local_auth import LOCAL_ADMIN_HEADER, require_loopback
 from ormah.cloud.operations import ProtectionOperationCoordinator
+from ormah.cloud.recovery import RecoveryKitError, RecoveryReadiness
 from ormah.cloud.state import (
     ProtectionOperation,
     ProtectionOperationKind,
@@ -81,12 +83,29 @@ class FakeProtectionService:
         return _operation(ProtectionOperationKind.VERIFY)
 
 
+class FakeRecoveryKitService:
+    def __init__(self):
+        self.calls: list[str] = []
+        self.fail = False
+        self.ready = True
+
+    def confirm_saved_digest(self, digest):
+        self.calls.append(digest)
+        if self.fail:
+            raise RecoveryKitError("secret path and AGE-SECRET-KEY-private")
+        return RecoveryReadiness(
+            self.ready,
+            datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc),
+        )
+
+
 @pytest.fixture
 def protection_app(tmp_path: Path, monkeypatch):
     async def allow_test_client():
         return None
 
     service = FakeProtectionService()
+    recovery_service = FakeRecoveryKitService()
     coordinator = ProtectionOperationCoordinator(max_workers=4)
     app = FastAPI()
     app.dependency_overrides[require_loopback] = allow_test_client
@@ -96,6 +115,7 @@ def protection_app(tmp_path: Path, monkeypatch):
     )
     app.state.protection_service = service
     app.state.protection_operations = coordinator
+    app.state.recovery_kit_service = recovery_service
     app.include_router(routes_protection.router)
     monkeypatch.setattr(
         routes_protection,
@@ -108,7 +128,7 @@ def protection_app(tmp_path: Path, monkeypatch):
     )
     try:
         with TestClient(app) as client:
-            yield client, service, coordinator
+            yield client, service, coordinator, recovery_service
     finally:
         if service.release_backup is not None:
             service.release_backup.set()
@@ -131,7 +151,7 @@ def _poll(client: TestClient, operation_id: str) -> dict:
 
 
 def test_all_protection_routes_require_local_capability(protection_app):
-    client, _, _ = protection_app
+    client, _, _, _ = protection_app
     requests = [
         ("GET", "/admin/cloud/protection", None),
         ("POST", "/admin/cloud/protection/intents", {}),
@@ -141,6 +161,11 @@ def test_all_protection_routes_require_local_capability(protection_app):
         ("POST", "/admin/cloud/protection/disable", {}),
         ("POST", "/admin/cloud/protection/backup", {}),
         ("POST", "/admin/cloud/protection/verify", {}),
+        (
+            "POST",
+            "/admin/cloud/protection/recovery-kit/confirm",
+            {"sha256_digest": "a" * 64},
+        ),
         ("GET", f"/admin/cloud/protection/operations/{INTENT_ID}", None),
     ]
 
@@ -150,7 +175,7 @@ def test_all_protection_routes_require_local_capability(protection_app):
 
 
 def test_status_and_intent_adapters_are_thin_and_token_free(protection_app):
-    client, service, _ = protection_app
+    client, service, _, _ = protection_app
 
     status_response = client.get("/admin/cloud/protection", headers=HEADERS)
     create_response = client.post(
@@ -182,6 +207,39 @@ def test_status_and_intent_adapters_are_thin_and_token_free(protection_app):
     )
 
 
+def test_product_status_redacts_paths_credentials_and_secret_material(
+    protection_app,
+    monkeypatch,
+):
+    client, _, _, _ = protection_app
+    monkeypatch.setattr(
+        routes_protection,
+        "cloud_status_payload",
+        lambda settings, **kwargs: {
+            "protection_state": "attention_required",
+            "state_error": "failed at /home/person/cloud-state.json",
+            "last_upload_error": "token never-return-this-token",
+            "last_verify_error": "AGE-SECRET-KEY-private",
+            "last_error_message": "https://example.test/private",
+            "warnings": ["bad file /tmp/recovery/kit.md"],
+        },
+    )
+
+    response = client.get("/admin/cloud/protection", headers=HEADERS)
+
+    assert response.status_code == 200
+    serialized = str(response.json()).lower()
+    assert "state_error" not in response.json()
+    for forbidden in [
+        "/home/person",
+        "/tmp/recovery",
+        "never-return-this-token",
+        "age-secret-key",
+        "https://",
+    ]:
+        assert forbidden not in serialized
+
+
 @pytest.mark.parametrize(
     ("path", "body"),
     [
@@ -192,16 +250,20 @@ def test_status_and_intent_adapters_are_thin_and_token_free(protection_app):
         ("/admin/cloud/protection/disable", {"delete_remote": True}),
         ("/admin/cloud/protection/backup", {"advance_head": True}),
         ("/admin/cloud/protection/verify", {"presigned_url": "https://example.test"}),
+        (
+            "/admin/cloud/protection/recovery-kit/confirm",
+            {"sha256_digest": "a" * 64, "path": "/secret"},
+        ),
     ],
 )
 def test_mutation_routes_forbid_extra_fields(protection_app, path, body):
-    client, _, _ = protection_app
+    client, _, _, _ = protection_app
     response = client.post(path, headers=HEADERS, json=body)
     assert response.status_code == 422
 
 
 def test_long_operations_return_202_and_poll_safe_results(protection_app):
-    client, service, _ = protection_app
+    client, service, _, _ = protection_app
     requests = [
         (
             f"/admin/cloud/protection/intents/{INTENT_ID}/enable",
@@ -229,7 +291,7 @@ def test_long_operations_return_202_and_poll_safe_results(protection_app):
 
 
 def test_repeated_active_backup_joins_one_operation(protection_app):
-    client, service, _ = protection_app
+    client, service, _, _ = protection_app
     service.release_backup = threading.Event()
 
     first = client.post("/admin/cloud/protection/backup", headers=HEADERS, json={})
@@ -245,7 +307,7 @@ def test_repeated_active_backup_joins_one_operation(protection_app):
 
 
 def test_unknown_operation_returns_404(protection_app):
-    client, _, _ = protection_app
+    client, _, _, _ = protection_app
     response = client.get(
         "/admin/cloud/protection/operations/unknown",
         headers=HEADERS,
@@ -273,7 +335,7 @@ def test_polling_entitlement_is_cache_only(monkeypatch):
 
 
 def test_invalid_intent_and_snapshot_ids_fail_before_service_work(protection_app):
-    client, service, _ = protection_app
+    client, service, _, _ = protection_app
 
     invalid_intent = client.post(
         "/admin/cloud/protection/intents/not-a-uuid/enable",
@@ -289,3 +351,69 @@ def test_invalid_intent_and_snapshot_ids_fail_before_service_work(protection_app
     assert invalid_intent.status_code == 422
     assert invalid_snapshot.status_code == 422
     assert service.calls == []
+
+
+def test_recovery_confirmation_is_typed_and_secret_free(protection_app):
+    client, _, _, recovery_service = protection_app
+
+    response = client.post(
+        "/admin/cloud/protection/recovery-kit/confirm",
+        headers=HEADERS,
+        json={"sha256_digest": "a" * 64},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "device_loss_recovery_ready": True,
+        "recovery_kit_verified_at": "2026-07-31T12:00:00+00:00",
+    }
+    assert recovery_service.calls == ["a" * 64]
+    serialized = str(response.json()).lower()
+    for forbidden in ["age-secret-key", "path", "token", "digest", "identity"]:
+        assert forbidden not in serialized
+
+
+def test_recovery_confirmation_does_not_invent_readiness(protection_app):
+    client, _, _, recovery_service = protection_app
+    recovery_service.ready = False
+
+    response = client.post(
+        "/admin/cloud/protection/recovery-kit/confirm",
+        headers=HEADERS,
+        json={"sha256_digest": "a" * 64},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["device_loss_recovery_ready"] is False
+
+
+@pytest.mark.parametrize("digest", ["ABC", "A" * 64, "a" * 63, "a" * 65])
+def test_malformed_recovery_digest_is_rejected_before_service_work(
+    protection_app,
+    digest,
+):
+    client, _, _, recovery_service = protection_app
+
+    response = client.post(
+        "/admin/cloud/protection/recovery-kit/confirm",
+        headers=HEADERS,
+        json={"sha256_digest": digest},
+    )
+
+    assert response.status_code == 422
+    assert recovery_service.calls == []
+
+
+def test_recovery_confirmation_failure_does_not_leak_service_error(protection_app):
+    client, _, _, recovery_service = protection_app
+    recovery_service.fail = True
+
+    response = client.post(
+        "/admin/cloud/protection/recovery-kit/confirm",
+        headers=HEADERS,
+        json={"sha256_digest": "a" * 64},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "The saved recovery kit could not be verified."}
+    assert "secret" not in response.text.lower()

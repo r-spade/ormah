@@ -150,6 +150,7 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -184,6 +185,8 @@ pub fn run() {
             product_bridge::operation_status,
             product_bridge::open_checkout,
             product_bridge::open_billing_portal,
+            product_bridge::save_recovery_kit,
+            product_bridge::open_printable_recovery_kit,
         ])
         .setup(|app| {
             // Linux: refuse to start a second instance so we never spawn a

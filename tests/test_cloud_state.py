@@ -21,6 +21,7 @@ from ormah.cloud.state import (
     ProtectionState,
     UploadJournalPhase,
     cloud_status_payload,
+    is_device_loss_recovery_ready,
     is_protected_and_verified,
     load_state,
     save_state,
@@ -82,6 +83,68 @@ def test_reserved_upload_does_not_hide_last_verified_protection():
         CloudState(**values, pending_upload_phase=UploadJournalPhase.FINALIZING),
         enabled=True,
     )
+
+
+def test_device_loss_readiness_requires_saved_kit_and_current_verified_snapshot():
+    verified_at = datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc)
+    current = CloudState(
+        last_successful_backup_snapshot_id="snapshot-a",
+        last_verified_snapshot_id="snapshot-a",
+        last_verify_ok=True,
+        recovery_kit_verified_at=verified_at,
+    )
+
+    assert is_device_loss_recovery_ready(current, enabled=True)
+    assert not is_device_loss_recovery_ready(
+        CloudState(
+            last_successful_backup_snapshot_id="snapshot-a",
+            last_verified_snapshot_id="snapshot-a",
+            last_verify_ok=True,
+        ),
+        enabled=True,
+    )
+    assert not is_device_loss_recovery_ready(
+        CloudState(
+            last_successful_backup_snapshot_id="snapshot-b",
+            last_verified_snapshot_id="snapshot-a",
+            last_verify_ok=True,
+            recovery_kit_verified_at=verified_at,
+        ),
+        enabled=True,
+    )
+    assert not is_device_loss_recovery_ready(current, enabled=False)
+
+
+def test_cloud_status_exposes_only_derived_recovery_readiness(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    verified_at = datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc)
+    save_state(
+        store_id,
+        CloudState(
+            protection_state=ProtectionState.PROTECTED,
+            last_successful_backup_snapshot_id="snapshot-a",
+            last_verified_snapshot_id="snapshot-a",
+            last_verify_ok=True,
+            recovery_kit_verified_at=verified_at,
+        ),
+        memory_dir=memory_dir,
+        state_dir=tmp_path / "state",
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=True),
+        entitlement="active",
+        state_dir=tmp_path / "state",
+    )
+
+    assert payload["device_loss_recovery_ready"] is True
+    assert payload["recovery_kit_verified_at"] == verified_at.isoformat()
+    serialized = json.dumps(payload).lower()
+    assert "age-secret-key" not in serialized
+    assert "ormah-recovery-kit.md" not in serialized
 
 
 def test_update_preserves_unmodified_fields(tmp_path):

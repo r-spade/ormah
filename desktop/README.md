@@ -12,6 +12,8 @@ product:
    count, with a dropdown for stats and actions.
 4. **In-app graph** — the existing web UI loads inside the window.
 5. **Auto-update** — Tauri updater (appcast).
+6. **Trusted recovery handoff** — fixed native commands save or open the
+   canonical recovery kit without exposing its bytes or location to React.
 
 ## Architecture
 
@@ -28,6 +30,16 @@ binaries/uv-<triple>        ← bundled uv binary (downloaded at CI build time)
        ↓ serves
 http://127.0.0.1:8787        ← existing FastAPI app + web UI
 ```
+
+The product webview receives only the purpose-built `desktop-product-bridge`
+commands. Recovery-kit Save uses `tauri-plugin-dialog` only inside Rust; the
+remote graph capability is not granted generic dialog, filesystem, or shell
+access. Rust bounded-reads the fixed canonical kit, writes the selected file
+with owner-only permissions on Unix, reopens it without following symlinks,
+and sends only its SHA-256 digest to a fixed capability-authenticated local
+endpoint. Python independently validates the canonical store and full active
+identity set before recording readiness under the store lock. The direct
+`sha2` and `libc` dependencies provide digesting and Unix `O_NOFOLLOW` support.
 
 ## Build & run (dev)
 

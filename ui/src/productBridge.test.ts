@@ -70,6 +70,8 @@ function status(overrides: Partial<ProtectionStatus>): ProtectionStatus {
     last_successful_backup_snapshot_id: null,
     last_successful_verify_at: null,
     last_verified_snapshot_id: null,
+    recovery_kit_verified_at: null,
+    device_loss_recovery_ready: false,
     last_error_code: null,
     last_error_message: null,
     warnings: [],

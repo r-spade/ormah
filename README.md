@@ -164,6 +164,16 @@ them. Keep it offline and separate from the machine and cloud account it
 protects. Anyone with the kit can read the backups; without it, nobody can,
 including Ormah.
 
+Snapshot protection and device-loss recovery are reported separately in Ormah
+Desktop. **Protected and verified** means the encrypted snapshot was restored
+and checked on this device. **Device-loss recovery ready** appears only after
+Desktop saves the current recovery kit through the native file picker, reopens
+the saved file, and verifies it against this memory's active store and complete
+identity set. Canceling the picker does not affect cloud protection; the
+recovery action remains incomplete. **Open printable copy** opens the kit in the
+system viewer but does not claim that a durable copy was saved. Key rotation
+clears readiness until the new kit is saved and checked again.
+
 `ormah uninstall` removes local data and account configuration, but it always
 preserves `~/.config/ormah/cloud.key` and
 `~/.config/ormah/ormah-recovery-kit.md`. Before deleting anything, uninstall

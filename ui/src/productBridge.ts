@@ -76,10 +76,24 @@ export interface ProtectionStatus {
   last_successful_backup_snapshot_id: string | null;
   last_successful_verify_at: string | null;
   last_verified_snapshot_id: string | null;
+  recovery_kit_verified_at: string | null;
+  device_loss_recovery_ready: boolean;
   last_error_code: string | null;
   last_error_message: string | null;
   warnings: string[];
 }
+
+export type RecoveryKitActionResult =
+  | {
+    status: "saved";
+    device_loss_recovery_ready: boolean;
+    recovery_kit_verified_at: string;
+  }
+  | {
+    status: "canceled";
+    device_loss_recovery_ready: null;
+    recovery_kit_verified_at: null;
+  };
 
 export interface ProtectionOperation {
   operation_id: string;
@@ -145,6 +159,9 @@ export const productBridge = {
   openCheckout: (intentId: string) =>
     native<BillingHandoff>("open_checkout", { intentId }),
   openPortal: () => native<{ opened: boolean }>("open_billing_portal"),
+  saveRecoveryKit: () => native<RecoveryKitActionResult>("save_recovery_kit"),
+  openPrintableRecoveryKit: () =>
+    native<{ opened: boolean }>("open_printable_recovery_kit"),
 };
 
 export interface ProtectionPresentation {

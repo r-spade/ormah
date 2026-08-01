@@ -11,6 +11,7 @@ import pytest
 from ormah.cloud import protection, state
 from ormah.cloud.client import CloudError
 from ormah.cloud.protection import CloudProtectionService
+from ormah.cloud.recovery import RecoveryKitError
 from ormah.cloud.state import (
     ProtectionIntentStatus,
     ProtectionOperation,
@@ -55,6 +56,11 @@ def cloud_state_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(protection, "_utc_now", lambda: NOW)
     monkeypatch.setattr(protection, "cache_entitlements", lambda *args, **kwargs: None)
     monkeypatch.setattr(protection, "RECOVERY_KIT_PATH", tmp_path / "recovery-kit.md")
+    monkeypatch.setattr(
+        protection,
+        "RecoveryKitService",
+        lambda settings: SimpleNamespace(validate_canonical_kit=lambda: None),
+    )
 
 
 def _settings(tmp_path: Path, *, token: str | None = "token"):
@@ -466,6 +472,13 @@ def test_enable_only_claims_protected_after_exact_snapshot_verification(
         return Path("kit")
 
     monkeypatch.setattr(protection, "write_recovery_kit", write_kit)
+    monkeypatch.setattr(
+        protection,
+        "RecoveryKitService",
+        lambda settings: SimpleNamespace(
+            validate_canonical_kit=lambda: order.append("kit")
+        ),
+    )
 
     def enable_setting(settings, enabled):
         assert load_state(store_id).protection_state is ProtectionState.INITIALIZING
@@ -533,7 +546,7 @@ def test_enable_only_claims_protected_after_exact_snapshot_verification(
 
     result = service.enable(intent)
 
-    assert order == ["settings", "upload", "verify"]
+    assert order == ["kit", "settings", "upload", "verify"]
     assert result.phase is ProtectionOperationPhase.COMPLETED
     assert result.operation_id == intent
     assert result.snapshot_id == SNAPSHOT_ID
@@ -542,6 +555,37 @@ def test_enable_only_claims_protected_after_exact_snapshot_verification(
     assert durable.protection_state is ProtectionState.PROTECTED
     assert durable.pending_protection_status is ProtectionIntentStatus.COMPLETED
     assert durable.recovery_kit_verified_at is None
+
+
+def test_enable_fails_closed_when_generated_kit_does_not_validate(tmp_path, monkeypatch):
+    settings, service, intent, _ = _ready_intent(tmp_path, monkeypatch)
+    monkeypatch.setattr(protection, "key_file_exists", lambda: True)
+    monkeypatch.setattr(protection, "load_identities", lambda: [object()])
+    monkeypatch.setattr(
+        protection,
+        "write_recovery_kit",
+        lambda store_id, **kwargs: Path("kit"),
+    )
+    monkeypatch.setattr(
+        protection,
+        "RecoveryKitService",
+        lambda settings: SimpleNamespace(
+            validate_canonical_kit=lambda: (_ for _ in ()).throw(
+                RecoveryKitError("invalid kit")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        protection,
+        "set_cloud_backup_enabled",
+        lambda *args: (_ for _ in ()).throw(AssertionError("must not enable")),
+    )
+
+    result = service.enable(intent)
+
+    assert result.phase is ProtectionOperationPhase.FAILED
+    assert result.reason_code is ProtectionReasonCode.KEY_INVALID
+    assert settings.cloud_backup_enabled is False
 
 
 def test_running_intent_retries_verification_without_reupload(tmp_path, monkeypatch):
