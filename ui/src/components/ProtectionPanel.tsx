@@ -20,6 +20,7 @@ import {
   effectiveProtectionState,
   operationPhaseIsActive,
   productBridge,
+  protectionCompletionSummary,
   protectionPresentation,
   protectionRepairAction,
   recoveryKitSectionVisible,
@@ -198,9 +199,12 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
         if (!operationIsActive(next)) {
           window.clearInterval(timer);
           await refresh();
-          setOperation(null);
-          if (next.phase === "completed") onToast(operationSuccessMessage(next), "success");
-          else if (next.message) setError(next.message);
+          if (next.phase === "completed") {
+            onToast(operationSuccessMessage(next), "success");
+          } else {
+            setOperation(null);
+            if (next.message) setError(next.message);
+          }
         }
       } catch (err) {
         // Polling IDs are process-local. After a Python restart, discard the
@@ -460,6 +464,10 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
     ? (status?.last_operation_phase || operation?.phase)
     : null;
   const activeStageIndex = phaseIndex(activePhase);
+  const completionSummary = protectionCompletionSummary(operation);
+  const completedStages = operation?.kind === "verify"
+    ? PROTECTION_STAGES.slice(4)
+    : PROTECTION_STAGES;
   const summaryTone = activeOperation ? "working" : presentation.tone;
   const repairAction = status ? protectionRepairAction(status) : "none";
 
@@ -559,6 +567,24 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
                 })}
               </ol>
               <p>Verification uses a temporary copy. Your live memory is never replaced.</p>
+            </section>
+          )}
+
+          {completionSummary && (
+            <section className="protection-progress protection-complete" aria-label="Protection completed">
+              <div className="protection-progress-heading">
+                <span>Recovery check</span>
+                <strong>Complete</strong>
+              </div>
+              <ol>
+                {completedStages.map((stage) => (
+                  <li className="complete" key={stage.phase}>
+                    <span aria-hidden="true"><Check size={13} /></span>
+                    <span>{stage.label}</span>
+                  </li>
+                ))}
+              </ol>
+              <p>{completionSummary}</p>
             </section>
           )}
 

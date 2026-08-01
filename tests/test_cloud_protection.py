@@ -113,6 +113,7 @@ def test_backup_and_verify_checks_the_exact_uploaded_snapshot(
         ProtectionOperationPhase.COMPLETED,
         ProtectionState.PROTECTED,
         snapshot_id=SNAPSHOT_ID,
+        verified_node_count=7,
     )
 
     monkeypatch.setattr(
@@ -132,6 +133,7 @@ def test_backup_and_verify_checks_the_exact_uploaded_snapshot(
     assert result.phase is ProtectionOperationPhase.COMPLETED
     assert result.state is ProtectionState.PROTECTED
     assert result.snapshot_id == SNAPSHOT_ID
+    assert result.verified_node_count == 7
     assert calls[0][0] == "backup"
     assert calls[1] == (
         "verify",
@@ -782,6 +784,7 @@ def test_verify_now_accepts_snapshot_id_after_entitlement_lapse(
     assert result.phase is ProtectionOperationPhase.COMPLETED
     assert result.state is ProtectionState.PROTECTED
     assert result.snapshot_id == SNAPSHOT_ID
+    assert result.verified_node_count == 1
     assert load_state(store_id).last_verified_snapshot_id == SNAPSHOT_ID
     assert observed == [
         ProtectionOperationPhase.DOWNLOADING,

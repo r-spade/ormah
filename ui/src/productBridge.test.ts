@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   effectiveProtectionState,
   operationPhaseIsActive,
+  protectionCompletionSummary,
   protectionRepairAction,
   protectionPresentation,
   recoveryKitSectionVisible,
@@ -70,6 +71,46 @@ describe("operationPhaseIsActive", () => {
     for (const phase of ["completed", "failed", "canceled", null, undefined] as const) {
       expect(operationPhaseIsActive(phase)).toBe(false);
     }
+  });
+});
+
+describe("protectionCompletionSummary", () => {
+  it("uses backend timing and verified counts for a backup receipt", () => {
+    const summary = protectionCompletionSummary({
+      operation_id: "operation",
+      kind: "backup",
+      status: "completed",
+      submitted_at: "2026-08-01T19:00:00Z",
+      started_at: "2026-08-01T19:00:01Z",
+      finished_at: "2026-08-01T19:00:07.4Z",
+      phase: "completed",
+      protection_state: "protected",
+      reason_code: null,
+      message: null,
+      snapshot_id: "snapshot",
+      protection_intent_id: null,
+      verified_node_count: 1839,
+    });
+
+    expect(summary).toContain("1,839 active memories");
+    expect(summary).toContain("encrypted, uploaded, and restore-tested in 6 seconds");
+  });
+
+  it("never invents a receipt without a verified count and valid server timing", () => {
+    expect(protectionCompletionSummary({
+      operation_id: "operation",
+      kind: "backup",
+      status: "completed",
+      started_at: null,
+      finished_at: null,
+      phase: "completed",
+      protection_state: "protected",
+      reason_code: null,
+      message: null,
+      snapshot_id: "snapshot",
+      protection_intent_id: null,
+      verified_node_count: null,
+    })).toBeNull();
   });
 });
 

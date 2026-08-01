@@ -113,12 +113,46 @@ export interface ProtectionOperation {
   operation_id: string;
   kind: "enable" | "disable" | "backup" | "verify" | "restore";
   status?: "queued" | "running" | "completed" | "failed";
+  submitted_at?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
   phase: OperationPhase | null;
   protection_state: ProtectionState | null;
   reason_code: string | null;
   message: string | null;
   snapshot_id: string | null;
   protection_intent_id: string | null;
+  verified_node_count?: number | null;
+}
+
+export function protectionCompletionSummary(
+  operation: ProtectionOperation | null | undefined,
+): string | null {
+  if (
+    operation?.phase !== "completed"
+    || !Number.isInteger(operation.verified_node_count)
+    || (operation.verified_node_count ?? 0) < 1
+    || !operation.started_at
+    || !operation.finished_at
+  ) return null;
+
+  const started = new Date(operation.started_at).getTime();
+  const finished = new Date(operation.finished_at).getTime();
+  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return null;
+
+  const count = operation.verified_node_count as number;
+  const memories = `${new Intl.NumberFormat().format(count)} active ${
+    count === 1 ? "memory" : "memories"
+  }`;
+  const seconds = Math.max(1, Math.round((finished - started) / 1000));
+  const elapsed = `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+  if (operation.kind === "enable" || operation.kind === "backup") {
+    return `${memories} encrypted, uploaded, and restore-tested in ${elapsed}.`;
+  }
+  if (operation.kind === "verify") {
+    return `${memories} restore-tested in ${elapsed}.`;
+  }
+  return null;
 }
 
 export function effectiveProtectionState(

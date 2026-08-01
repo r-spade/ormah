@@ -544,7 +544,10 @@ def _cmd_cloud_init(args):
 
     try:
         store_id = get_or_create_store_id(settings.memory_dir)
-        kit_path = write_recovery_kit(store_id)
+        kit_path = write_recovery_kit(
+            store_id,
+            account_email=getattr(settings, "account_email", None),
+        )
         identity_count = len(load_identity_strings())
     except (CloudKeyError, CloudCryptoError, OSError) as exc:
         _print_backup_error(
@@ -588,7 +591,10 @@ def _cmd_cloud_kit(args):
 
     try:
         store_id = get_or_create_store_id(settings.memory_dir)
-        kit_path = write_recovery_kit(store_id)
+        kit_path = write_recovery_kit(
+            store_id,
+            account_email=getattr(settings, "account_email", None),
+        )
         identity_count = len(load_identity_strings())
     except (CloudKeyError, CloudCryptoError, OSError) as exc:
         _print_backup_error(str(exc))

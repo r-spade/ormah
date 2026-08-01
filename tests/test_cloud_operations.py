@@ -28,6 +28,7 @@ def _result(operation_id: str = "durable-operation") -> ProtectionOperation:
         phase=ProtectionOperationPhase.COMPLETED,
         state=ProtectionState.VERIFICATION_PENDING,
         snapshot_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        verified_node_count=42,
     )
 
 
@@ -78,6 +79,7 @@ def test_coordinator_returns_immediately_and_deduplicates_active_work():
         completed = _wait_for_terminal(coordinator, first.operation_id)
         assert completed.status is LocalOperationStatus.COMPLETED
         assert completed.result == _result()
+        assert completed.to_payload()["verified_node_count"] == 42
         assert calls == 1
     finally:
         release.set()

@@ -931,6 +931,7 @@ class CloudProtectionService:
                     ProtectionState.PROTECTED,
                     snapshot_id=snapshot_id,
                     protection_intent_id=intent_id,
+                    verified_node_count=verification.verified_node_count,
                 )
         except StoreLockTimeout:
             return self._store_busy_operation(
@@ -1344,6 +1345,7 @@ class CloudProtectionService:
                     verification.reason_code,
                     verification.message,
                     verification.snapshot_id,
+                    verified_node_count=verification.verified_node_count,
                 )
         except StoreLockTimeout:
             return self._store_busy_operation(
@@ -1947,7 +1949,7 @@ class CloudProtectionService:
                 last_operation_kind=ProtectionOperationKind.VERIFY,
                 last_operation_phase=ProtectionOperationPhase.REBUILDING,
             )
-            _verify_extracted_bundle(extracted, store_id, info)
+            verified_node_count = _verify_extracted_bundle(extracted, store_id, info)
 
             verified_at = _utc_now()
             next_state = _state_after_verification(state, snapshot_id)
@@ -1984,6 +1986,7 @@ class CloudProtectionService:
                 ProtectionOperationPhase.COMPLETED,
                 next_state,
                 snapshot_id=snapshot_id,
+                verified_node_count=verified_node_count,
             )
         except Exception as exc:
             offline = _is_offline_error(exc)

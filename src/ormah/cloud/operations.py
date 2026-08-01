@@ -67,6 +67,7 @@ class LocalOperation:
             "message": result.message if result else self.error_message,
             "snapshot_id": result.snapshot_id if result else None,
             "protection_intent_id": result.protection_intent_id if result else None,
+            "verified_node_count": result.verified_node_count if result else None,
             "error_code": self.error_code,
         }
 

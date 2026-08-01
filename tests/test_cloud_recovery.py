@@ -28,7 +28,11 @@ def recovery_store(tmp_path: Path):
     key_path = tmp_path / "config" / "cloud.key"
     kit_path = tmp_path / "config" / "ormah-recovery-kit.md"
     state_dir = tmp_path / "state"
-    settings = SimpleNamespace(memory_dir=memory_dir, cloud_backup_enabled=True)
+    settings = SimpleNamespace(
+        memory_dir=memory_dir,
+        cloud_backup_enabled=True,
+        account_email=None,
+    )
     store_id = get_or_create_store_id(memory_dir)
     init_key(key_path)
     write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
@@ -97,6 +101,18 @@ def test_ensure_current_kit_repairs_stale_material_before_native_save(recovery_s
 
     service.validate_canonical_kit()
     assert "person@example.com" in kit_path.read_text(encoding="utf-8")
+    assert load_state(store_id, state_dir=state_dir).recovery_kit_verified_at is None
+
+
+def test_ensure_current_kit_repairs_placeholder_for_signed_in_account(recovery_store):
+    settings, store_id, _, kit_path, state_dir, service = recovery_store
+    service.confirm_saved_digest(hashlib.sha256(kit_path.read_bytes()).hexdigest())
+    assert "Email: <your ormah account email>" in kit_path.read_text(encoding="utf-8")
+    settings.account_email = "person@example.com"
+
+    assert service.ensure_current_kit() is True
+
+    assert "Email: person@example.com" in kit_path.read_text(encoding="utf-8")
     assert load_state(store_id, state_dir=state_dir).recovery_kit_verified_at is None
 
 

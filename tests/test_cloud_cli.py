@@ -26,6 +26,7 @@ def cloud_paths(tmp_path, monkeypatch):
     from ormah.config import settings
 
     monkeypatch.setattr(settings, "memory_dir", memory_dir)
+    monkeypatch.setattr(settings, "account_email", None)
     return key_path, kit_path, memory_dir
 
 
@@ -48,6 +49,19 @@ def test_cloud_init_json(cloud_paths, capsys):
     assert kit_path.is_file()
     assert (memory_dir / ".store_id").is_file()
     assert out["store_id"] == (memory_dir / ".store_id").read_text().strip()
+
+
+def test_cloud_init_writes_signed_in_email_to_recovery_kit(
+    cloud_paths, capsys, monkeypatch
+):
+    _, kit_path, _ = cloud_paths
+    from ormah.config import settings
+
+    monkeypatch.setattr(settings, "account_email", "person@example.com")
+
+    _run(["cloud", "init", "--json"])
+
+    assert "Email: person@example.com" in kit_path.read_text(encoding="utf-8")
 
 
 def test_cloud_init_refuses_second_run(cloud_paths, capsys):
@@ -137,6 +151,19 @@ def test_cloud_kit_regenerates_after_loss(cloud_paths, capsys):
     assert kit_path.is_file()
     current = cloud_keys.load_identity_strings(key_path)[0]
     assert current in kit_path.read_text()
+
+
+def test_cloud_kit_writes_signed_in_email(cloud_paths, capsys, monkeypatch):
+    _, kit_path, _ = cloud_paths
+    from ormah.config import settings
+
+    _run(["cloud", "init", "--json"])
+    capsys.readouterr()
+    monkeypatch.setattr(settings, "account_email", "person@example.com")
+
+    _run(["cloud", "kit", "--json"])
+
+    assert "Email: person@example.com" in kit_path.read_text(encoding="utf-8")
 
 
 def test_cloud_kit_without_key_fails(cloud_paths, capsys):

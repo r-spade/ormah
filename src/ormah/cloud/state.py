@@ -150,6 +150,7 @@ class ProtectionOperation:
     message: str | None = None
     snapshot_id: str | None = None
     protection_intent_id: str | None = None
+    verified_node_count: int | None = None
 
 
 def _as_utc(value: datetime) -> datetime:

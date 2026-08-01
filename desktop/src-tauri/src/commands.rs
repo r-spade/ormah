@@ -136,6 +136,12 @@ pub async fn server_status() -> bool {
     crate::sidecar::is_running().await
 }
 
+/// Retry a failed bundled-runtime setup without starting concurrent installers.
+#[tauri::command]
+pub fn retry_runtime_setup<R: Runtime>(app: AppHandle<R>) -> bool {
+    crate::sidecar::start(app)
+}
+
 // ---- onboarding marker -----------------------------------------------------
 
 fn marker_path<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {

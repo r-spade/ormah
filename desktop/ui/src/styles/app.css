@@ -109,9 +109,18 @@ h1, h2, h3, h4, .display {
 /* First-launch status shown during uv install / server start */
 .boot-status {
   position: fixed; bottom: 40px; left: 0; right: 0;
-  text-align: center; font-size: 12px; color: #555;
-  pointer-events: none; letter-spacing: 0.03em;
+  display: grid; justify-items: center; gap: 12px;
+  padding: 0 24px; text-align: center; font-size: 12px; color: #777;
+  letter-spacing: 0.03em;
 }
+.boot-status button {
+  min-width: 104px; height: 34px; padding: 0 16px;
+  border: 1px solid rgba(124, 194, 181, .55); border-radius: 5px;
+  background: rgba(124, 194, 181, .08); color: #9ed4ca;
+  font: inherit; cursor: pointer;
+}
+.boot-status button:hover { background: rgba(124, 194, 181, .14); }
+.boot-status button:disabled { cursor: default; opacity: .55; }
 
 @media (prefers-reduced-motion: reduce) {
   .install, .scrim, .tool { transition: none !important; animation: none !important; }

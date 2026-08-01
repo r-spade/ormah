@@ -29,9 +29,10 @@ export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Listen for server lifecycle events emitted by sidecar.rs.
 export type ServerStatus =
-  | { phase: "installing"; version: string }
+  | { phase: "installing"; version: string; attempt: number; attempts: number }
+  | { phase: "retrying"; version: string; attempt: number; attempts: number; delay_seconds: number }
   | { phase: "starting" }
-  | { phase: "failed"; reason: string };
+  | { phase: "failed"; reason: string; can_retry: boolean };
 
 type ListenFn = (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
 

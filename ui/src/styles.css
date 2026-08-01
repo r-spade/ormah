@@ -1015,6 +1015,14 @@ body.in-app .node-detail.tier-core {
   line-height: 1.5;
 }
 
+.protection-complete .protection-progress-heading strong {
+  color: var(--edge-supports);
+}
+
+.protection-complete > p {
+  color: var(--text-bright);
+}
+
 .recovery-kit-heading {
   display: flex;
   gap: 9px;

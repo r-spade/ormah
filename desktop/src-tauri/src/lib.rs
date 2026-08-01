@@ -168,6 +168,7 @@ pub fn run() {
             commands::start_server,
             commands::stop_server,
             commands::server_status,
+            commands::retry_runtime_setup,
             product_bridge::desktop_bridge_info,
             product_bridge::account_status,
             product_bridge::request_account_code,

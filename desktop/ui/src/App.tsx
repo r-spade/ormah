@@ -35,23 +35,58 @@ export default function App() {
   const selfNodeReadyRef = useRef<{ x: number; y: number } | null>(null);
   const [phase, setPhase] = useState<Phase>("intro");
   const [statusMsg, setStatusMsg] = useState("");
+  const [canRetry, setCanRetry] = useState(false);
+  const [retryBusy, setRetryBusy] = useState(false);
   const started = useRef(false);
+  const navigating = useRef(false);
 
   useEffect(() => {
     return onServerStatus((s) => {
-      if (s.phase === "installing") setStatusMsg(`Installing ormah ${s.version}…`);
-      else if (s.phase === "starting") setStatusMsg("Starting up…");
-      else if (s.phase === "failed") setStatusMsg(`Setup failed: ${s.reason}`);
+      if (s.phase === "installing") {
+        setCanRetry(false);
+        setStatusMsg(`Installing Ormah ${s.version} (attempt ${s.attempt} of ${s.attempts})…`);
+      } else if (s.phase === "retrying") {
+        setCanRetry(false);
+        setStatusMsg(`Connection unavailable. Trying again in ${s.delay_seconds} seconds…`);
+      } else if (s.phase === "starting") {
+        setCanRetry(false);
+        setStatusMsg("Starting Ormah…");
+      } else if (s.phase === "failed") {
+        setCanRetry(s.can_retry);
+        setStatusMsg(s.reason);
+      }
     });
   }, []);
 
   async function goGraph() {
+    if (navigating.current) return;
+    navigating.current = true;
     const url = await graphUrl();
     document.getElementById("root")?.classList.add("to-graph");
     await sleep(620);
     // Navigate to the graph; its TopBar becomes the window title bar.
     // Cache-bust so a fresh UI build always loads in the webview.
     window.location.replace(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
+  }
+
+  async function retrySetup() {
+    setRetryBusy(true);
+    setCanRetry(false);
+    try {
+      let onboarded = false;
+      try { onboarded = await invoke<boolean>("is_onboarded"); } catch { /* ignore */ }
+      const accepted = await invoke<boolean>("retry_runtime_setup");
+      if (!accepted) {
+        setCanRetry(true);
+        return;
+      }
+      const ready = await waitForServer();
+      if (!ready) return;
+      if (onboarded) await goGraph();
+      else setPhase("connect");
+    } finally {
+      setRetryBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -83,7 +118,14 @@ export default function App() {
         <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
         <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
         {phase === "intro" && statusMsg && (
-          <div className="boot-status">{statusMsg}</div>
+          <div className="boot-status" role={canRetry ? "alert" : "status"}>
+            <span>{statusMsg}</span>
+            {canRetry && (
+              <button disabled={retryBusy} onClick={() => void retrySetup()}>
+                {retryBusy ? "Trying again…" : "Try again"}
+              </button>
+            )}
+          </div>
         )}
         {phase === "connect" && <InstallPanel onDone={goGraph} />}
       </div>

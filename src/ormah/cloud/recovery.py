@@ -78,6 +78,26 @@ def _read_bounded_regular_file(path: Path) -> bytes:
     return data
 
 
+def _recovery_kit_account_email(kit_bytes: bytes) -> str | None:
+    """Read the descriptive email from the canonical Account section."""
+
+    try:
+        lines = kit_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return None
+    try:
+        account_index = lines.index("## Account")
+    except ValueError:
+        return None
+    for line in lines[account_index + 1 :]:
+        if line.startswith("## "):
+            break
+        if line.startswith("Email: "):
+            value = line.removeprefix("Email: ").strip()
+            return value if value and not value.startswith("<") else None
+    return None
+
+
 class RecoveryKitService:
     """Validate the canonical kit and confirm a reopened native saved copy."""
 
@@ -112,24 +132,30 @@ class RecoveryKitService:
 
         with StoreLock(self.settings.memory_dir):
             try:
-                self._validate_canonical_kit_locked()
-                return False
+                store_id, kit_bytes = self._validate_canonical_kit_locked()
             except RecoveryKitError:
                 store_id = self._active_store_id()
-                update_state(
-                    store_id,
-                    memory_dir=self.settings.memory_dir,
-                    state_dir=self.state_dir,
-                    recovery_kit_verified_at=None,
-                )
-                cloud_keys.write_recovery_kit(
-                    store_id,
-                    key_path=self.key_path,
-                    kit_path=self.kit_path,
-                    account_email=getattr(self.settings, "account_email", None),
-                )
-                self._validate_canonical_kit_locked()
-                return True
+            else:
+                account_email = getattr(self.settings, "account_email", None)
+                if not account_email or _recovery_kit_account_email(kit_bytes) == account_email:
+                    return False
+            return self._regenerate_current_kit_locked(store_id)
+
+    def _regenerate_current_kit_locked(self, store_id: str) -> bool:
+        update_state(
+            store_id,
+            memory_dir=self.settings.memory_dir,
+            state_dir=self.state_dir,
+            recovery_kit_verified_at=None,
+        )
+        cloud_keys.write_recovery_kit(
+            store_id,
+            key_path=self.key_path,
+            kit_path=self.kit_path,
+            account_email=getattr(self.settings, "account_email", None),
+        )
+        self._validate_canonical_kit_locked()
+        return True
 
     def confirm_saved_digest(self, digest: str) -> RecoveryReadiness:
         """Record a saved-copy proof only when its bytes equal the current valid kit."""
