@@ -22,6 +22,7 @@ class LiteLLMAdapter(LLMAdapter):
         response_format: dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        timeout_hint_seconds: float | None = None,
     ) -> str | None:
         try:
             import litellm  # lazy import
@@ -35,7 +36,7 @@ class LiteLLMAdapter(LLMAdapter):
         kwargs: dict = {
             "model": self.model,
             "messages": messages,
-            "timeout": self.timeout,
+            "timeout": timeout_hint_seconds or self.timeout,
         }
         if response_format is not None:
             kwargs["response_format"] = response_format

@@ -296,3 +296,75 @@ def test_maintenance_phase2_apply_completes_via_routes(client):
     finally:
         app.state.engine.get_maintenance_batches = original_batches
         app.state.engine.apply_maintenance_results = original_apply
+
+
+def _wait_for_status(manager, job_id, not_status="running_phase1", timeout=2):
+    deadline = time.time() + timeout
+    status = manager.get_status(job_id=job_id)
+    while status["status"] == not_status and time.time() < deadline:
+        time.sleep(0.01)
+        status = manager.get_status(job_id=job_id)
+    return status
+
+
+def test_phase1_finder_failure_is_recorded_as_tracker_failure(engine):
+    """Issue #90 (dev council follow-up): a Phase 1 with a broken finder must
+    still deliver the healthy batches to Phase 2 (status stays
+    "awaiting_results", job.batches is kept) but must NOT look like a clean
+    success in JobTracker — /admin is the #90 observability surface and must
+    not lie about a maintenance cycle whose link candidates never computed."""
+    from ormah.background.job_tracker import JobTracker
+
+    def batches_with_error():
+        return {
+            "batch_errors": {"link_candidates": "RuntimeError: boom"},
+            "link_candidates": [],
+            "conflict_candidates": [{"fake": "candidate"}],
+            "merge_candidates": [],
+            "consolidation_clusters": [],
+            "summary": "1 conflict candidates; FAILED: link_candidates",
+        }
+
+    engine.get_maintenance_batches = batches_with_error
+    tracker = JobTracker()
+    manager = MaintenanceManager(engine, tracker=tracker)
+
+    payload = manager.start_phase1()
+    status = _wait_for_status(manager, payload["job_id"])
+
+    # Healthy batches must still flow to phase 2.
+    assert status["status"] == "awaiting_results"
+    assert status["batches"]["conflict_candidates"] == [{"fake": "candidate"}]
+
+    # But the tracker must show this as a failure, not a clean run.
+    snap = tracker.snapshot()["maintenance_phase1"]
+    assert snap["error_count"] == 1
+    assert snap["last_success"] is None
+    assert "link_candidates" in snap["last_error"]
+    assert snap["last_stats"]["batch_errors"] == {"link_candidates": "RuntimeError: boom"}
+
+
+def test_phase1_clean_run_still_records_tracker_success(engine):
+    from ormah.background.job_tracker import JobTracker
+
+    def clean_batches():
+        return {
+            "batch_errors": {},
+            "link_candidates": [],
+            "conflict_candidates": [],
+            "merge_candidates": [],
+            "consolidation_clusters": [],
+            "summary": "nothing to process",
+        }
+
+    engine.get_maintenance_batches = clean_batches
+    tracker = JobTracker()
+    manager = MaintenanceManager(engine, tracker=tracker)
+
+    payload = manager.start_phase1()
+    status = _wait_for_status(manager, payload["job_id"])
+
+    assert status["status"] == "awaiting_results"
+    snap = tracker.snapshot()["maintenance_phase1"]
+    assert snap["error_count"] == 0
+    assert snap["last_success"] is not None

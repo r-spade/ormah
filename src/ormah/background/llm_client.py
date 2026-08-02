@@ -81,6 +81,7 @@ def llm_generate(
     response_format: dict | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    timeout_hint_seconds: float | None = None,
 ) -> str | None:
     """Call configured LLM. Returns raw response text, or None on failure."""
     adapter = _get_or_create_adapter(settings)
@@ -92,4 +93,5 @@ def llm_generate(
         response_format=response_format,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout_hint_seconds=timeout_hint_seconds,
     )

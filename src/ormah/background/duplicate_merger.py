@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -15,9 +16,10 @@ _W_TITLE = 0.2
 _W_TOKEN = 0.2
 _COMPOSITE_THRESHOLD = 0.60
 
-_LLM_DUPLICATE_PROMPT = """\
-You are deciding whether two memories in a knowledge graph are duplicates that should be merged into one. If merged, the resulting memory replaces both originals — one is kept (updated), one is deleted. All edges from the deleted node are remapped to the kept node. This is irreversible (though undoable), so be conservative.
+_LLM_DUP_INTRO = """\
+You are deciding whether two memories in a knowledge graph are duplicates that should be merged into one. If merged, the resulting memory replaces both originals — one is kept (updated), one is deleted. All edges from the deleted node are remapped to the kept node. This is irreversible (though undoable), so be conservative."""
 
+_LLM_DUP_PAIR = """\
 Memory A:
 - Title: {title_a}
 - Type: {type_a}
@@ -26,8 +28,9 @@ Memory A:
 Memory B:
 - Title: {title_b}
 - Type: {type_b}
-- Content: {content_b}
+- Content: {content_b}"""
 
+_LLM_DUP_RULES = """\
 ## Are they duplicates?
 
 **YES — merge** if they describe the same core fact, decision, or preference and keeping both would create redundancy. One might be more detailed than the other, or they might phrase the same information differently. The test: if an AI assistant retrieved both while helping the user, would it think "these are saying the same thing"?
@@ -60,6 +63,20 @@ Return JSON:
   "merged_content": "merged content preserving ALL unique details from both (only if is_duplicate=true)",
   "reason": "one sentence referencing the actual memory titles"
 }}"""
+
+_LLM_DUPLICATE_PROMPT = _LLM_DUP_INTRO + "\n\n" + _LLM_DUP_PAIR + "\n\n" + _LLM_DUP_RULES
+_LLM_DUP_INSTRUCTIONS = _LLM_DUP_INTRO + "\n\n" + _LLM_DUP_RULES  # fixed block, sent once per batch
+
+
+def _render_dup_pair(pair: dict) -> str:
+    """Render one candidate pair for a batched duplicate prompt (#87)."""
+    node, other = pair["node"], pair["other"]
+    return _LLM_DUP_PAIR.format(
+        title_a=node["title"] or "(untitled)", type_a=node["type"],
+        content_a=node["content"][:2000],
+        title_b=other["title"] or "(untitled)", type_b=other["type"],
+        content_b=other["content"][:2000],
+    )
 
 
 def _title_similarity(title_a: str | None, title_b: str | None) -> float:
@@ -141,103 +158,98 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
     Does NOT call the LLM — just applies the same pre-filters as
     ``run_duplicate_detection`` (same type, composite score threshold).
     """
-    try:
-        from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
+    from ormah.embeddings.encoder import get_encoder
+    from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
-        settings = engine.settings
-        encoder = get_encoder(settings)
-        vec_store = VectorStore(engine.db)
+    settings = engine.settings
+    encoder = get_encoder(settings)
+    vec_store = VectorStore(engine.db)
 
-        user_node_id = getattr(engine, "user_node_id", None)
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes ORDER BY RANDOM()").fetchall()
-        checked: set[tuple[str, str]] = set()
-        candidates: list[dict] = []
+    user_node_id = getattr(engine, "user_node_id", None)
+    nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes ORDER BY RANDOM()").fetchall()
+    checked: set[tuple[str, str]] = set()
+    candidates: list[dict] = []
 
-        for node in nodes:
+    for node in nodes:
+        if len(candidates) >= limit:
+            break
+        if node["id"] == user_node_id:
+            continue
+
+        text = f"{node['title'] or ''} {node['content']}".strip()
+        if not text:
+            continue
+
+        query_vec = stored_or_encoded(
+            vec_store,
+            encoder,
+            node["id"],
+            node["title"],
+            node["content"],
+            settings.embedding_max_content_chars,
+        )
+        similar = vec_store.search(query_vec, limit=6)
+
+        for match in similar:
             if len(candidates) >= limit:
                 break
-            if node["id"] == user_node_id:
+            if match["id"] == node["id"]:
+                continue
+            if match["id"] == user_node_id:
                 continue
 
-            text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
+            pair = tuple(sorted([node["id"], match["id"]]))
+            if pair in checked:
+                continue
+            checked.add(pair)
+
+            already_checked = engine.db.conn.execute(
+                "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+            ).fetchone()
+            if already_checked:
                 continue
 
-            query_vec = stored_or_encoded(
-                vec_store,
-                encoder,
-                node["id"],
-                node["title"],
-                node["content"],
-                settings.embedding_max_content_chars,
-            )
-            similar = vec_store.search(query_vec, limit=6)
+            embedding_sim = match["similarity"]
+            if embedding_sim < 0.25:
+                continue
 
-            for match in similar:
-                if len(candidates) >= limit:
-                    break
-                if match["id"] == node["id"]:
-                    continue
-                if match["id"] == user_node_id:
-                    continue
+            other = engine.db.conn.execute(
+                "SELECT id, type, title, content FROM nodes WHERE id = ?", (match["id"],)
+            ).fetchone()
+            if other is None or other["type"] != node["type"]:
+                continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
-                if pair in checked:
-                    continue
-                checked.add(pair)
+            title_sim = _title_similarity(node["title"], other["title"])
+            other_text = f"{other['title'] or ''} {other['content']}".strip()
+            token_sim = _token_overlap(text, other_text)
+            score = _composite_score(embedding_sim, title_sim, token_sim)
 
-                already_checked = engine.db.conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
-                ).fetchone()
-                if already_checked:
-                    continue
+            if score < _COMPOSITE_THRESHOLD:
+                continue
 
-                embedding_sim = match["similarity"]
-                if embedding_sim < 0.25:
-                    continue
+            def _nd(row) -> dict:
+                return {
+                    "id": row["id"],
+                    "title": row["title"] or "",
+                    "type": row["type"] or "",
+                    "space": "",
+                    "content": (row["content"] or "")[:400],
+                }
 
-                other = engine.db.conn.execute(
-                    "SELECT id, type, title, content FROM nodes WHERE id = ?", (match["id"],)
-                ).fetchone()
-                if other is None or other["type"] != node["type"]:
-                    continue
+            candidates.append({
+                "node_a": _nd(node),
+                "node_b": _nd(other),
+                "similarity": round(embedding_sim, 3),
+                "score": round(score, 3),
+                "embedding_sim": round(embedding_sim, 3),
+                "title_sim": round(title_sim, 3),
+                "token_sim": round(token_sim, 3),
+            })
 
-                title_sim = _title_similarity(node["title"], other["title"])
-                other_text = f"{other['title'] or ''} {other['content']}".strip()
-                token_sim = _token_overlap(text, other_text)
-                score = _composite_score(embedding_sim, title_sim, token_sim)
-
-                if score < _COMPOSITE_THRESHOLD:
-                    continue
-
-                def _nd(row) -> dict:
-                    return {
-                        "id": row["id"],
-                        "title": row["title"] or "",
-                        "type": row["type"] or "",
-                        "space": "",
-                        "content": (row["content"] or "")[:400],
-                    }
-
-                candidates.append({
-                    "node_a": _nd(node),
-                    "node_b": _nd(other),
-                    "similarity": round(embedding_sim, 3),
-                    "score": round(score, 3),
-                    "embedding_sim": round(embedding_sim, 3),
-                    "title_sim": round(title_sim, 3),
-                    "token_sim": round(token_sim, 3),
-                })
-
-        return candidates
-
-    except Exception as e:
-        logger.warning("_find_merge_candidates failed: %s", e)
-        return []
+    return candidates
 
 
-def run_duplicate_detection(engine) -> None:
+def run_duplicate_detection(engine) -> dict | None:
     """Find near-duplicate nodes and create merge proposals.
 
     Uses a multi-signal approach: embedding similarity (primary),
@@ -245,7 +257,9 @@ def run_duplicate_detection(engine) -> None:
     LLM confirmation is mandatory — no merges happen without LLM
     saying ``is_duplicate: true``.
     """
+    t0 = time.monotonic()
     try:
+        from ormah.background.llm.pair_batch import judge_pairs
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
@@ -255,132 +269,159 @@ def run_duplicate_detection(engine) -> None:
 
         if not settings.llm_enabled:
             logger.debug("Duplicate detection skipped: LLM not enabled")
-            return
+            return {"skipped": "llm_disabled"}
 
+        conn = engine.db.conn
         user_node_id = getattr(engine, "user_node_id", None)
+        max_pairs = settings.duplicate_check_max_pairs_per_run   # 0 = unbounded (default)
+        k = max(settings.duplicate_check_pairs_per_call or settings.maintenance_pairs_per_call, 1)
 
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes").fetchall()
-        checked = set()
+        # #87: candidate pairs are collected across nodes into a window of size K,
+        # judged in one pair_batch call, then applied. At K=1 the window is one
+        # pair, so each is confirmed and applied before the next is collected —
+        # the existing suite is the K=1 regression net. Council C2: randomize the
+        # scan only when capped, so a capped run doesn't re-judge the same
+        # deterministic front every time (negative verdicts aren't persisted
+        # until #81).
+        nodes = conn.execute(
+            "SELECT id, content, title, type FROM nodes" + _scan_order(max_pairs)).fetchall()
+
+        checked: set[tuple[str, str]] = set()
+        window: list[dict] = []          # pending candidate pairs, at most K, across nodes
         proposals_created = 0
+        pairs_attempted = 0
+        pairs_evaluated = 0
+        cap_hit = False
 
-        for node in nodes:
-            if node["id"] == user_node_id:
-                continue
-            text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
-                continue
-
-            query_vec = stored_or_encoded(
-                vec_store,
-                encoder,
-                node["id"],
-                node["title"],
-                node["content"],
-                settings.embedding_max_content_chars,
+        def _flush() -> None:
+            """Judge the windowed pairs (one K-chunk) and apply merges/proposals."""
+            nonlocal proposals_created, pairs_attempted, pairs_evaluated
+            verdicts = judge_pairs(
+                settings, _LLM_DUP_INSTRUCTIONS, window, _render_dup_pair,
+                judge_single=lambda p: _llm_check_duplicate(settings, p["node"], p["other"]),
+                k=k,
             )
-            # Fetch more candidates since we use a lower embedding pre-filter
-            similar = vec_store.search(query_vec, limit=6)
-
-            for match in similar:
-                if match["id"] == node["id"]:
+            for pair, llm_result in zip(window, verdicts):
+                pairs_attempted += 1
+                if llm_result is None:          # LLM unavailable for this pair — skip
                     continue
-                if match["id"] == user_node_id:
-                    continue
-
-                pair = tuple(sorted([node["id"], match["id"]]))
-                if pair in checked:
-                    continue
-                checked.add(pair)
-
-                embedding_sim = match["similarity"]
-                # Pre-filter: skip very dissimilar pairs to avoid wasted work
-                if embedding_sim < 0.25:
-                    continue
-
-                # Same type only
-                other = engine.db.conn.execute(
-                    "SELECT type, title, content FROM nodes WHERE id = ?", (match["id"],)
-                ).fetchone()
-                if other is None or other["type"] != node["type"]:
-                    continue
-
-                # Compute multi-signal score
-                title_sim = _title_similarity(node["title"], other["title"])
-                other_text = f"{other['title'] or ''} {other['content']}".strip()
-                token_sim = _token_overlap(text, other_text)
-                score = _composite_score(embedding_sim, title_sim, token_sim)
-
-                if score < _COMPOSITE_THRESHOLD:
-                    continue
-
-                # --- LLM confirmation (mandatory) ---
-                llm_result = _llm_check_duplicate(settings, node, other)
-                if llm_result is None:
-                    # LLM unavailable for this pair — skip
-                    continue
+                pairs_evaluated += 1
                 if not llm_result.get("is_duplicate"):
-                    logger.debug(
-                        "LLM rejected duplicate for %s / %s: %s",
-                        node["id"][:8], match["id"][:8],
-                        llm_result.get("reason", ""),
-                    )
+                    logger.debug("LLM rejected duplicate for %s / %s: %s",
+                                 pair["node"]["id"][:8], pair["other"]["id"][:8],
+                                 llm_result.get("reason", ""))
                     continue
-
-                # Extract LLM-generated merge content
+                # An earlier auto-merge in this window may have deleted one of these
+                # nodes (execute_merge picks the keeper by quality, not arg order, and
+                # silently no-ops on a missing node — which would miscount it as a
+                # merge). Skip stale pairs; they are re-collected next run against
+                # fresh state. (#87 council: overlapping in-flight pairs.)
+                if (conn.execute("SELECT 1 FROM nodes WHERE id = ?",
+                                 (pair["node"]["id"],)).fetchone() is None
+                        or conn.execute("SELECT 1 FROM nodes WHERE id = ?",
+                                        (pair["other"]["id"],)).fetchone() is None):
+                    continue
                 merged_content = llm_result.get("merged_content")
                 merged_title = llm_result.get("merged_title")
                 reason = llm_result.get("reason", "LLM confirmed duplicate")
-                reason += f" (score={score:.3f}, embed={embedding_sim:.2f}, title={title_sim:.2f}, token={token_sim:.2f})"
-
+                reason += (f" (score={pair['score']:.3f}, embed={pair['embedding_sim']:.2f}, "
+                           f"title={pair['title_sim']:.2f}, token={pair['token_sim']:.2f})")
                 # Auto-merge for high-confidence duplicates
-                if score >= engine.settings.auto_merge_threshold:
+                if pair["score"] >= settings.auto_merge_threshold:
                     try:
                         result = engine.execute_merge(
-                            node["id"], match["id"],
-                            merged_content=merged_content,
-                            merged_title=merged_title,
-                        )
+                            pair["node"]["id"], pair["other"]["id"],
+                            merged_content=merged_content, merged_title=merged_title)
                         logger.info("Auto-merged: %s", result)
                         proposals_created += 1
                         continue
                     except Exception as e:
                         logger.warning("Auto-merge failed for %s / %s: %s",
-                                       node["id"][:8], match["id"][:8], e)
-
-                # Check no existing merge proposal
-                existing = engine.db.conn.execute(
+                                       pair["node"]["id"][:8], pair["other"]["id"][:8], e)
+                existing = conn.execute(
                     "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending' "
                     "AND (source_nodes LIKE ? OR source_nodes LIKE ?)",
-                    (f"%{node['id']}%", f"%{match['id']}%"),
-                ).fetchone()
-
+                    (f"%{pair['node']['id']}%", f"%{pair['other']['id']}%")).fetchone()
                 if existing:
                     continue
-
-                # Build proposed_action — include merged content preview when available
-                proposed_action = f"Merge two {node['type']} memories into one"
+                proposed_action = f"Merge two {pair['node']['type']} memories into one"
                 if merged_content is not None:
-                    proposed_action += (
-                        f"\n\nMerged content preview:\n---\n"
-                        f"{merged_title or ''}\n{merged_content}\n---"
-                    )
-
-                proposal_id = str(uuid.uuid4())
-                with engine.db.transaction() as conn:
-                    conn.execute(
-                        "INSERT INTO proposals (id, type, status, source_nodes, proposed_action, reason, created) "
-                        "VALUES (?, 'merge', 'pending', ?, ?, ?, ?)",
-                        (
-                            proposal_id,
-                            json.dumps([node["id"], match["id"]]),
-                            proposed_action,
-                            reason,
-                            datetime.now(timezone.utc).isoformat(),
-                        ),
-                    )
+                    proposed_action += (f"\n\nMerged content preview:\n---\n"
+                                        f"{merged_title or ''}\n{merged_content}\n---")
+                with engine.db.transaction() as conn_tx:
+                    conn_tx.execute(
+                        "INSERT INTO proposals (id, type, status, source_nodes, proposed_action, "
+                        "reason, created) VALUES (?, 'merge', 'pending', ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), json.dumps([pair["node"]["id"], pair["other"]["id"]]),
+                         proposed_action, reason, datetime.now(timezone.utc).isoformat()))
                 proposals_created += 1
-        if proposals_created:
-            logger.info("Duplicate merger created %d proposals/auto-merges", proposals_created)
+            window.clear()
+
+        for node in nodes:
+            if cap_hit:
+                break
+            if node["id"] == user_node_id:
+                continue
+            text = f"{node['title'] or ''} {node['content']}".strip()
+            if not text:
+                continue
+            node_vec = stored_or_encoded(
+                vec_store, encoder, node["id"], node["title"], node["content"],
+                settings.embedding_max_content_chars,
+            )
+            for match in vec_store.search(node_vec, limit=6):
+                if match["id"] in (node["id"], user_node_id):
+                    continue
+                pair_key = tuple(sorted([node["id"], match["id"]]))
+                if pair_key in checked:
+                    continue
+                checked.add(pair_key)
+                embedding_sim = match["similarity"]
+                if embedding_sim < 0.25:          # pre-filter: skip very dissimilar pairs
+                    continue
+                other = conn.execute(
+                    "SELECT id, type, title, content FROM nodes WHERE id = ?",
+                    (match["id"],)).fetchone()
+                if other is None or other["type"] != node["type"]:   # same type only
+                    continue
+                title_sim = _title_similarity(node["title"], other["title"])
+                other_text = f"{other['title'] or ''} {other['content']}".strip()
+                token_sim = _token_overlap(text, other_text)
+                score = _composite_score(embedding_sim, title_sim, token_sim)
+                if score < _COMPOSITE_THRESHOLD:
+                    continue
+                if max_pairs and (pairs_attempted + len(window)) >= max_pairs:
+                    cap_hit = True
+                    break
+                window.append({"node": node, "other": other, "score": score,
+                               "embedding_sim": embedding_sim, "title_sim": title_sim,
+                               "token_sim": token_sim})
+                if len(window) >= k:
+                    _flush()
+
+        if window:
+            _flush()
+
+        duration = time.monotonic() - t0
+        stats = {
+            "nodes_scanned": len(nodes),
+            "pairs_attempted": pairs_attempted,
+            "pairs_evaluated": pairs_evaluated,
+            "proposals_created": proposals_created,
+            "cap_hit": cap_hit,
+            "duration_s": round(duration, 3),
+            "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
+        }
+        logger.info("duplicate_merger run: %s", stats)
+        return stats
 
     except Exception as e:
         logger.warning("Duplicate detection failed: %s", e)
+        return {"error": str(e)}
+
+
+def _scan_order(max_pairs: int) -> str:
+    """Council C2 (#87): randomize the node scan only when a per-run cap is set,
+    so a capped run doesn't re-judge the same deterministic front every time
+    (negative verdicts aren't persisted until #81). Uncapped == today's order."""
+    return " ORDER BY RANDOM()" if max_pairs else ""

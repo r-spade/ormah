@@ -199,6 +199,44 @@ def test_llm_disabled_skips_detection(engine):
     assert len(proposals) == 0
 
 
+def test_pairs_evaluated_counts_one_candidate_pair(engine):
+    """Issue #90: pairs_evaluated must reflect exactly one LLM decision call."""
+    id_a, id_b = _create_pair(engine, node_type=NodeType.fact)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.conflict_detector._llm_check_conflict",
+        return_value={"same_subject": True, "conflict": False, "type": "none",
+                      "explanation": "no conflict"},
+    ):
+        from ormah.background.conflict_detector import run_conflict_detection
+        stats = run_conflict_detection(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 1
+
+
+def test_pairs_attempted_counts_llm_unavailable_pair_but_not_evaluated(engine):
+    """Issue #90 (council finding 2): an LLM-unavailable pair (None decision)
+    must count as attempted but NOT as evaluated."""
+    id_a, id_b = _create_pair(engine, node_type=NodeType.fact)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.conflict_detector._llm_check_conflict",
+        return_value=None,
+    ):
+        from ormah.background.conflict_detector import run_conflict_detection
+        stats = run_conflict_detection(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 0
+
+
 def test_project_scoped_nodes_checked_when_flag_enabled(engine):
     """With conflict_check_all_spaces=True, project-scoped nodes are checked."""
     original_threshold = engine.settings.auto_link_similarity_threshold
@@ -283,3 +321,47 @@ def test_project_scoped_nodes_skipped_by_default(engine):
 
     # LLM should never be called since project-scoped nodes are skipped
     mock_llm.assert_not_called()
+
+
+# --- #87 pair batching ---
+
+def test_conflict_prompt_is_composed_from_parts():
+    from ormah.background import conflict_detector as cd
+    assert cd._LLM_CONFLICT_PROMPT == (
+        cd._LLM_CONFLICT_INTRO + "\n\n" + cd._LLM_CONFLICT_PAIR + "\n\n" + cd._LLM_CONFLICT_RULES
+    )
+    assert cd._LLM_CONFLICT_INSTRUCTIONS == (
+        cd._LLM_CONFLICT_INTRO + "\n\n" + cd._LLM_CONFLICT_RULES
+    )
+
+
+def test_batched_conflict_creates_evolution_edge(engine):
+    from ormah.background import conflict_detector as cd
+    for content, title in [
+        ("the main editor is vim", "editor choice"),
+        ("the main editor changed to vscode", "editor choice update"),
+        ("the main editor is now vscode for everyone", "editor standard"),
+    ]:
+        engine.remember(CreateNodeRequest(content=content, title=title,
+                                          type=NodeType.preference))
+    engine.settings.llm_provider = "ollama"
+    engine.settings.maintenance_pairs_per_call = 2
+    _reset_adapter()
+
+    def fake_batch(settings, prompt, json_mode=True, **kw):
+        n = prompt.count("### Pair ")
+        return json.dumps({"verdicts": [
+            {"pair_id": i, "same_subject": True, "conflict": True,
+             "type": "evolution", "evolved_node": "b", "explanation": "editor changed"}
+            for i in range(n)]})
+
+    single = {"same_subject": True, "conflict": True, "type": "evolution",
+              "evolved_node": "b", "explanation": "editor changed"}
+    with patch("ormah.background.llm.pair_batch.llm_generate", fake_batch), \
+            patch("ormah.background.conflict_detector._llm_check_conflict", return_value=single):
+        stats = cd.run_conflict_detection(engine)
+
+    edges = engine.db.conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE edge_type = 'evolved_from'").fetchone()[0]
+    assert edges >= 1
+    assert stats["pairs_evaluated"] >= 1

@@ -17,6 +17,7 @@ class LLMAdapter(abc.ABC):
         response_format: dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        timeout_hint_seconds: float | None = None,
     ) -> str | None:
         """Send *prompt* to the LLM and return the raw response text.
 
@@ -24,4 +25,6 @@ class LLMAdapter(abc.ABC):
         When *json_mode* is True the adapter should request structured JSON
         output from the backend (if supported). *response_format* lets callers
         provide a provider-specific structured-output schema.
+        *timeout_hint_seconds* is the caller's estimate for long batched calls;
+        adapters may ignore it.
         """

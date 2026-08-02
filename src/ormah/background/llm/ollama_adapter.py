@@ -30,6 +30,7 @@ class OllamaAdapter(LLMAdapter):
         response_format: dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        timeout_hint_seconds: float | None = None,
     ) -> str | None:
         import httpx
 
@@ -56,7 +57,7 @@ class OllamaAdapter(LLMAdapter):
             resp = httpx.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
-                timeout=self.timeout,
+                timeout=timeout_hint_seconds or self.timeout,
             )
             resp.raise_for_status()
             return resp.json().get("response")

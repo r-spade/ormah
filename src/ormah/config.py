@@ -135,6 +135,24 @@ class Settings(BaseSettings):
     auto_link_max_edges_per_run: int = 500
     auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run
 
+    # Pairwise-maintenance batching (#87). K=1 keeps today's single-pair flow;
+    # operators on per-call-expensive providers raise K (10-16). Per-job
+    # overrides (0 = use the global K) let one job batch while others stay
+    # single — the A/B eval gate is per job (council C3).
+    maintenance_pairs_per_call: int = 1
+    auto_link_pairs_per_call: int = 0
+    duplicate_check_pairs_per_call: int = 0
+    conflict_check_pairs_per_call: int = 0
+    maintenance_timeout_per_pair_seconds: int = 10
+    # Per-run caps, denominated in PAIRS EVALUATED (not LLM calls). Defaults
+    # preserve CURRENT behavior exactly (council I1): 0 = no extra bound
+    # (auto_link/dedup today), conflict keeps its existing 10000 candidate
+    # bound. Raising these is an explicit operator/config decision, not part
+    # of this PR.
+    auto_link_max_pairs_per_run: int = 0
+    duplicate_check_max_pairs_per_run: int = 0
+    conflict_check_max_pairs_per_run: int = 10000
+
     # Auto-merge
     auto_merge_threshold: float = 0.85
 

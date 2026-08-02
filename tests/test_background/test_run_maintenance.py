@@ -232,6 +232,89 @@ class TestGetMaintenanceBatches:
             for node in (c["node_a"], c["node_b"]):
                 assert len(node["content"]) <= 400
 
+    def _read_stamp(self, engine):
+        row = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
+        ).fetchone()
+        return row["value"] if row else None
+
+    def _read_phase1_errors_marker(self, engine):
+        return engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'maintenance_phase1_errors'"
+        ).fetchone()
+
+    def test_finder_failure_does_not_raise_and_is_named_in_batch_errors(self, engine, monkeypatch):
+        """Issue #90 council R4: the finders fail INDEPENDENTLY (distinct
+        queries, no shared crash point) — one broken finder must not block the
+        three healthy batches. get_maintenance_batches must swallow the
+        failure, report it explicitly via batch_errors, and still return the
+        healthy batches."""
+        from ormah.background import auto_linker
+
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(auto_linker, "_find_link_candidates", boom)
+
+        batches = engine.get_maintenance_batches()
+
+        assert isinstance(batches["conflict_candidates"], list)
+        assert isinstance(batches["merge_candidates"], list)
+        assert isinstance(batches["consolidation_clusters"], list)
+        assert batches["link_candidates"] == []
+        assert set(batches["batch_errors"].keys()) == {"link_candidates"}
+        assert "boom" in batches["batch_errors"]["link_candidates"]
+        assert "FAILED: link_candidates" in batches["summary"]
+
+    def test_finder_failure_leaves_last_maintenance_run_unchanged(self, engine, monkeypatch):
+        """A failing batch must block Phase 2's stamp, even though Phase 1
+        itself no longer raises. apply_maintenance_results is a SEPARATE MCP
+        call that never sees phase-1 metadata directly — the meta marker is
+        how it learns a batch failed."""
+        from ormah.background import auto_linker
+
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(auto_linker, "_find_link_candidates", boom)
+
+        before = self._read_stamp(engine)
+        engine.get_maintenance_batches()
+        assert self._read_phase1_errors_marker(engine) is not None
+
+        engine.apply_maintenance_results({})
+        after = self._read_stamp(engine)
+        assert after == before
+
+    def test_clean_phase1_has_no_batch_errors_and_stamp_proceeds(self, engine):
+        """No failures -> batch_errors == {}, no meta marker, and Phase 2
+        stamps last_maintenance_run normally."""
+        batches = engine.get_maintenance_batches()
+        assert batches["batch_errors"] == {}
+        assert self._read_phase1_errors_marker(engine) is None
+
+        before = self._read_stamp(engine)
+        engine.apply_maintenance_results({})
+        after = self._read_stamp(engine)
+        assert after is not None
+        assert after != before
+
+    def test_clean_phase1_after_failure_clears_the_marker(self, engine, monkeypatch):
+        """A recovered system (finder works again) must stop being blocked —
+        the next clean Phase 1 clears the stale marker."""
+        from ormah.background import auto_linker
+
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(auto_linker, "_find_link_candidates", boom)
+        engine.get_maintenance_batches()
+        assert self._read_phase1_errors_marker(engine) is not None
+
+        monkeypatch.undo()  # restore the real _find_link_candidates
+        engine.get_maintenance_batches()
+        assert self._read_phase1_errors_marker(engine) is None
+
 
 class TestWhisperSignal:
 

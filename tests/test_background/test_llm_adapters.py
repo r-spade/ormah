@@ -128,6 +128,39 @@ def test_litellm_adapter_failure():
     assert result is None
 
 
+# --- timeout hint (#87) ---
+
+def test_ollama_generate_uses_timeout_hint():
+    adapter = OllamaAdapter(model="llama3.2", timeout=60)
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"response": "{}"}
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("httpx.post", return_value=mock_resp) as mock_post:
+        adapter.generate("p", timeout_hint_seconds=130)
+    assert mock_post.call_args[1]["timeout"] == 130
+
+    with patch("httpx.post", return_value=mock_resp) as mock_post:
+        adapter.generate("p")  # no hint -> constructor timeout
+    assert mock_post.call_args[1]["timeout"] == 60
+
+
+def test_litellm_generate_uses_timeout_hint():
+    adapter = LiteLLMAdapter(model="claude-sonnet-4-20250514", timeout=60)
+    mock_choice = MagicMock()
+    mock_choice.message.content = "{}"
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+
+    mock_litellm = MagicMock()
+    mock_litellm.completion.return_value = mock_response
+    with patch.dict(sys.modules, {"litellm": mock_litellm}):
+        adapter.generate("p", timeout_hint_seconds=130)
+        assert mock_litellm.completion.call_args[1]["timeout"] == 130
+        adapter.generate("p")  # no hint -> constructor timeout
+        assert mock_litellm.completion.call_args[1]["timeout"] == 60
+
+
 # --- get_adapter factory ---
 
 def test_get_adapter_ollama():
