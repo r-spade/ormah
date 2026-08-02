@@ -38,6 +38,7 @@ from ormah.models.node import (
     NodeType,
     Tier,
     UpdateNodeRequest,
+    normalize_space,
 )
 from ormah.store.file_store import FileStore
 from ormah.text.tokens import STOP_WORDS
@@ -72,6 +73,15 @@ _EDGE_TYPE_FACTORS: dict[str, float] = {
     "related_to": 0.7,
     "contradicts": 0.4,
 }
+
+
+def apply_identity_space_invariants(node: MemoryNode) -> None:
+    """Identity (about_self) memories are always global: force space=None + lock so no
+    write path (remember, update_node, consolidator) can leave them project-scoped or
+    unlocked for auto_cluster to reassign (#22)."""
+    if "about_self" in node.tags:
+        node.space = None
+        node.space_locked = True
 
 
 class MemoryEngine:
@@ -140,6 +150,7 @@ class MemoryEngine:
 
         self._ensure_self_node()
         self._migrate_identity_tiers()
+        self._migrate_lock_identity_spaces()
         self._seed_initial_maintenance_grace_period()
         self._warmup_embedder()
         self._warmup_reranker()
@@ -223,6 +234,7 @@ class MemoryEngine:
             tier=Tier.core,
             source="system:self",
             space=None,
+            space_locked=True,
             tags=["self", "identity"],
             title="Self",
             content="The user's identity and personal information.",
@@ -380,6 +392,38 @@ class MemoryEngine:
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('identity_edges_repaired', '1')"
                 )
 
+    def _migrate_lock_identity_spaces(self) -> None:
+        """One-time: lock the identity cluster's space as global so auto_cluster never
+        reassigns it (#22). On an upgraded store, legacy identity memories carry
+        space_locked=0; without this they could be re-swept into a project space in the
+        window before `migrations repair-identity` is run by hand.
+        """
+        migrated = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'identity_space_locked_migrated'"
+        ).fetchone()
+        if migrated and migrated["value"] == "1":
+            return
+
+        if self.user_node_id:
+            uid = self.user_node_id
+            edged = self.db.conn.execute(
+                "SELECT DISTINCT CASE WHEN source_id = ? THEN target_id ELSE source_id END "
+                "FROM edges WHERE source_id = ? OR target_id = ?",
+                (uid, uid, uid),
+            ).fetchall()
+            for nid in {uid} | {r[0] for r in edged}:
+                node = self.file_store.load(nid)
+                if node and (node.space is not None or not node.space_locked):
+                    node.space = None
+                    node.space_locked = True
+                    self.builder.index_single(self.file_store.save(node))
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) "
+                "VALUES ('identity_space_locked_migrated', '1')"
+            )
+
     def _warmup_embedder(self) -> None:
         """Load the embedding model now so the first request doesn't stall.
 
@@ -481,6 +525,7 @@ class MemoryEngine:
             tier=req.tier,
             source=req.source or f"agent:{agent_id or 'unknown'}",
             space=req.space,
+            space_locked=req.space_locked,
             tags=req.tags,
             connections=req.connections,
             title=title,
@@ -494,6 +539,8 @@ class MemoryEngine:
                 node.tags.append("about_self")
             if node.type == NodeType.person:
                 node.tier = Tier.core
+            # Identity is always global (a default_space may have leaked into req.space).
+            apply_identity_space_invariants(node)
 
         # Enforce core cap
         if node.tier == Tier.core:
@@ -951,7 +998,10 @@ class MemoryEngine:
         if req.tier is not None:
             node.tier = req.tier
         if req.space is not None:
-            node.space = req.space
+            # Plain assignment bypasses the MemoryNode field validator, so normalize here.
+            node.space = normalize_space(req.space)
+        if req.space_locked is not None:
+            node.space_locked = req.space_locked
         if req.tags is not None:
             node.tags = req.tags
         if req.title is not None:
@@ -963,6 +1013,10 @@ class MemoryEngine:
         if req.add_connections:
             node.connections.extend(req.add_connections)
             changed_fields.append("connections")
+
+        # Re-assert the identity invariant: an about_self node must stay global + locked
+        # regardless of any space/space_locked the request tried to set.
+        apply_identity_space_invariants(node)
 
         # No-op guard: a request that changed nothing must not advance
         # `updated`, or it could beat a real remote edit under LWW sync.

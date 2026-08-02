@@ -152,14 +152,14 @@ def _apply_consolidation(
                 pass
             new_node = engine.file_store.load(new_id)
             if new_node and "about_self" not in new_node.tags:
+                from ormah.engine.memory_engine import apply_identity_space_invariants
+
                 new_node.tags.append("about_self")
-                new_node.touch_updated()
-                engine.file_store.save(new_node)
-                with engine.db.transaction() as tx_conn:
-                    tx_conn.execute(
-                        "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, 'about_self')",
-                        (new_id,),
-                    )
+                # Identity is always global — force None + lock so auto_cluster never
+                # reassigns the consolidated node (the majority vote may have picked a
+                # project space). index_single syncs tags + space + space_locked.
+                apply_identity_space_invariants(new_node)
+                engine.builder.index_single(engine.file_store.save(new_node))
 
     # Create derived_from edges and demote originals to archival
     for node_id in node_ids:

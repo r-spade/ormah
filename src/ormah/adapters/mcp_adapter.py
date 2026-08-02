@@ -211,6 +211,8 @@ async def _dispatch(
                 body["tags"] = _coerce_list(args["tags"])
             if args.get("about_self"):
                 body["about_self"] = True
+            if args.get("space_locked"):
+                body["space_locked"] = True
             if "confidence" in args:
                 body["confidence"] = args["confidence"]
             if args.get("links"):

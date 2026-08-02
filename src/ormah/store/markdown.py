@@ -46,6 +46,7 @@ def parse_node(text: str) -> MemoryNode:
         valid_until=valid_until,
         deleted_at=deleted_at,
         space=meta.get("space"),
+        space_locked=meta.get("space_locked", False),
         tags=meta.get("tags", []),
         connections=connections,
         title=meta.get("title"),
@@ -79,6 +80,8 @@ def serialize_node(node: MemoryNode) -> str:
         meta["title"] = node.title
     if node.space:
         meta["space"] = node.space
+    if node.space_locked:
+        meta["space_locked"] = True
     if node.tags:
         meta["tags"] = node.tags
     if node.connections:

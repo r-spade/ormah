@@ -6,7 +6,21 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Placeholder strings that mean "no space" but get persisted as a literal space
+# when None is JSON/string-serialized upstream (e.g. an agent passing the string
+# "null"). Coerced to None at the persistence boundary so they never form a
+# phantom space group. See tests/test_store/test_space_normalization.py (#22).
+_SPACE_PLACEHOLDERS = {"null", "none", ""}
+
+
+def normalize_space(space: str | None) -> str | None:
+    """Map placeholder space strings ('null', 'none', '', whitespace) to None."""
+    if space is None:
+        return None
+    stripped = space.strip()
+    return None if stripped.lower() in _SPACE_PLACEHOLDERS else stripped
 
 
 class NodeType(str, Enum):
@@ -61,10 +75,15 @@ class MemoryNode(BaseModel):
     valid_until: datetime | None = None
     deleted_at: datetime | None = None  # tombstone stamp; ordering for sync merges uses this, never `updated`
     space: str | None = None
+    space_locked: bool = False  # user-curated space: auto_cluster must not reassign (#22)
     tags: list[str] = Field(default_factory=list)
     connections: list[Connection] = Field(default_factory=list)
     title: str | None = None
     content: str = ""
+
+    _normalize_space = field_validator("space", mode="before")(
+        lambda cls, v: normalize_space(v)
+    )
 
     @property
     def short_id(self) -> str:
@@ -82,6 +101,7 @@ class CreateNodeRequest(BaseModel):
     tier: Tier = Tier.working
     source: str | None = None
     space: str | None = None
+    space_locked: bool = False  # mark this memory's space as user-curated (global-safe)
     tags: list[str] = Field(default_factory=list)
     connections: list[Connection] = Field(default_factory=list)
     title: str | None = None
@@ -94,6 +114,7 @@ class UpdateNodeRequest(BaseModel):
     type: NodeType | None = None
     tier: Tier | None = None
     space: str | None = None
+    space_locked: bool | None = None
     tags: list[str] | None = None
     add_connections: list[Connection] | None = None
     title: str | None = None

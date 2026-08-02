@@ -131,6 +131,97 @@ def test_update_node(engine):
     assert "Updated" in text
 
 
+def test_remember_normalizes_placeholder_space(engine):
+    """Creating a node with the placeholder string 'null' persists as None (#22)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content="x", type=NodeType.fact, space="null")
+    )
+    assert engine.file_store.load(node_id).space is None
+
+
+def test_remember_about_self_locks_space(engine):
+    """Identity nodes are global by definition — about_self locks the space (#22)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content="André is a triathlete.", type=NodeType.fact, about_self=True)
+    )
+    assert engine.file_store.load(node_id).space_locked is True
+
+
+def test_apply_identity_space_invariants_helper():
+    """about_self nodes are forced global+locked; others are untouched (#22 council)."""
+    from ormah.engine.memory_engine import apply_identity_space_invariants
+    from ormah.models.node import MemoryNode
+
+    identity = MemoryNode(type=NodeType.fact, space="work", tags=["about_self"])
+    apply_identity_space_invariants(identity)
+    assert identity.space is None
+    assert identity.space_locked is True
+
+    plain = MemoryNode(type=NodeType.fact, space="work", tags=["misc"])
+    apply_identity_space_invariants(plain)
+    assert plain.space == "work"
+    assert plain.space_locked is False
+
+
+def test_update_node_cannot_unlock_identity(engine):
+    """An about_self memory stays global+locked even if update tries to set a project space."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content="André is stoic.", type=NodeType.fact, about_self=True)
+    )
+    engine.update_node(node_id, UpdateNodeRequest(space="work", space_locked=False))
+    node = engine.file_store.load(node_id)
+    assert node.space is None
+    assert node.space_locked is True
+
+
+def test_remember_about_self_forces_global_space(engine):
+    """about_self is global even if a default_space leaked into req.space (#22 council A)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(
+            content="André runs triathlons.",
+            type=NodeType.fact,
+            about_self=True,
+            space="ormah",  # simulates default_space applied at the API boundary
+        )
+    )
+    node = engine.file_store.load(node_id)
+    assert node.space is None
+    assert node.space_locked is True
+
+
+def test_self_node_is_space_locked(engine):
+    """The self node is created locked, not relying solely on the id != user_node_id guard."""
+    assert engine.file_store.load(engine.user_node_id).space_locked is True
+
+
+def test_remember_explicit_space_locked(engine):
+    """A caller can pin a non-identity global (e.g. a cross-project preference)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(
+            content="Always open previews in Brave.",
+            type=NodeType.preference,
+            space_locked=True,
+        )
+    )
+    assert engine.file_store.load(node_id).space_locked is True
+
+
+def test_update_node_can_lock_space(engine):
+    """update_node can flip space_locked on an existing node."""
+    node_id, _ = engine.remember(CreateNodeRequest(content="x", type=NodeType.fact))
+    engine.update_node(node_id, UpdateNodeRequest(space_locked=True))
+    assert engine.file_store.load(node_id).space_locked is True
+
+
+def test_update_node_normalizes_placeholder_space(engine):
+    """Updating space to the placeholder string 'null' persists as None (#22)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content="x", type=NodeType.fact, space="work")
+    )
+    engine.update_node(node_id, UpdateNodeRequest(space="null"))
+    assert engine.file_store.load(node_id).space is None
+
+
 def test_connect(engine):
     req1 = CreateNodeRequest(content="Node A.", type=NodeType.fact)
     req2 = CreateNodeRequest(content="Node B.", type=NodeType.fact)

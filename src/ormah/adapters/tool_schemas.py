@@ -88,6 +88,16 @@ TOOLS = [
                     ),
                     "default": False,
                 },
+                "space_locked": {
+                    "type": "boolean",
+                    "description": (
+                        "Set to true to pin this memory's space as user-curated. A locked "
+                        "memory (typically a global one with space=null) is never reassigned "
+                        "to a project space by automatic clustering. about_self memories are "
+                        "locked automatically."
+                    ),
+                    "default": False,
+                },
                 "confidence": {
                     "type": "number",
                     "description": "Belief strength 0.0-1.0. Lower values mean less certain.",

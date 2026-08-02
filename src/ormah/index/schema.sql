@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     tier TEXT NOT NULL DEFAULT 'working',
     source TEXT NOT NULL,
     space TEXT,
+    space_locked INTEGER NOT NULL DEFAULT 0,
     title TEXT,
     content TEXT,
     created TEXT NOT NULL,

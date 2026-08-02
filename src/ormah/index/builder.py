@@ -113,10 +113,10 @@ class IndexBuilder:
         conn.execute(
             """
             INSERT OR REPLACE INTO nodes
-            (id, type, tier, source, space, title, content, created, updated,
+            (id, type, tier, source, space, space_locked, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
              valid_until, stability, last_review, file_path, file_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?)
             """,
             (
@@ -125,6 +125,7 @@ class IndexBuilder:
                 node.tier.value,
                 node.source,
                 node.space,
+                int(node.space_locked),
                 node.title,
                 node.content,
                 node.created.isoformat(),
