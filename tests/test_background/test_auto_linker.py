@@ -411,3 +411,69 @@ def test_checked_pairs_invalidated_on_update(engine):
         run_auto_linker(engine)
 
     assert mock_llm.call_count >= 1  # LLM was called again for this pair
+
+
+def test_pairs_evaluated_counts_one_candidate_pair(engine):
+    """Issue #90: pairs_evaluated must reflect exactly one LLM decision call.
+
+    Uses the default similarity threshold (not 0.0): the auto-created "Self"
+    node is far enough below threshold that it does not count as a second
+    candidate, leaving exactly the id_a/id_b pair.
+    """
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.auto_linker._llm_classify_link",
+        return_value={"relationship": "none", "reason": "not related"},
+    ):
+        from ormah.background.auto_linker import run_auto_linker
+        stats = run_auto_linker(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 1
+
+
+def test_pairs_attempted_counts_llm_unavailable_pair_but_not_evaluated(engine):
+    """Issue #90 (council finding 2): an LLM-unavailable pair (None decision)
+    must count as attempted but NOT as evaluated — otherwise pairs_per_s is
+    inflated by calls that never produced a decision."""
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.auto_linker._llm_classify_link",
+        return_value=None,
+    ):
+        from ormah.background.auto_linker import run_auto_linker
+        stats = run_auto_linker(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 0
+
+
+def test_pairs_attempted_counts_invalid_llm_output_but_not_evaluated(engine):
+    """Issue #90 council R2 finding 2: the 'error' sentinel (invalid/malformed
+    LLM output) must count as attempted but NOT as a valid evaluation — a
+    degraded provider must not report healthy pairs_per_s with zero real
+    decisions. duplicate_merger/conflict_detector already exclude their
+    equivalent None-decision case; auto_linker's sentinel is a dict, not
+    None, so it needs its own check."""
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.auto_linker._llm_classify_link",
+        return_value={"relationship": "error", "reason": "invalid LLM output"},
+    ):
+        from ormah.background.auto_linker import run_auto_linker
+        stats = run_auto_linker(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 0

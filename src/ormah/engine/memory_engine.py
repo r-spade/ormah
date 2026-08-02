@@ -1677,10 +1677,49 @@ class MemoryEngine:
         if limit_per_batch is None:
             limit_per_batch = getattr(self.settings, "claude_maintenance_batch_size", 25)
 
-        link_candidates = _find_link_candidates(self, limit_per_batch)
-        conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
-        merge_candidates = _find_merge_candidates(self, limit_per_batch)
-        consolidation_clusters = _find_consolidation_clusters(self, limit=4)
+        # Finders fail INDEPENDENTLY (issue #90 council R4) — each has its own
+        # query and data-dependent path, not a shared crash point, so a
+        # persistent defect in one must not block the other three. A healthy
+        # batch must still reach Phase 2; a failed batch must be explicit
+        # (batch_errors) rather than indistinguishable from "nothing found".
+        batch_errors: dict[str, str] = {}
+
+        try:
+            link_candidates = _find_link_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_link_candidates failed: %s", e)
+            link_candidates = []
+            batch_errors["link_candidates"] = f"{type(e).__name__}: {e}"
+        try:
+            conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_conflict_candidates failed: %s", e)
+            conflict_candidates = []
+            batch_errors["conflict_candidates"] = f"{type(e).__name__}: {e}"
+        try:
+            merge_candidates = _find_merge_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_merge_candidates failed: %s", e)
+            merge_candidates = []
+            batch_errors["merge_candidates"] = f"{type(e).__name__}: {e}"
+        try:
+            consolidation_clusters = _find_consolidation_clusters(self, limit=4)
+        except Exception as e:
+            logger.warning("_find_consolidation_clusters failed: %s", e)
+            consolidation_clusters = []
+            batch_errors["consolidation_clusters"] = f"{type(e).__name__}: {e}"
+
+        # Phase 2 (apply_maintenance_results) is a separate MCP call that never
+        # sees this return value — it learns about a failed batch only through
+        # this meta marker, so it can skip stamping last_maintenance_run.
+        with self.db.transaction() as conn:
+            if batch_errors:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('maintenance_phase1_errors', ?)",
+                    (json.dumps(batch_errors),),
+                )
+            else:
+                conn.execute("DELETE FROM meta WHERE key = 'maintenance_phase1_errors'")
 
         def _norm(node: dict) -> dict:
             return {
@@ -1708,8 +1747,11 @@ class MemoryEngine:
         if consolidation_clusters:
             parts.append(f"{len(consolidation_clusters)} cluster(s)")
         summary = ", ".join(parts) if parts else "nothing to process"
+        if batch_errors:
+            summary += "; FAILED: " + ", ".join(sorted(batch_errors))
 
         return {
+            "batch_errors": batch_errors,
             "link_candidates": [_norm_pair(c) for c in link_candidates],
             "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
             "merge_candidates": [_norm_pair(c) for c in merge_candidates],
@@ -1774,16 +1816,30 @@ class MemoryEngine:
             except Exception as exc:
                 logger.warning("apply_maintenance_results: consolidation failed: %s", exc)
 
-        # Record completion timestamp — silences maintenance_due signal for interval_hours.
-        try:
-            now = datetime.now(timezone.utc).isoformat()
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
-                    (now,),
-                )
-        except Exception as exc:
-            logger.warning("apply_maintenance_results: failed to record timestamp: %s", exc)
+        # Skip the stamp if the Phase 1 that produced these results had a
+        # failed batch — apply_maintenance_results is a separate MCP call
+        # and only learns this via the meta marker get_maintenance_batches
+        # left behind (issue #90 council R4).
+        phase1_errors_row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'maintenance_phase1_errors'"
+        ).fetchone()
+        if phase1_errors_row is not None:
+            logger.warning(
+                "apply_maintenance_results: skipping last_maintenance_run stamp — "
+                "Phase 1 had failed batches: %s",
+                phase1_errors_row["value"],
+            )
+        else:
+            # Record completion timestamp — silences maintenance_due signal for interval_hours.
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
+                        (now,),
+                    )
+            except Exception as exc:
+                logger.warning("apply_maintenance_results: failed to record timestamp: %s", exc)
 
         return counts
 

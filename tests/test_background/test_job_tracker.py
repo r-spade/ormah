@@ -87,3 +87,47 @@ def test_multiple_jobs_independent():
     snap = tracker.snapshot()
     assert snap["job_a"]["error_count"] == 0
     assert snap["job_b"]["error_count"] == 1
+
+
+def test_record_success_stores_stats():
+    tracker = JobTracker()
+    tracker.record_success("auto_linker", 12.0, stats={"pairs_evaluated": 7})
+    snap = tracker.snapshot()
+    assert snap["auto_linker"]["last_stats"] == {"pairs_evaluated": 7}
+
+
+def test_tracked_captures_dict_return():
+    tracker = JobTracker()
+    job = tracked(tracker, "j", lambda: {"pairs_evaluated": 3})
+    job()
+    assert tracker.snapshot()["j"]["last_stats"] == {"pairs_evaluated": 3}
+
+
+def test_tracked_non_dict_return_keeps_stats_none():
+    tracker = JobTracker()
+    job = tracked(tracker, "j", lambda: None)
+    job()
+    assert tracker.snapshot()["j"]["last_stats"] is None
+
+
+def test_tracked_error_dict_return_records_failure():
+    """A run_* that returns {"error": ...} must be recorded as a FAILURE, not
+    a healthy success with a suspicious-looking last_stats (#90 council finding 1)."""
+    tracker = JobTracker()
+    job = tracked(tracker, "j", lambda: {"error": "boom"})
+    job()
+    snap = tracker.snapshot()["j"]
+    assert snap["error_count"] == 1
+    assert snap["last_error"] == "boom"
+    assert snap["last_success"] is None
+    assert snap["last_stats"] == {"error": "boom"}
+
+
+def test_tracked_normal_stats_dict_still_records_success():
+    tracker = JobTracker()
+    job = tracked(tracker, "j", lambda: {"pairs_evaluated": 2})
+    job()
+    snap = tracker.snapshot()["j"]
+    assert snap["error_count"] == 0
+    assert snap["last_success"] is not None
+    assert snap["last_stats"] == {"pairs_evaluated": 2}

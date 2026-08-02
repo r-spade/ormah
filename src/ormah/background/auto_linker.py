@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_link_type
@@ -170,99 +171,94 @@ def _find_link_candidates(engine, limit: int = 8) -> list[dict]:
     ``run_auto_linker`` (similarity threshold, cross-space penalty,
     not in auto_link_checked, no existing edge).
     """
-    try:
-        from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
+    from ormah.embeddings.encoder import get_encoder
+    from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
-        settings = engine.settings
-        encoder = get_encoder(settings)
-        vec_store = VectorStore(engine.db)
+    settings = engine.settings
+    encoder = get_encoder(settings)
+    vec_store = VectorStore(engine.db)
 
-        conn = engine.db.conn
-        watermark = _get_watermark(conn)
-        nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
-        threshold = settings.auto_link_similarity_threshold
-        cross_space_penalty = settings.auto_link_cross_space_penalty
+    conn = engine.db.conn
+    watermark = _get_watermark(conn)
+    nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
+    threshold = settings.auto_link_similarity_threshold
+    cross_space_penalty = settings.auto_link_cross_space_penalty
 
-        candidates: list[dict] = []
-        seen_pairs: set[tuple[str, str]] = set()
+    candidates: list[dict] = []
+    seen_pairs: set[tuple[str, str]] = set()
 
-        for node in nodes:
+    for node in nodes:
+        if len(candidates) >= limit:
+            break
+
+        text = f"{node['title'] or ''} {node['content']}".strip()
+        if not text:
+            continue
+
+        query_vec = stored_or_encoded(
+            vec_store,
+            encoder,
+            node["id"],
+            node["title"],
+            node["content"],
+            settings.embedding_max_content_chars,
+        )
+        similar = vec_store.search(query_vec, limit=6)
+
+        for match in similar:
             if len(candidates) >= limit:
                 break
-
-            text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
+            if match["id"] == node["id"]:
                 continue
 
-            query_vec = stored_or_encoded(
-                vec_store,
-                encoder,
-                node["id"],
-                node["title"],
-                node["content"],
-                settings.embedding_max_content_chars,
-            )
-            similar = vec_store.search(query_vec, limit=6)
+            similarity = match["similarity"]
 
-            for match in similar:
-                if len(candidates) >= limit:
-                    break
-                if match["id"] == node["id"]:
-                    continue
+            other_space = conn.execute(
+                "SELECT space FROM nodes WHERE id = ?", (match["id"],)
+            ).fetchone()
+            if other_space is not None:
+                src_space = node["space"] or ""
+                tgt_space = other_space["space"] or ""
+                if src_space != tgt_space:
+                    similarity -= cross_space_penalty
 
-                similarity = match["similarity"]
+            if similarity < threshold:
+                continue
 
-                other_space = conn.execute(
-                    "SELECT space FROM nodes WHERE id = ?", (match["id"],)
-                ).fetchone()
-                if other_space is not None:
-                    src_space = node["space"] or ""
-                    tgt_space = other_space["space"] or ""
-                    if src_space != tgt_space:
-                        similarity -= cross_space_penalty
+            pair = tuple(sorted([node["id"], match["id"]]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
 
-                if similarity < threshold:
-                    continue
+            already_checked = conn.execute(
+                "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?",
+                pair,
+            ).fetchone()
+            if already_checked:
+                continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
-                if pair in seen_pairs:
-                    continue
-                seen_pairs.add(pair)
+            existing = conn.execute(
+                "SELECT 1 FROM edges WHERE "
+                "(source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
+                (node["id"], match["id"], match["id"], node["id"]),
+            ).fetchone()
+            if existing:
+                continue
 
-                already_checked = conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?",
-                    pair,
-                ).fetchone()
-                if already_checked:
-                    continue
+            other = conn.execute(
+                "SELECT id, title, content, type, space FROM nodes WHERE id = ?",
+                (match["id"],),
+            ).fetchone()
+            if other is None:
+                continue
 
-                existing = conn.execute(
-                    "SELECT 1 FROM edges WHERE "
-                    "(source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
-                    (node["id"], match["id"], match["id"], node["id"]),
-                ).fetchone()
-                if existing:
-                    continue
+            candidates.append({
+                "node_a": _node_dict(node),
+                "node_b": _node_dict(other),
+                "similarity": round(similarity, 3),
+            })
 
-                other = conn.execute(
-                    "SELECT id, title, content, type, space FROM nodes WHERE id = ?",
-                    (match["id"],),
-                ).fetchone()
-                if other is None:
-                    continue
-
-                candidates.append({
-                    "node_a": _node_dict(node),
-                    "node_b": _node_dict(other),
-                    "similarity": round(similarity, 3),
-                })
-
-        return candidates
-
-    except Exception as e:
-        logger.warning("_find_link_candidates failed: %s", e)
-        return []
+    return candidates
 
 
 def _apply_edge(
@@ -312,16 +308,17 @@ def _apply_edge(
             logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
 
 
-def run_auto_linker(engine) -> None:
+def run_auto_linker(engine) -> dict | None:
     """Incrementally link nodes with seq above the watermark; advance only past
     fully-resolved nodes."""
+    t0 = time.monotonic()
     try:
         from ormah.embeddings.vector_store import VectorStore
 
         settings = engine.settings
         if not settings.llm_enabled:
             logger.debug("Auto-linker skipped: LLM not enabled")
-            return
+            return {"skipped": "llm_disabled"}
 
         vec_store = VectorStore(engine.db)
         conn = engine.db.conn
@@ -333,6 +330,8 @@ def run_auto_linker(engine) -> None:
         nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
         created = 0
+        pairs_attempted = 0
+        pairs_evaluated = 0
         last_complete: int | None = None
 
         for node in nodes:
@@ -390,6 +389,7 @@ def run_auto_linker(engine) -> None:
                     if other is None:
                         continue
 
+                    pairs_attempted += 1
                     llm_result = _llm_classify_link(settings, node, other)
                     if llm_result is None:
                         # LLM UNAVAILABLE (raw None) — transient. Leave node unresolved so the
@@ -398,6 +398,8 @@ def run_auto_linker(engine) -> None:
                         node_resolved = False
                         continue
                     relationship = llm_result["relationship"]  # may be 'error' (invalid output)
+                    if relationship != "error":
+                        pairs_evaluated += 1
                     _apply_edge(
                         engine, node["id"], match["id"], relationship,
                         llm_result.get("reason", ""), similarity,
@@ -413,8 +415,26 @@ def run_auto_linker(engine) -> None:
 
         if last_complete is not None:
             _set_watermark(engine, last_complete)
-        if created:
-            logger.info("Auto-linker created %d edges", created)
+
+        # `seq` is 1-based (meta.node_seq_next starts at 1 — see index/builder.py and
+        # the legacy backfill in index/db.py), so a real node's seq is never 0 and
+        # `last_complete or watermark` cannot silently fall back on a completed run.
+        backlog = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE seq > ?", (last_complete or watermark,)
+        ).fetchone()[0]
+        duration = time.monotonic() - t0
+        stats = {
+            "nodes_scanned": len(nodes),
+            "pairs_attempted": pairs_attempted,
+            "pairs_evaluated": pairs_evaluated,
+            "edges_created": created,
+            "backlog_nodes": backlog,
+            "duration_s": round(duration, 3),
+            "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
+        }
+        logger.info("auto_linker run: %s", stats)
+        return stats
 
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)
+        return {"error": str(e)}

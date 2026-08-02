@@ -107,6 +107,11 @@ class MaintenanceManager:
         try:
             batches = self._engine.get_maintenance_batches()
             duration_ms = (time.monotonic() - t0) * 1000
+            # batch_errors is additive: healthy batches still flow to phase 2
+            # (status stays "awaiting_results", job.batches keeps all four
+            # keys), but a finder failure must not look like a clean tracker
+            # success — /admin is the #90 observability surface.
+            errors = batches.get("batch_errors") or {}
             with self._lock:
                 if self._job is None or self._job.job_id != job_id:
                     return
@@ -115,13 +120,29 @@ class MaintenanceManager:
                 self._job.batches = batches
                 self._job.phase1_finished_at = datetime.now(timezone.utc)
             if self._tracker is not None:
-                self._tracker.record_success("maintenance_phase1", duration_ms)
-            logger.info(
-                "Maintenance phase 1 ready: %s in %.0fms (%s)",
-                job_id[:8],
-                duration_ms,
-                batches.get("summary", "no summary"),
-            )
+                if errors:
+                    self._tracker.record_failure(
+                        "maintenance_phase1",
+                        f"finder failures: {', '.join(sorted(errors))}",
+                        duration_ms,
+                        stats={"batch_errors": errors},
+                    )
+                else:
+                    self._tracker.record_success("maintenance_phase1", duration_ms)
+            if errors:
+                logger.warning(
+                    "Maintenance phase 1 ready with failed batches: %s in %.0fms (%s)",
+                    job_id[:8],
+                    duration_ms,
+                    ", ".join(sorted(errors)),
+                )
+            else:
+                logger.info(
+                    "Maintenance phase 1 ready: %s in %.0fms (%s)",
+                    job_id[:8],
+                    duration_ms,
+                    batches.get("summary", "no summary"),
+                )
         except Exception as exc:
             self._record_failure(job_id, "phase1", exc, time.monotonic() - t0)
 

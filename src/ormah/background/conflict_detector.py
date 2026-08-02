@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_conflict_type
@@ -109,129 +110,129 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
     Node dicts include ``created`` so they can be passed directly to the
     LLM conflict-check prompt.  Does NOT call the LLM.
     """
-    try:
-        from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
+    from ormah.embeddings.encoder import get_encoder
+    from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
-        settings = engine.settings
-        encoder = get_encoder(settings)
-        vec_store = VectorStore(engine.db)
+    settings = engine.settings
+    encoder = get_encoder(settings)
+    vec_store = VectorStore(engine.db)
 
-        if settings.conflict_check_all_spaces:
-            nodes = engine.db.conn.execute(
-                "SELECT id, content, title, type, created, space FROM nodes "
-                "WHERE type IN (?, ?, ?, ?) ORDER BY RANDOM()",
-                _BELIEF_TYPES,
-            ).fetchall()
-        else:
-            nodes = engine.db.conn.execute(
-                "SELECT id, content, title, type, created, space FROM nodes "
-                "WHERE type IN (?, ?, ?, ?) AND (space IS NULL OR space = 'null') ORDER BY RANDOM()",
-                _BELIEF_TYPES,
-            ).fetchall()
+    if settings.conflict_check_all_spaces:
+        nodes = engine.db.conn.execute(
+            "SELECT id, content, title, type, created, space FROM nodes "
+            "WHERE type IN (?, ?, ?, ?) ORDER BY RANDOM()",
+            _BELIEF_TYPES,
+        ).fetchall()
+    else:
+        nodes = engine.db.conn.execute(
+            "SELECT id, content, title, type, created, space FROM nodes "
+            "WHERE type IN (?, ?, ?, ?) AND (space IS NULL OR space = 'null') ORDER BY RANDOM()",
+            _BELIEF_TYPES,
+        ).fetchall()
 
-        checked: set[tuple[str, str]] = set()
-        candidates: list[dict] = []
+    checked: set[tuple[str, str]] = set()
+    candidates: list[dict] = []
 
-        for node in nodes:
+    for node in nodes:
+        if len(candidates) >= limit:
+            break
+
+        text = f"{node['title'] or ''} {node['content']}".strip()
+        if not text:
+            continue
+
+        query_vec = stored_or_encoded(
+            vec_store,
+            encoder,
+            node["id"],
+            node["title"],
+            node["content"],
+            settings.embedding_max_content_chars,
+        )
+        similar = vec_store.search(query_vec, limit=15)
+
+        for match in similar:
             if len(candidates) >= limit:
                 break
-
-            text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
+            if match["id"] == node["id"]:
                 continue
 
-            query_vec = stored_or_encoded(
-                vec_store,
-                encoder,
-                node["id"],
-                node["title"],
-                node["content"],
-                settings.embedding_max_content_chars,
-            )
-            similar = vec_store.search(query_vec, limit=15)
+            pair = tuple(sorted([node["id"], match["id"]]))
+            if pair in checked:
+                continue
+            checked.add(pair)
 
-            for match in similar:
-                if len(candidates) >= limit:
-                    break
-                if match["id"] == node["id"]:
-                    continue
+            already_checked = engine.db.conn.execute(
+                "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+            ).fetchone()
+            if already_checked:
+                continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
-                if pair in checked:
-                    continue
-                checked.add(pair)
+            similarity = match["similarity"]
+            if similarity < 0.4:
+                continue
 
-                already_checked = engine.db.conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
-                ).fetchone()
-                if already_checked:
-                    continue
+            other = engine.db.conn.execute(
+                "SELECT id, title, content, type, created, space FROM nodes WHERE id = ?",
+                (match["id"],),
+            ).fetchone()
+            if other is None:
+                continue
+            if other["type"] not in _BELIEF_TYPES:
+                continue
 
-                similarity = match["similarity"]
-                if similarity < 0.4:
-                    continue
+            has_edge = engine.db.conn.execute(
+                "SELECT 1 FROM edges WHERE edge_type IN ('contradicts', 'evolved_from') AND "
+                "((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))",
+                (node["id"], match["id"], match["id"], node["id"]),
+            ).fetchone()
+            if has_edge:
+                continue
 
-                other = engine.db.conn.execute(
-                    "SELECT id, title, content, type, created, space FROM nodes WHERE id = ?",
-                    (match["id"],),
-                ).fetchone()
-                if other is None:
-                    continue
-                if other["type"] not in _BELIEF_TYPES:
-                    continue
+            def _nd(row) -> dict:
+                return {
+                    "id": row["id"],
+                    "title": row["title"] or "",
+                    "type": row["type"] or "",
+                    "space": row["space"] or "",
+                    "content": (row["content"] or "")[:400],
+                    "created": row["created"] or "",
+                }
 
-                has_edge = engine.db.conn.execute(
-                    "SELECT 1 FROM edges WHERE edge_type IN ('contradicts', 'evolved_from') AND "
-                    "((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))",
-                    (node["id"], match["id"], match["id"], node["id"]),
-                ).fetchone()
-                if has_edge:
-                    continue
+            candidates.append({
+                "node_a": _nd(node),
+                "node_b": _nd(other),
+                "similarity": round(similarity, 3),
+            })
 
-                def _nd(row) -> dict:
-                    return {
-                        "id": row["id"],
-                        "title": row["title"] or "",
-                        "type": row["type"] or "",
-                        "space": row["space"] or "",
-                        "content": (row["content"] or "")[:400],
-                        "created": row["created"] or "",
-                    }
-
-                candidates.append({
-                    "node_a": _nd(node),
-                    "node_b": _nd(other),
-                    "similarity": round(similarity, 3),
-                })
-
-        return candidates
-
-    except Exception as e:
-        logger.warning("_find_conflict_candidates failed: %s", e)
-        return []
+    return candidates
 
 
-def run_conflict_detection(engine) -> None:
+def run_conflict_detection(engine) -> dict | None:
     """Find potentially contradicting nodes and create edges."""
+    t0 = time.monotonic()
     try:
         settings = engine.settings
 
         if not settings.llm_enabled:
             logger.debug("Conflict detection skipped: LLM not enabled")
-            return
+            return {"skipped": "llm_disabled"}
 
         candidates = _find_conflict_candidates(engine, limit=10000)
         edges_created = 0
+        pairs_attempted = 0
+        pairs_evaluated = 0
         dirty_nodes: dict[str, list[Connection]] = {}
 
         for candidate in candidates:
             node_a = candidate["node_a"]
             node_b = candidate["node_b"]
 
+            pairs_attempted += 1
             llm_result = _llm_check_conflict(settings, node_a, node_b)
             if llm_result is None:
                 continue
+            pairs_evaluated += 1
             if not llm_result.get("conflict"):
                 continue
             if not llm_result.get("same_subject", True):
@@ -285,8 +286,18 @@ def run_conflict_detection(engine) -> None:
             except Exception as e:
                 logger.debug("Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)
 
-        if edges_created:
-            logger.info("Conflict detector created %d edges", edges_created)
+        duration = time.monotonic() - t0
+        stats = {
+            "candidates_found": len(candidates),
+            "pairs_attempted": pairs_attempted,
+            "pairs_evaluated": pairs_evaluated,
+            "edges_created": edges_created,
+            "duration_s": round(duration, 3),
+            "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
+        }
+        logger.info("conflict_detector run: %s", stats)
+        return stats
 
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)
+        return {"error": str(e)}

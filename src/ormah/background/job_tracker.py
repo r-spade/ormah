@@ -23,6 +23,7 @@ class JobStatus:
     run_count: int = 0
     error_count: int = 0
     last_duration_ms: float = 0.0
+    last_stats: dict[str, Any] | None = None
 
 
 class JobTracker:
@@ -32,7 +33,9 @@ class JobTracker:
         self._jobs: dict[str, JobStatus] = {}
         self._lock = threading.Lock()
 
-    def record_success(self, job_id: str, duration_ms: float) -> None:
+    def record_success(
+        self, job_id: str, duration_ms: float, stats: dict[str, Any] | None = None
+    ) -> None:
         now = datetime.now(timezone.utc)
         with self._lock:
             status = self._jobs.setdefault(job_id, JobStatus())
@@ -40,8 +43,15 @@ class JobTracker:
             status.last_success = now
             status.run_count += 1
             status.last_duration_ms = duration_ms
+            status.last_stats = stats
 
-    def record_failure(self, job_id: str, error: str, duration_ms: float) -> None:
+    def record_failure(
+        self,
+        job_id: str,
+        error: str,
+        duration_ms: float,
+        stats: dict[str, Any] | None = None,
+    ) -> None:
         now = datetime.now(timezone.utc)
         with self._lock:
             status = self._jobs.setdefault(job_id, JobStatus())
@@ -51,6 +61,7 @@ class JobTracker:
             status.run_count += 1
             status.error_count += 1
             status.last_duration_ms = duration_ms
+            status.last_stats = stats
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         """Return a JSON-serialisable snapshot of all job statuses."""
@@ -65,6 +76,7 @@ class JobTracker:
                     "run_count": s.run_count,
                     "error_count": s.error_count,
                     "last_duration_ms": round(s.last_duration_ms, 1),
+                    "last_stats": s.last_stats,
                 }
             return result
 
@@ -75,9 +87,16 @@ def tracked(tracker: JobTracker, job_id: str, fn: Callable, *args: Any) -> Calla
     def _wrapper():
         t0 = time.monotonic()
         try:
-            fn(*args)
+            result = fn(*args)
             duration_ms = (time.monotonic() - t0) * 1000
-            tracker.record_success(job_id, duration_ms)
+            stats = result if isinstance(result, dict) else None
+            if stats is not None and "error" in stats:
+                tracker.record_failure(job_id, str(stats["error"]), duration_ms, stats=stats)
+                logger.warning(
+                    "Job %s reported an error after %.0fms: %s", job_id, duration_ms, stats["error"]
+                )
+            else:
+                tracker.record_success(job_id, duration_ms, stats=stats)
         except Exception as e:
             duration_ms = (time.monotonic() - t0) * 1000
             tracker.record_failure(job_id, str(e), duration_ms)

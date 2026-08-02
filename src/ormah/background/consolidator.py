@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     if len(rows) < min_size:
         return []
 
-    try:
-        vec_store = VectorStore(engine.db)
-    except Exception:
-        return []
+    vec_store = VectorStore(engine.db)
 
     clustered_ids: set[str] = set()
     clusters: list[list[dict]] = []
@@ -177,17 +175,22 @@ def _apply_consolidation(
     return new_id
 
 
-def run_consolidation(engine) -> None:
+def run_consolidation(engine) -> dict | None:
     """Find clusters of similar working memories and consolidate via LLM."""
+    t0 = time.monotonic()
     settings = engine.settings
     if not settings.llm_enabled:
-        return
+        return {"skipped": "llm_disabled"}
 
     clusters = _find_consolidation_clusters(
         engine, limit=settings.consolidation_max_clusters_per_run
     )
     if not clusters:
-        return
+        return {
+            "clusters_found": 0,
+            "clusters_consolidated": 0,
+            "duration_s": round(time.monotonic() - t0, 3),
+        }
 
     consolidated_count = 0
     for cluster in clusters:
@@ -197,8 +200,13 @@ def run_consolidation(engine) -> None:
         except Exception as e:
             logger.warning("Failed to consolidate cluster: %s", e)
 
-    if consolidated_count:
-        logger.info("Consolidated %d cluster(s)", consolidated_count)
+    stats = {
+        "clusters_found": len(clusters),
+        "clusters_consolidated": consolidated_count,
+        "duration_s": round(time.monotonic() - t0, 3),
+    }
+    logger.info("consolidator run: %s", stats)
+    return stats
 
 
 def _consolidate_cluster(engine, cluster: list[dict]) -> None:
