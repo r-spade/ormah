@@ -7,13 +7,18 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from ormah.background.pair_skip import normalize_pair, pair_skip_sql
+
 logger = logging.getLogger(__name__)
+
+_DUPLICATE_TERMINAL_RESULTS = ("not_duplicate",)
 
 # Multi-signal weights
 _W_EMBEDDING = 0.6
 _W_TITLE = 0.2
 _W_TOKEN = 0.2
 _COMPOSITE_THRESHOLD = 0.60
+_DEDUP_ERROR_BACKOFF = "-6 hours"
 
 _LLM_DUPLICATE_PROMPT = """\
 You are deciding whether two memories in a knowledge graph are duplicates that should be merged into one. If merged, the resulting memory replaces both originals — one is kept (updated), one is deleted. All edges from the deleted node are remapped to the kept node. This is irreversible (though undoable), so be conservative.
@@ -60,6 +65,18 @@ Return JSON:
   "merged_content": "merged content preserving ALL unique details from both (only if is_duplicate=true)",
   "reason": "one sentence referencing the actual memory titles"
 }}"""
+
+_DUP_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_duplicate": {"type": "boolean"},
+        "merged_title": {"type": ["string", "null"]},
+        "merged_content": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+    },
+    "required": ["is_duplicate", "merged_title", "merged_content", "reason"],
+    "additionalProperties": False,
+}
 
 
 def _title_similarity(title_a: str | None, title_b: str | None) -> float:
@@ -118,7 +135,12 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
         content_b=other_row["content"][:2000],
     )
 
-    raw = llm_generate(settings, prompt, json_mode=True)
+    raw = llm_generate(
+        settings,
+        prompt,
+        json_mode=True,
+        response_format={"type": "json_schema", "json_schema": {"schema": _DUP_RESPONSE_SCHEMA}},
+    )
     if raw is None:
         return None
 
@@ -193,6 +215,13 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
                 if already_checked:
                     continue
 
+                dup_skip = engine.db.conn.execute(
+                    "SELECT 1 FROM duplicate_checked WHERE node_a = ? AND node_b = ? AND result = 'not_duplicate'",
+                    pair,
+                ).fetchone()
+                if dup_skip:
+                    continue
+
                 embedding_sim = match["similarity"]
                 if embedding_sim < 0.25:
                     continue
@@ -259,11 +288,20 @@ def run_duplicate_detection(engine) -> None:
 
         user_node_id = getattr(engine, "user_node_id", None)
 
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes").fetchall()
+        nodes = engine.db.conn.execute(
+            "SELECT id, content, title, type FROM nodes ORDER BY created DESC"
+        ).fetchall()
         checked = set()
         proposals_created = 0
+        consecutive_failures = 0
+        llm_calls = 0
+        max_calls = getattr(engine.settings, "duplicate_check_max_llm_calls_per_run", -1)
 
         for node in nodes:
+            if consecutive_failures >= 3:
+                break
+            if max_calls >= 0 and llm_calls >= max_calls:
+                break
             if node["id"] == user_node_id:
                 continue
             text = f"{node['title'] or ''} {node['content']}".strip()
@@ -282,15 +320,24 @@ def run_duplicate_detection(engine) -> None:
             similar = vec_store.search(query_vec, limit=6)
 
             for match in similar:
+                if max_calls >= 0 and llm_calls >= max_calls:
+                    break
                 if match["id"] == node["id"]:
                     continue
                 if match["id"] == user_node_id:
                     continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
+                pair = normalize_pair(node["id"], match["id"])
                 if pair in checked:
                     continue
                 checked.add(pair)
+
+                skip = engine.db.conn.execute(
+                    pair_skip_sql("duplicate_checked", _DUPLICATE_TERMINAL_RESULTS),
+                    (*pair, _DEDUP_ERROR_BACKOFF),
+                ).fetchone()
+                if skip:
+                    continue
 
                 embedding_sim = match["similarity"]
                 # Pre-filter: skip very dissimilar pairs to avoid wasted work
@@ -315,16 +362,32 @@ def run_duplicate_detection(engine) -> None:
 
                 # --- LLM confirmation (mandatory) ---
                 llm_result = _llm_check_duplicate(settings, node, other)
+                llm_calls += 1
+                _now = datetime.now(timezone.utc).isoformat()
                 if llm_result is None:
-                    # LLM unavailable for this pair — skip
+                    consecutive_failures += 1
+                    with engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
+                            "VALUES (?, ?, 'error', ?)", (*pair, _now))
+                    if consecutive_failures >= 3:
+                        logger.warning("Duplicate detection: 3 consecutive LLM failures, aborting run")
+                        break
                     continue
+                consecutive_failures = 0
                 if not llm_result.get("is_duplicate"):
                     logger.debug(
                         "LLM rejected duplicate for %s / %s: %s",
                         node["id"][:8], match["id"][:8],
                         llm_result.get("reason", ""),
                     )
+                    with engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
+                            "VALUES (?, ?, 'not_duplicate', ?)", (*pair, _now))
                     continue
+                # is_duplicate True: do NOT persist here (execute_merge invalidates on success;
+                # pending-proposal check below prevents re-churn).
 
                 # Extract LLM-generated merge content
                 merged_content = llm_result.get("merged_content")
@@ -381,6 +444,11 @@ def run_duplicate_detection(engine) -> None:
                 proposals_created += 1
         if proposals_created:
             logger.info("Duplicate merger created %d proposals/auto-merges", proposals_created)
+        logger.info(
+            "Duplicate detection run: llm_calls=%d proposals=%d cap=%d cap_hit=%s",
+            llm_calls, proposals_created, max_calls,
+            bool(max_calls >= 0 and llm_calls >= max_calls),
+        )
 
     except Exception as e:
         logger.warning("Duplicate detection failed: %s", e)

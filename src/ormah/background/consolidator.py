@@ -2,11 +2,38 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
 logger = logging.getLogger(__name__)
 
+_VALID_NODE_TYPES = ("fact", "decision", "preference", "event", "person",
+                     "project", "concept", "procedure", "goal", "observation")
+
+_CONSOLIDATE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "type": {
+            "type": "string",
+            "enum": list(_VALID_NODE_TYPES),
+        },
+    },
+    "required": ["title", "summary", "type"],
+    "additionalProperties": False,
+}
+
+
+def _cluster_signature(cluster: list[dict]) -> str:
+    """Content signature of a cluster: changes if any member's id/title/content/
+    space/type changes, so an unchanged cluster is skipped but any edit re-triggers
+    evaluation (self-invalidating — no explicit invalidation site needed)."""
+    def _fields(n: dict) -> str:
+        return "|".join(str(n.get(k) or "") for k in ("id", "title", "content", "space", "type"))
+    parts = sorted(hashlib.sha256(_fields(n).encode()).hexdigest() for n in cluster)
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     """Find clusters of similar working-tier nodes for consolidation.
@@ -35,7 +62,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
         return []
 
     rows = conn.execute(
-        "SELECT id, title, content, space FROM nodes WHERE tier = 'working'"
+        "SELECT id, title, content, space, type FROM nodes WHERE tier = 'working'"
     ).fetchall()
     if len(rows) < min_size:
         return []
@@ -73,7 +100,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
             if match["similarity"] < threshold:
                 continue
             m_row = conn.execute(
-                "SELECT id, title, content, space, tier FROM nodes WHERE id = ?",
+                "SELECT id, title, content, space, type, tier FROM nodes WHERE id = ?",
                 (mid,),
             ).fetchone()
             if m_row is None or m_row["tier"] != "working":
@@ -205,6 +232,13 @@ def _consolidate_cluster(engine, cluster: list[dict]) -> None:
     """Consolidate a single cluster using LLM summarization."""
     from ormah.background.llm_client import extract_json, llm_generate
 
+    sig = _cluster_signature(cluster)
+    seen = engine.db.conn.execute(
+        "SELECT 1 FROM consolidation_checked WHERE signature = ?", (sig,)
+    ).fetchone()
+    if seen:
+        return
+
     # Build prompt
     items = []
     for node in cluster:
@@ -244,17 +278,40 @@ Return a JSON object:
   "type": "fact|decision|preference|event|person|project|concept|procedure|goal|observation"
 }}"""
 
-    raw = llm_generate(engine.settings, prompt, json_mode=True)
+    raw = llm_generate(
+        engine.settings, prompt, json_mode=True,
+        response_format={"type": "json_schema", "json_schema": {"schema": _CONSOLIDATE_RESPONSE_SCHEMA}},
+    )
     if raw is None:
+        return  # LLM unavailable — transient, do NOT record, must retry next run
+
+    try:
+        result = json.loads(extract_json(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # ponytail: transient parse failure -> retry next run (do NOT record). Now rare thanks to
+        # the adapter result-fallback. Ceiling: a cluster whose content DETERMINISTICALLY fails to
+        # parse is retried every run (bounded by consolidation_max_clusters_per_run); add a checked_at backoff
+        # column if that ever bleeds.
+        logger.warning("LLM returned unparseable JSON for consolidation; will retry next run")
         return
 
-    result = json.loads(extract_json(raw))
     title = result.get("title", "Consolidated memory")
     summary = result.get("summary", "")
     node_type = result.get("type", "fact")
+    if node_type not in _VALID_NODE_TYPES:
+        node_type = "fact"
 
     if not summary:
+        _record_signature(engine, sig)
         return
 
     node_ids = [n["id"] for n in cluster]
     _apply_consolidation(engine, node_ids, title, summary, node_type)
+    _record_signature(engine, sig)
+
+
+def _record_signature(engine, sig: str) -> None:
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO consolidation_checked (signature, checked_at) "
+            "VALUES (?, datetime('now'))", (sig,))

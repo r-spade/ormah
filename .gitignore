@@ -52,9 +52,11 @@ ormah.db
 memory/deleted/
 
 # Local scripts (not part of the repo)
-/scripts/
+/scripts/*
 # Desktop build scripts are part of the repo
 !desktop/scripts/
+# Cleanup script is part of the repo (has its own tests)
+!/scripts/cleanup_auto_ingested.py
 
 # Whisper eval scratch DB (created by `ormah eval whisper run`)
 eval/whisper/eval_db/

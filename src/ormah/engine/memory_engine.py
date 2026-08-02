@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ormah.background.llm_client import ingest_provider_configured
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -48,6 +49,15 @@ logger = logging.getLogger(__name__)
 # Higher factor = tighter structural link = more activation propagated.
 _EMBEDDING_SCHEMA_VERSION = 2
 
+EXTRACT_ERR_NO_PROVIDER = (
+    "No LLM available for server-side extraction. "
+    "Pass pre-extracted memories via the 'memories' parameter instead."
+)
+EXTRACT_ERR_CALL_FAILED = (
+    "Server-side extraction call returned no result (provider configured — likely a "
+    "timeout or error; see the adapter log). Will retry."
+)
+
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
     """Generate a short title from the first line/sentence of content."""
@@ -58,6 +68,49 @@ def _generate_title(content: str, max_chars: int = 60) -> str:
     # Truncate at last word boundary within max_chars
     truncated = first_line[:max_chars].rsplit(" ", 1)[0]
     return truncated + "…" if truncated else first_line[:max_chars]
+
+
+def _split_for_extraction(content: str, chunk_chars: int, hard_cap: int) -> list[str]:
+    """Split content into pieces at line (turn) boundaries; each piece is <=hard_cap.
+
+    Chunks target chunk_chars but never exceed hard_cap (the sanity ceiling). A single line longer
+    than hard_cap is split at character boundaries into <=hard_cap pieces (rare — one oversized
+    turn), NOT truncated: reassembling the chunks reproduces the input exactly, so no tail is
+    dropped and the byte cursor never advances past unextracted content (council-pr C2). Never
+    drops whole turns/lines or their tails."""
+    limit = min(chunk_chars, hard_cap)  # a chunk must never exceed the hard cap
+    if len(content) <= limit:
+        return [content]
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+
+    def _flush() -> None:
+        nonlocal current, size
+        if current:
+            chunks.append("".join(current))
+            current, size = [], 0
+
+    for line in content.splitlines(keepends=True):
+        if len(line) > hard_cap:
+            # One oversized turn: break it into hard_cap-sized pieces instead of truncating, so
+            # every character is still extracted (no silent tail loss). Splits mid-turn, which is
+            # acceptable for a lone pathological turn (e.g. a huge tool-output paste).
+            logger.warning(
+                "ingest extraction: a single turn of %d chars exceeds ingest_max_content_chars "
+                "%d; split into %d pieces (no data dropped)",
+                len(line), hard_cap, -(-len(line) // hard_cap),
+            )
+            _flush()
+            for i in range(0, len(line), hard_cap):
+                chunks.append(line[i:i + hard_cap])
+            continue
+        if current and size + len(line) > limit:
+            _flush()
+        current.append(line)
+        size += len(line)
+    _flush()
+    return chunks
 
 
 # Edge type factors for spreading activation scoring.
@@ -100,8 +153,14 @@ class MemoryEngine:
         """Initialize on server start: rebuild index if empty, ensure self node."""
         count = self.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         if count == 0:
-            n = self.builder.full_rebuild()
-            logger.info("Initial index rebuild: %d nodes", n)
+            try:
+                n = self.builder.full_rebuild()
+                logger.info("Initial index rebuild: %d nodes", n)
+            except Exception as e:
+                # Rebuild aborted (e.g. fd exhaustion) — the index is left as-is instead of
+                # partially overwritten. Log loudly and continue; do NOT crash-loop under
+                # launchd KeepAlive.
+                logger.error("Initial index rebuild FAILED; index left as-is: %s", e)
 
         # Rebuild FTS index if tokenizer was migrated
         fts_rebuild_row = self.db.conn.execute(
@@ -109,12 +168,16 @@ class MemoryEngine:
         ).fetchone()
         if fts_rebuild_row and fts_rebuild_row["value"] == "1":
             logger.info("Rebuilding FTS index after tokenizer migration")
-            n = self.builder.full_rebuild()
-            logger.info("FTS rebuild complete: %d nodes", n)
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_needs_rebuild', '0')"
-                )
+            try:
+                n = self.builder.full_rebuild()
+                logger.info("FTS rebuild complete: %d nodes", n)
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_needs_rebuild', '0')"
+                    )
+            except Exception as e:
+                # Leave fts_needs_rebuild='1' so the next startup retries once fds recover.
+                logger.error("FTS rebuild FAILED; will retry next startup: %s", e)
 
         # Re-embed nodes if the vector store is missing entries or schema version changed
         vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
@@ -974,11 +1037,27 @@ class MemoryEngine:
         self.builder.index_single(path)
         self._index_embedding(node)
 
-        # Invalidate auto-linker checked pairs if content/title changed
+        # Invalidate auto-linker/dedup checked pairs if content/title changed.
+        # Conflict semantics also depend on space/type, so invalidate conflict_checked
+        # on those edits too (a space- or type-only edit can flip conflict eligibility).
         if req.content is not None or req.title is not None:
             with self.db.transaction() as conn:
                 conn.execute(
                     "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
+                    (node_id, node_id),
+                )
+                conn.execute(
+                    "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                    (node_id, node_id),
+                )
+                conn.execute(
+                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
+                    (node_id, node_id),
+                )
+        elif req.space is not None or req.type is not None:
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
                     (node_id, node_id),
                 )
 
@@ -1023,6 +1102,14 @@ class MemoryEngine:
             self.builder._remove_node(node_id)
             conn.execute(
                 "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
+                (node_id, node_id),
+            )
+            conn.execute(
+                "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                (node_id, node_id),
+            )
+            conn.execute(
+                "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
                 (node_id, node_id),
             )
 
@@ -1488,9 +1575,25 @@ class MemoryEngine:
                 "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
                 (removed.id, removed.id),
             )
+            conn.execute(
+                "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                (removed.id, removed.id),
+            )
+            conn.execute(
+                "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
+                (removed.id, removed.id),
+            )
             if merged_content is not None or merged_title is not None:
                 conn.execute(
                     "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
+                    (kept.id, kept.id),
+                )
+                conn.execute(
+                    "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                    (kept.id, kept.id),
+                )
+                conn.execute(
+                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
                     (kept.id, kept.id),
                 )
 
@@ -2255,7 +2358,7 @@ class MemoryEngine:
         for mem in extracted:
             if not isinstance(mem, dict):
                 continue
-            mem_content = mem.get("content", "").strip()
+            mem_content = (mem.get("content") or "").strip()
             if not mem_content:
                 continue
 
@@ -2273,9 +2376,18 @@ class MemoryEngine:
             mem_title = mem.get("title") or _generate_title(mem_content)
 
             # Default confidence for auto-ingested memories: 0.7
-            confidence = mem.get("confidence", 0.7)
+            confidence = mem.get("confidence")
+            if confidence is None:
+                confidence = 0.7
 
-            tags = mem.get("tags", []) + ["auto-ingested"] + (extra_tags or [])
+            floor = getattr(self.settings, "ingest_min_confidence", 0.0)
+            if confidence < floor:
+                logger.debug("Ingestion: dropped low-confidence memory (%.2f < %.2f): %s",
+                             confidence, floor, mem.get("title", mem_content[:40]))
+                skipped += 1
+                continue
+
+            tags = (mem.get("tags") or []) + ["auto-ingested"] + (extra_tags or [])
 
             if dry_run:
                 created.append({
@@ -2283,7 +2395,7 @@ class MemoryEngine:
                     "content": mem_content,
                     "type": node_type.value,
                     "tags": tags,
-                    "about_self": mem.get("about_self", False),
+                    "about_self": bool(mem.get("about_self")),
                     "confidence": confidence,
                 })
                 continue
@@ -2294,7 +2406,7 @@ class MemoryEngine:
                 title=mem_title,
                 tags=tags,
                 space=space,
-                about_self=mem.get("about_self", False),
+                about_self=bool(mem.get("about_self")),
                 confidence=confidence,
             )
             node_id, _ = self.remember(req, agent_id=agent_id or "ingester")
@@ -2316,29 +2428,60 @@ class MemoryEngine:
         if the LLM is unavailable.
         """
         try:
-            from ormah.background.llm_client import llm_generate
+            from ormah.background.llm_client import extract_json, ingest_llm_generate
 
-            max_chars = self.settings.ingest_max_content_chars
-            prompt = _INGEST_LLM_PROMPT.format(conversation=content[:max_chars])
-            raw = llm_generate(self.settings, prompt, json_mode=True)
-            if raw is None:
-                return (
-                    "No LLM available for server-side extraction. "
-                    "Pass pre-extracted memories via the 'memories' parameter instead."
+            chunk_chars = self.settings.ingest_chunk_chars
+            hard_cap = self.settings.ingest_max_content_chars
+            chunks = _split_for_extraction(content, chunk_chars, hard_cap)
+            if len(chunks) > 1:
+                logger.info("ingest extraction: split %d-char payload into %d chunks",
+                            len(content), len(chunks))
+
+            all_memories: list[dict] = []
+            for i, chunk in enumerate(chunks):
+                prompt = _INGEST_LLM_PROMPT.format(conversation=chunk)
+                raw = ingest_llm_generate(
+                    self.settings, prompt, json_mode=True,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"schema": _INGEST_RESPONSE_SCHEMA},
+                    },
                 )
+                if raw is None:
+                    # One failed chunk means this slice was NOT fully extracted. Committing the
+                    # chunks that succeeded would advance the byte cursor past the unextracted
+                    # chunk = permanent silent loss (council B1). Instead discard the partial
+                    # result and surface a retryable error, reusing the whole-slice failure
+                    # machinery: session_watcher's per-slice cap retries the whole slice and
+                    # durably quarantines it in skipped_slices after MAX_EXTRACT_FAILURES. No
+                    # chunk->byte coupling needed.
+                    # ponytail: a transient flake re-runs the already-succeeded chunks on retry
+                    # (bounded by MAX_EXTRACT_FAILURES). If that rework ever bites, record
+                    # succeeded chunk ranges to skip them — until then, correctness over the churn.
+                    logger.warning(
+                        "ingest extraction: chunk %d/%d (%d chars) returned no result — "
+                        "whole slice retryable (partial result discarded)",
+                        i + 1, len(chunks), len(chunk),
+                    )
+                    if ingest_provider_configured(self.settings):
+                        return EXTRACT_ERR_CALL_FAILED
+                    return EXTRACT_ERR_NO_PROVIDER
 
-            # Extract JSON from response — handle markdown fences and surrounding prose
-            stripped = _extract_json(raw)
-            logger.debug("LLM raw (%d chars), extracted JSON (%d chars): %.300s",
-                         len(raw), len(stripped), stripped)
-            result = json.loads(stripped)
-            # Unwrap: support {"memories": [...]}, {"memories": {"memories": [...]}}, or bare list
-            memories = result
-            while isinstance(memories, dict) and "memories" in memories:
-                memories = memories["memories"]
-            if isinstance(memories, list):
-                return memories
-            return []
+                # Extract JSON from response — handle markdown fences and surrounding prose.
+                # Uses the shared raw_decode-based extractor: a naive fence regex truncates
+                # valid JSON at a ``` quoted inside a memory's content value.
+                stripped = extract_json(raw)
+                logger.debug("LLM raw (%d chars), extracted JSON (%d chars): %.300s",
+                             len(raw), len(stripped), stripped)
+                result = json.loads(stripped)
+                # Unwrap: support {"memories": [...]}, {"memories": {"memories": [...]}}, bare list
+                memories = result
+                while isinstance(memories, dict) and "memories" in memories:
+                    memories = memories["memories"]
+                if isinstance(memories, list):
+                    all_memories.extend(memories)
+
+            return all_memories
         except Exception as e:
             logger.warning("LLM extraction failed: %s", e)
             return (
@@ -2584,36 +2727,7 @@ class MemoryEngine:
         return False
 
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
-
-
-def _extract_json(raw: str) -> str:
-    """Extract JSON from an LLM response that may contain markdown fences or prose."""
-    # Try direct parse first
-    stripped = raw.strip()
-    if stripped.startswith(("{", "[")):
-        return stripped
-
-    # Look for ```json ... ``` fenced block
-    m = _FENCE_RE.search(raw)
-    if m:
-        return m.group(1).strip()
-
-    # Last resort: find first { or [ to last matching } or ]
-    for start_char, end_char in [("{", "}"), ("[", "]")]:
-        start = raw.find(start_char)
-        end = raw.rfind(end_char)
-        if start != -1 and end > start:
-            return raw[start : end + 1]
-
-    return stripped
-
-
-_INGEST_LLM_PROMPT = """\
-You are a memory curator for a persistent knowledge graph. Your job: read a conversation and extract memories that will be valuable in future sessions — days or weeks later, when all context is gone.
-
-These memories are stored as typed nodes in a graph with semantic search. They will be retrieved by an AI assistant to provide context it wouldn't otherwise have. Every memory you extract should pass this test: "Would an AI assistant benefit from knowing this when helping the user on a related task in the future?"
-
+_INGEST_LLM_RULES = """\
 ## Quality bar
 
 A good memory is **specific, self-contained, and searchable**. It must:
@@ -2674,8 +2788,44 @@ For each memory:
 
 Return: {{"memories": [...]}}
 Return {{"memories": []}} if nothing worth remembering was discussed.
-
-## Conversation
-
-{conversation}
 """
+
+_INGEST_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "enum": [t.value for t in NodeType],
+                    },
+                    "title": {"type": ["string", "null"]},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "about_self": {"type": "boolean"},
+                    "confidence": {"type": "number"},
+                },
+                "required": [
+                    "content", "type", "title", "tags", "about_self", "confidence",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["memories"],
+    "additionalProperties": False,
+}
+
+
+_INGEST_LLM_PROMPT = """\
+You are a memory curator for a persistent knowledge graph. Read the conversation below and extract memories valuable in future sessions.
+
+<conversation>
+{conversation}
+</conversation>
+
+Now extract the memories, following these rules:
+""" + _INGEST_LLM_RULES

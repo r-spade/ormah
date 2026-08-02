@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -86,6 +87,30 @@ def isolate_fastembed_cache(tmp_path_factory):
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache_dir))
         yield cache_dir
+
+
+@pytest.fixture(scope="session")
+def _empty_env_file(tmp_path_factory):
+    """Session-scoped stand-in for the global .env.
+
+    Deliberately NOT the per-test ``tmp_path``: tests that treat ``tmp_path`` as a
+    directory under test (e.g. the fastembed cache cleanup asserting the dir is
+    empty afterwards) would see this file and fail.
+    """
+    env_file = tmp_path_factory.mktemp("settings-isolation") / "empty.env"
+    env_file.write_text("")
+    return env_file
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_from_global_env(monkeypatch, _empty_env_file):
+    """Stop the global ~/.config/ormah/.env and stray ORMAH_* OS vars from
+    leaking into bare Settings() during tests (env pollution, not regressions).
+    """
+    monkeypatch.setitem(Settings.model_config, "env_file", str(_empty_env_file))
+    for key in list(os.environ):
+        if key.startswith("ORMAH_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture

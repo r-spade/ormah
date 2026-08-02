@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -48,6 +49,11 @@ class Database:
             pass  # sqlite-vec not installed — vector search disabled
         with self._conns_lock:
             self._all_conns.append(conn)
+        # Auto-close this connection when its OWNING thread is garbage-collected. Without this,
+        # an ephemeral thread (e.g. a maintenance phase thread) leaks its connection — and its
+        # ~3 WAL fds — for the whole process lifetime, until [Errno 24]. finalize fires at most
+        # once; close() (shutdown) also handles any still-live threads' connections.
+        weakref.finalize(threading.current_thread(), self._retire_connection, conn)
         return conn
 
     @property
@@ -542,6 +548,18 @@ class Database:
                 )
         except ImportError:
             pass  # sqlite-vec not available, vector search disabled
+
+    def _retire_connection(self, conn: sqlite3.Connection) -> None:
+        """Drop a dead thread's connection from the registry and close it."""
+        with self._conns_lock:
+            try:
+                self._all_conns.remove(conn)
+            except ValueError:
+                pass  # already retired by close()
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def close(self) -> None:
         with self._conns_lock:

@@ -536,6 +536,36 @@ class TestSafeBoundary:
         clean = parse_transcript(path, start_offset=len(raw[0]) + len(raw[1]) + len(raw[2]))
         assert clean.leading_orphan is False
 
+    def test_tool_result_user_before_assistant_is_not_orphan(self, tmp_path):
+        """A slice starting on a tool_result user record (role=user, no text) followed by
+        an assistant must NOT be flagged leading_orphan: a tool_result IS a user-role
+        record, so the assistant is inside a proper turn, not stranded mid-response.
+
+        Regression: tool_result users don't advance user_turn_count, so the old gate
+        (user_turn_count == 0) false-flagged this slice as an orphan. The caller then reset
+        the cursor to 0 every tick — an infinite re-ingest loop that never drained tool-heavy
+        sessions and burned one extraction call per cycle (2026-07-03)."""
+        lines = [
+            {"type": "user",      "message": {"content": "U1 prompt"}},
+            {"type": "assistant", "message": {"stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "name": "read", "input": {}}]}},
+            {"type": "user",      "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "x", "content": "file body"}]}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "A1 answer after tool"}]}},
+            {"type": "user",      "message": {"content": "U2 next prompt"}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "A2 answer"}]}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        raw = path.read_bytes().splitlines(keepends=True)
+        # cursor lands on the tool_result user line (line 3)
+        offset = len(raw[0]) + len(raw[1])
+        result = parse_transcript(path, start_offset=offset)
+        assert result.leading_orphan is False
+        # and the slice makes forward progress (no infinite reset-to-0 loop)
+        assert result.safe_end_offset > offset
+
     def test_codex_task_complete_before_first_user_does_not_commit(self, tmp_path):
         """A Codex task_complete closing a turn whose user is before the cursor must not
         commit an orphan (no user in the slice)."""

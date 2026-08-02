@@ -377,6 +377,20 @@ def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, request: Re
             logger.exception("Merge failed for proposal %s", proposal_id)
             merge_result = "Merge failed"
 
+    if action == "rejected" and proposal["type"] == "merge":
+        try:
+            node_ids = json.loads(proposal["source_nodes"])
+            if len(node_ids) == 2:
+                pair = tuple(sorted(node_ids))
+                with engine.db.transaction() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
+                        "VALUES (?, ?, 'not_duplicate', ?)",
+                        (*pair, datetime.now(timezone.utc).isoformat()),
+                    )
+        except Exception:
+            logger.exception("Failed to record not_duplicate for rejected proposal %s", proposal_id)
+
     if action == "approved" and proposal["type"] == "conflict":
         try:
             node_ids = json.loads(proposal["source_nodes"])

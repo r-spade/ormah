@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ormah.background.session_watcher import (
+    MAX_EXTRACT_FAILURES,
     IngestResult,
     SessionHandler,
     _ingest_session,
@@ -27,7 +28,15 @@ from ormah.engine.memory_engine import MemoryEngine
 from ormah.models.node import CreateNodeRequest
 from ormah.transcript.parser import parse_transcript
 
-_LLM_PATCH = "ormah.background.llm_client.llm_generate"
+_LLM_PATCH = "ormah.background.llm_client.ingest_llm_generate"
+# A slice-specific extraction failure: the LLM responds but the content is unparseable, so
+# _extract_memories_llm raises during json.loads and returns its generic error string. This is the
+# DETERMINISTIC failure that counts toward the per-slice cap (unlike a provider-wide call failure /
+# None, which is transient and never skips the slice — council-pr H1).
+_UNPARSEABLE = "this is not json at all"
+# The whisper-usage LLM judge uses the global llm_generate (maintenance path), NOT the
+# extraction-only ingest_llm_generate. Judge tests patch this; ingest tests patch _LLM_PATCH.
+_JUDGE_PATCH = "ormah.background.llm_client.llm_generate"
 
 _LLM_RESPONSE = json.dumps({"memories": [
     {
@@ -61,9 +70,13 @@ def _mark_idle(path: Path) -> None:
 
     A fresh file is considered active, so its trailing user+assistant block is held back
     until a following user turn (or the idle flush) confirms the response is complete.
+
+    Recedes past the default session_watcher_idle_threshold (600s, see _ingest_session)
+    so callers relying on either that default or a smaller explicit idle_threshold see the
+    file as idle.
     """
     now = time.time()
-    os.utime(path, (now, now - 120))
+    os.utime(path, (now, now - 700))
 
 
 def _write_turn_jsonl(path: Path, prompt: str, response: str) -> None:
@@ -149,6 +162,7 @@ def test_ingest_session_basic(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "abc123.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -162,6 +176,308 @@ def test_ingest_session_basic(engine, tmp_path):
     assert entry["source"] == "claude_code"
     assert entry["space"] == "myproject"
     assert entry["user_turns"] == 6
+    assert len(entry["node_ids"]) == 1
+
+
+def test_ingest_none_is_transient_and_does_not_advance(engine, tmp_path):
+    """LLM unavailable (adapter returns None) -> TRANSIENT, cursor must not advance."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    state = {}
+    # "LLM unavailable" == no provider configured: the failure stays TRANSIENT and is never
+    # counted toward the per-slice cap, so no state entry is written. Patch the provider check
+    # explicitly so the result does not depend on a cached ingest adapter left by an earlier test.
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=False):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    assert result == IngestResult.TRANSIENT
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in state  # no provider -> failure never counted, cursor never written
+
+
+def test_toxic_slice_skipped_after_max_extract_failures(engine, tmp_path):
+    """A slice that fails extraction MAX_EXTRACT_FAILURES times (provider present) must advance
+    the cursor past it — not re-drive ingestion forever (the 1393x loop)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    # Provider IS configured; the slice deterministically fails extraction (unparseable output).
+    with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for i in range(1, MAX_EXTRACT_FAILURES):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+            assert state[rel]["extract_fail_count"] == i
+            assert state[rel]["end_offset"] == 0  # cursor NOT advanced yet
+        # Capped: skip the toxic slice forward. The cursor advanced -> progress, so this is OK,
+        # not NO_PROGRESS (which would bump the reconcile-park counter for a slice that just
+        # progressed).
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
+
+    assert state[rel]["end_offset"] > 0            # cursor advanced past the toxic slice
+    assert "extract_fail_count" not in state[rel]  # counter cleared after skip
+    # Durable quarantine trail: the skipped range is recorded, not just logged, so it can be
+    # replayed after the provider issue is fixed.
+    skipped = state[rel]["skipped_slices"]
+    assert len(skipped) == 1
+    assert skipped[0]["start"] == 0
+    assert skipped[0]["end"] == state[rel]["end_offset"]
+    assert skipped[0]["reason"] == "extract_failed_x3"
+
+
+def test_capped_skip_schedules_drain_continuation(engine, tmp_path):
+    """When the toxic slice is a CAPPED batch (more closed content follows), the skip must call
+    on_defer_active so the rest of the transcript drains on the next tick, not only via reconcile.
+    (Council adjustment #3 for Task 04 — mirrors the success-path capped continuation.)"""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=12)  # large enough that a small flush_bytes caps the first batch
+    _mark_idle(jsonl)
+    state = {}
+    defer_calls: list[int] = []
+
+    result = None
+    with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES):
+            result = _ingest_session(
+                engine, jsonl, state, watch_dir, min_turns=1,
+                flush_bytes=300,  # small -> the first closed batch is capped (content past it)
+                on_defer_active=lambda: defer_calls.append(1),
+            )
+
+    assert result == IngestResult.OK          # capped slice skipped after the cap
+    assert defer_calls, "on_defer_active must fire on a capped skip to drain the remainder"
+
+
+def test_no_provider_failure_never_burns_the_slice(engine, tmp_path):
+    """Without a provider, a failure must stay TRANSIENT and never advance the cursor or count —
+    the data must survive until a provider returns."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=False):
+        for _ in range(MAX_EXTRACT_FAILURES + 2):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+    # Never counted, never advanced: either no entry, or an entry with cursor still at 0 and no counter.
+    entry = state.get(rel, {})
+    assert entry.get("end_offset", 0) == 0
+    assert "extract_fail_count" not in entry
+
+
+def test_extract_fail_count_persists_across_restart(engine, tmp_path):
+    """The per-slice failure counter must survive a process restart (persisted state), not just
+    live in-memory — otherwise a restarted watcher resets the cap and the loop never breaks."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for i in range(1, MAX_EXTRACT_FAILURES):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+        assert state[rel]["extract_fail_count"] == MAX_EXTRACT_FAILURES - 1
+
+        # Simulate a restart: reload state from disk into a fresh dict.
+        reloaded_state = _load_state(watch_dir)
+        assert reloaded_state[rel]["extract_fail_count"] == MAX_EXTRACT_FAILURES - 1
+
+        # The (MAX_EXTRACT_FAILURES)th failure, on the reloaded state, must still trip the cap.
+        assert _ingest_session(engine, jsonl, reloaded_state, watch_dir, min_turns=5) == IngestResult.OK
+
+    assert reloaded_state[rel]["end_offset"] > 0
+    assert "extract_fail_count" not in reloaded_state[rel]
+
+
+def test_success_after_cap_preserves_skipped_slices(engine, tmp_path):
+    """A capped slice records a durable skipped_slices entry; a LATER successful slice must not
+    wipe that quarantine trail. The success-path state write was building the entry from scratch
+    (dropping skipped_slices) while the cap path copied existing state (council-pr C1)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=12)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    # Phase 1: the first (capped) batch deterministically fails extraction MAX_EXTRACT_FAILURES
+    # times (slice-specific, unparseable) -> quarantined + skipped.
+    with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES):
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=300)
+    assert state[rel]["skipped_slices"], "precondition: first slice quarantined"
+    quarantined = list(state[rel]["skipped_slices"])
+
+    # Phase 2: the NEXT batch extracts successfully and writes fresh success state.
+    ok = json.dumps({"memories": [{"content": "a genuine memory to store", "type": "fact",
+                                   "title": "t"}]})
+    with patch(_LLM_PATCH, return_value=ok), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=300)
+
+    assert result == IngestResult.OK
+    # The durable quarantine trail must survive the successful write.
+    assert state[rel]["skipped_slices"] == quarantined
+
+
+def test_ingest_exception_counts_toward_cap(engine, tmp_path):
+    """A DETERMINISTIC exception in ingest_conversation must count toward the per-slice cap and
+    eventually skip the slice — otherwise it pins the cursor forever, the same loop the string
+    path already guards against (council-pr I1)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    with patch.object(engine, "ingest_conversation", side_effect=RuntimeError("boom")), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for i in range(1, MAX_EXTRACT_FAILURES):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+            assert state[rel]["extract_fail_count"] == i
+            assert state[rel]["end_offset"] == 0  # cursor pinned until capped
+        # The capped attempt skips the slice forward instead of looping forever.
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
+
+    assert state[rel]["end_offset"] > 0
+    skipped = state[rel]["skipped_slices"]
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "ingest_exception_x3"  # distinguishable from extract failures (M1)
+
+
+def test_transient_storage_exception_never_skips_slice(engine, tmp_path):
+    """A retryable storage exception (SQLite lock under WAL contention) must stay TRANSIENT forever
+    and never advance the cursor or count toward the cap — else a lock that clears later loses the
+    slice permanently (council-pr H2). Only DETERMINISTIC exceptions may be capped."""
+    import sqlite3
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    with patch.object(engine, "ingest_conversation",
+                      side_effect=sqlite3.OperationalError("database is locked")), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES + 2):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+    entry = state.get(rel, {})
+    assert entry.get("end_offset", 0) == 0        # cursor never advanced
+    assert "extract_fail_count" not in entry      # never counted toward the cap
+    assert "skipped_slices" not in entry          # never quarantined -> no data loss
+
+
+def test_provider_wide_call_failure_never_skips_slice(engine, tmp_path):
+    """A provider-wide LLM call failure (binary/auth/network/timeout -> raw is None -> CALL_FAILED)
+    must stay TRANSIENT and never count toward the cap: during an outage every slice would otherwise
+    be skipped after the cap = mass silent loss (council-pr H1). Only slice-specific parse failures
+    are capped."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    # Both provider checks TRUE + call returns None -> _extract_memories_llm returns CALL_FAILED
+    # (a provider-wide failure, not a slice defect).
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.engine.memory_engine.ingest_provider_configured", return_value=True), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES + 3):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+    entry = state.get(rel, {})
+    assert entry.get("end_offset", 0) == 0    # cursor never advanced during the outage
+    assert "extract_fail_count" not in entry  # provider-wide failure never counts toward the cap
+    assert "skipped_slices" not in entry       # nothing skipped -> no data loss
+
+
+def test_ingest_valid_empty_memories_advances(engine, tmp_path):
+    """A valid {"memories": []} extraction is a SUCCESS: the slice is consumed and the
+    cursor advances, so session_watcher never re-processes a no-memory turn forever."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value='{"memories": []}'):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    assert result == IngestResult.OK
+    rel = str(jsonl.relative_to(watch_dir))
+    entry = state[rel]
+    assert entry["end_offset"] > 0  # cursor advanced past the consumed slice
+    assert entry["node_ids"] == []
+
+
+def test_ingest_null_optional_fields_does_not_wedge_cursor(engine, tmp_path):
+    """Cursor-wedge regression: the fallback extraction path is not --json-schema-
+    constrained, so tags/about_self/confidence can arrive as null. That must not raise
+    inside ingest_conversation -> propagate as an error string -> TRANSIENT forever."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    null_fields_response = json.dumps({"memories": [
+        {"content": "x", "type": "fact", "title": "t",
+         "tags": None, "about_self": None, "confidence": None},
+    ]})
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=null_fields_response):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    assert result == IngestResult.OK
+    rel = str(jsonl.relative_to(watch_dir))
+    entry = state[rel]
+    assert entry["end_offset"] > 0  # cursor advanced, not wedged
     assert len(entry["node_ids"]) == 1
 
 
@@ -191,7 +507,9 @@ def test_scan_skips_subagents_keeps_primary(engine, tmp_path):
     project_dir = watch_dir / "-Users-alice-Code-myproject"
     sub_dir = project_dir / "abc123" / "subagents"
     sub_dir.mkdir(parents=True)
-    _make_jsonl(project_dir / "abc123.jsonl", user_turns=6)
+    primary = project_dir / "abc123.jsonl"
+    _make_jsonl(primary, user_turns=6)
+    _mark_idle(primary)  # finished session, below flush_bytes → idle flush
     _make_jsonl(sub_dir / "agent-deadbeef.jsonl", user_turns=6)
 
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -369,7 +687,7 @@ def test_llm_judge_disabled_by_default(engine, tmp_path):
     engine.settings.llm_provider = "ollama"
 
     mock_llm = MagicMock(return_value=json.dumps({"verdicts": []}))
-    with patch(_LLM_PATCH, mock_llm):
+    with patch(_JUDGE_PATCH, mock_llm):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 1
@@ -406,7 +724,7 @@ def test_llm_judge_promotes_used_verdict(engine, tmp_path):
             "reason": "The answer endorses the injected deployment guidance.",
         }]
     })
-    with patch(_LLM_PATCH, return_value=llm_response) as mock_llm:
+    with patch(_JUDGE_PATCH, return_value=llm_response) as mock_llm:
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 2
@@ -434,11 +752,11 @@ def test_llm_judge_promotes_used_verdict(engine, tmp_path):
     assert affinity["source"] == "auto_llm_judge"
 
 
-def test_llm_judge_falls_back_to_json_object_mode(engine, tmp_path):
-    """Providers that reject JSON Schema can still use the JSON-object fallback."""
+def test_llm_judge_no_schemaless_fallback_on_schema_failure(engine, tmp_path):
+    """When the schema call fails, the judge gives up rather than retrying without a schema."""
     prompt = "How should we solve feedback collection?"
     response = "We should first fix the database uniqueness key."
-    transcript_path = tmp_path / "judge-schema-fallback-session.jsonl"
+    transcript_path = tmp_path / "judge-schema-failure-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
 
@@ -450,42 +768,25 @@ def test_llm_judge_falls_back_to_json_object_mode(engine, tmp_path):
     whisper_log_id = _insert_injected_whisper_log(
         engine,
         node_id=node_id,
-        session_id="judge-schema-fallback-session",
+        session_id="judge-schema-failure-session",
         prompt=prompt,
     )
     engine.settings.llm_provider = "ollama"
     engine.settings.feedback_llm_judge_enabled = True
 
-    llm_response = json.dumps({
-        "verdicts": [{
-            "whisper_log_id": whisper_log_id,
-            "verdict": "irrelevant",
-            "confidence": 0.91,
-        }]
-    })
-    mock_llm = MagicMock(side_effect=[None, llm_response])
-    with patch(_LLM_PATCH, mock_llm):
+    mock_llm = MagicMock(return_value=None)
+    with patch(_JUDGE_PATCH, mock_llm):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
-    assert recorded == 2
-    assert mock_llm.call_count == 2
-    first_kwargs = mock_llm.call_args_list[0].kwargs
-    second_kwargs = mock_llm.call_args_list[1].kwargs
-    assert first_kwargs["response_format"]["type"] == "json_schema"
-    assert first_kwargs["temperature"] == 0
-    assert first_kwargs["max_tokens"] == 512
-    assert "response_format" not in second_kwargs
-    assert second_kwargs["json_mode"] is True
-    assert second_kwargs["temperature"] == 0
-    assert second_kwargs["max_tokens"] == 512
+    assert recorded == 1
+    assert mock_llm.call_count == 1
 
     judge_signal = engine.db.conn.execute(
         "SELECT * FROM signals WHERE whisper_log_id = ? "
         "AND source = 'transcript_watcher_llm_judge'",
         (whisper_log_id,),
     ).fetchone()
-    assert judge_signal is not None
-    assert judge_signal["signal_type"] == "whisper_judged_irrelevant"
+    assert judge_signal is None
 
 
 def test_llm_judge_promotes_irrelevant_verdict_as_negative(engine, tmp_path):
@@ -518,7 +819,7 @@ def test_llm_judge_promotes_irrelevant_verdict_as_negative(engine, tmp_path):
             "reason": "The memory is about graph UI rendering, not feedback schema work.",
         }]
     })
-    with patch(_LLM_PATCH, return_value=llm_response):
+    with patch(_JUDGE_PATCH, return_value=llm_response):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 2
@@ -569,7 +870,7 @@ def test_llm_judge_low_confidence_records_uncertain_without_affinity(engine, tmp
             "reason": "Maybe unrelated, but confidence is low.",
         }]
     })
-    with patch(_LLM_PATCH, return_value=llm_response):
+    with patch(_JUDGE_PATCH, return_value=llm_response):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 2
@@ -611,7 +912,7 @@ def test_llm_judge_skips_clear_heuristic_positive(engine, tmp_path):
     engine.settings.feedback_llm_judge_enabled = True
 
     mock_llm = MagicMock(return_value=json.dumps({"verdicts": []}))
-    with patch(_LLM_PATCH, mock_llm):
+    with patch(_JUDGE_PATCH, mock_llm):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 1
@@ -648,7 +949,7 @@ def test_llm_judge_is_idempotent(engine, tmp_path):
             "reason": "The memory is about graph UI rendering.",
         }]
     }))
-    with patch(_LLM_PATCH, mock_llm):
+    with patch(_JUDGE_PATCH, mock_llm):
         assert _record_whisper_usage_signals(engine, transcript) == 2
         assert _record_whisper_usage_signals(engine, transcript) == 0
 
@@ -679,10 +980,41 @@ def test_min_turns_filter(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    # A fresh (active, not idle) file below min_turns hits the short-tail branch and
-    # defers → TRANSIENT (retry until it grows past min_turns or the session idles).
+    # A short ACTIVE window below min_turns defers (noise cut) rather than extracting —
+    # retry until it crosses min_turns, crosses flush_bytes, or the session idles.
     assert result == IngestResult.TRANSIENT
     assert str(jsonl.relative_to(watch_dir)) not in state
+
+
+def test_min_turns_skips_short_active_window(engine, tmp_path):
+    """A window below min_turns that is NOT idle must defer, not extract (noise cut)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=2)  # below min_turns=5
+    # NOT marked idle -> active short window
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+    assert result != IngestResult.OK
+    assert state == {}
+
+
+def test_min_turns_still_flushes_short_idle_session(engine, tmp_path):
+    """A short but FINISHED (idle) session must still be captured — not stranded."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=2)
+    _mark_idle(jsonl)  # finished
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+    assert result == IngestResult.OK
 
 
 # --- Test 4: Unchanged session skipped ---
@@ -694,6 +1026,7 @@ def test_unchanged_session_skipped(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "session.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -711,6 +1044,7 @@ def test_scan_respects_lookback(engine, tmp_path):
 
     recent = project_dir / "recent.jsonl"
     _make_jsonl(recent, user_turns=6)
+    _mark_idle(recent)  # finished session, below flush_bytes → idle flush
 
     old = project_dir / "old.jsonl"
     _make_jsonl(old, user_turns=6)
@@ -990,6 +1324,7 @@ def test_incremental_only_new_turns(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -1006,6 +1341,7 @@ def test_incremental_only_new_turns(engine, tmp_path):
         assert first_offset > 0
 
         _make_jsonl(jsonl, user_turns=12)  # identical first 6 turns + 6 appended
+        _mark_idle(jsonl)  # appended session, below flush_bytes → idle flush
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " not in captured[1]
@@ -1022,6 +1358,7 @@ def test_incremental_defers_small_append(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     calls = 0
     real_ingest = engine.ingest_conversation
@@ -1053,6 +1390,7 @@ def test_shrink_resets_cursor(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=10)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -1067,6 +1405,7 @@ def test_shrink_resets_cursor(engine, tmp_path):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
         _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset
+        _mark_idle(jsonl)  # shrunk session, below flush_bytes → idle flush
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " in captured[1]
@@ -1136,6 +1475,7 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _make_jsonl(jsonl, user_turns=6)  # 6 complete (end_turn) pairs
+    _mark_idle(jsonl)  # finished-so-far session, below flush_bytes → idle flush
     state = {}
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -1152,15 +1492,18 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
 
         # New turn: prompt + a FIRST assistant record still in flight (tool_use). The
         # response is not complete, so nothing new commits and the cursor must not move
-        # into the middle of the response.
+        # into the middle of the response. Mark idle too: this must hold back regardless
+        # of idle, because the trailing record is genuinely incomplete (not just small).
         _append_user(jsonl, 6)
         _append_assistant(jsonl, 6, stop_reason="tool_use")
+        _mark_idle(jsonl)
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) != IngestResult.OK
         assert state[rel]["end_offset"] == cursor1
 
         # The response completes with a terminal record: prompt + BOTH assistant records
         # commit together — never split.
         _append_assistant(jsonl, 6, stop_reason="end_turn")
+        _mark_idle(jsonl)
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     committed = captured[-1]
@@ -1181,6 +1524,7 @@ def test_codex_multirecord_turn_committed_whole_via_task_complete(engine, tmp_pa
     _append_codex_turn(jsonl, 1, records=2, complete=True)
     # In-flight final turn: two assistant records, no task_complete yet.
     _append_codex_turn(jsonl, 2, records=2, complete=False)
+    _mark_idle(jsonl)  # below flush_bytes → idle flush for the closed turns
 
     state = {}
     captured: list[str] = []
@@ -1219,6 +1563,7 @@ def test_legacy_mid_response_cursor_recovered(engine, tmp_path):
             "content": [{"type": "text", "text": "Second part with the actual answer"}]}},
     ]
     jsonl.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     # A legacy state cursor saved mid-response (after the first assistant record), with the
     # CORRECT file hash — the file is unchanged. Recovery must still fire because the stored
@@ -1262,6 +1607,7 @@ def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _append_codex_turn(jsonl, 0, records=2, complete=True)
+    _mark_idle(jsonl)  # finished-so-far turn, below flush_bytes → idle flush
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
@@ -1420,6 +1766,7 @@ def test_concurrent_ingest_skipped(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     started = threading.Event()
     release = threading.Event()
@@ -1677,6 +2024,7 @@ def test_inflight_skip_reschedules(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     scheduled = []
 
@@ -1729,6 +2077,7 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _make_jsonl(jsonl, user_turns=10)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
@@ -1736,6 +2085,7 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     assert first_nodes  # first ingest produced at least one node
 
     _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
+    _mark_idle(jsonl)  # shrunk session, below flush_bytes → idle flush
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
@@ -2296,3 +2646,108 @@ def test_reconcile_skips_never_seen_when_lookback_negative(engine, tmp_path):
     assert recovered == 0
     assert ingest_calls == []
     assert rel not in handler._state
+
+
+# --- Merge of #52 (catch-up off bind path) onto the reconcile rework -------------------
+# These cover the behavior the merge introduced that NEITHER prior suite tested:
+# the off-bind startup catch-up and the shutdown drain that closes the use-after-close
+# window (issue #52), now expressed on the reconcile API (list[SessionWatch] + _stop_event).
+
+
+def test_do_ingest_rejected_after_stop_event(engine, tmp_path):
+    """Once _stop_event is set, _do_ingest rejects under the lock before touching the engine —
+    the guard that closes the use-after-close window at shutdown (issue #52)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler._stop_event.set()
+
+    with patch("ormah.background.session_watcher._ingest_session") as mock_ingest:
+        result = handler._do_ingest(jsonl)
+
+    assert result == IngestResult.TRANSIENT
+    mock_ingest.assert_not_called()          # rejected before the heavy work
+    assert handler.in_flight_count() == 0     # never claimed the path
+
+
+def test_stop_session_watcher_drains_inflight_ingest(engine, tmp_path):
+    """stop_session_watcher blocks until an in-flight ingest finishes, so nothing writes to the
+    DB after the lifespan calls engine.shutdown() right after (use-after-close guard, issue #52)."""
+    import threading
+
+    from ormah.background.session_watcher import SessionWatch
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_ingest(*a, **k):
+        entered.set()
+        release.wait(5)
+        return IngestResult.OK
+
+    def worker():
+        with patch("ormah.background.session_watcher._ingest_session", side_effect=blocking_ingest):
+            handler._do_ingest(watch_dir / "x.jsonl")
+
+    t = threading.Thread(target=worker)
+    t.start()
+    assert entered.wait(5)                     # an ingest is now in-flight
+    assert handler.in_flight_count() == 1
+
+    watch = SessionWatch(
+        watch_dir=watch_dir, handler=handler, observer=MagicMock(), startup_reconcile_thread=None,
+    )
+    stop_returned = threading.Event()
+
+    def stopper():
+        stop_session_watcher([watch])
+        stop_returned.set()
+
+    s = threading.Thread(target=stopper)
+    s.start()
+
+    assert not stop_returned.wait(0.5)         # stop must NOT return while ingest is in-flight
+    release.set()                              # let the ingest finish
+    assert stop_returned.wait(5)               # now the drain completes and stop returns
+    t.join(5)
+    s.join(5)
+    assert handler.in_flight_count() == 0
+
+
+def test_start_session_watcher_runs_catchup_off_bind(engine, tmp_path):
+    """start_session_watcher ingests a pre-existing backlog via the off-bind startup thread:
+    the observer is live immediately (not blocked on a synchronous scan) and the backlog is
+    recovered once the startup thread joins (issue #52)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = watch_dir
+    engine.settings.session_watcher_debounce_seconds = 10.0
+    engine.settings.session_watcher_lookback_hours = 9999
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        watches = start_session_watcher(engine)
+        try:
+            assert len(watches) == 1
+            assert watches[0].observer.is_alive()        # live from t0, scan did not block the bind
+            assert watches[0].startup_reconcile_thread is not None
+            watches[0].startup_reconcile_thread.join(10)           # deterministic wait for the off-bind drain
+            assert not watches[0].startup_reconcile_thread.is_alive()
+            rel = str(jsonl.relative_to(watch_dir))
+            assert rel in watches[0].handler._state      # backlog ingested off the bind path
+        finally:
+            stop_session_watcher(watches)

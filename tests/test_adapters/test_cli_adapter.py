@@ -759,6 +759,35 @@ def test_whisper_setup_merges_existing(monkeypatch, tmp_path):
     assert "hooks" in data  # added
 
 
+# --- whisper store client timeout ---
+
+
+def test_whisper_store_timeout_covers_claude_cli_extraction_budget():
+    """Server-side claude_cli extraction can run up to claude_cli_timeout_seconds; the
+    client timeout must cover that budget (plus margin) or it fires first and the
+    cursor never advances (permanent stall on the same slice)."""
+    from ormah.adapters.cli_adapter import _whisper_store_timeout
+    from ormah.config import Settings
+
+    s = Settings(
+        llm_provider="ollama",
+        ingest_llm_provider="claude_cli",
+        ingest_llm_model="haiku",
+        claude_cli_timeout_seconds=120,
+    )
+    assert _whisper_store_timeout(s) >= 120 + 15
+
+
+def test_whisper_store_timeout_stays_fast_for_ollama():
+    """Non-claude_cli ingest providers keep the fast fail-fast timeout — don't make
+    ollama users wait on a hung server."""
+    from ormah.adapters.cli_adapter import _whisper_store_timeout
+    from ormah.config import Settings
+
+    s = Settings(llm_provider="ollama")
+    assert _whisper_store_timeout(s) == 60.0
+
+
 # --- argparse ---
 
 

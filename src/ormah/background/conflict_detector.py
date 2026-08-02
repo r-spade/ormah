@@ -7,9 +7,32 @@ import logging
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_conflict_type
+from ormah.background.pair_skip import normalize_pair, pair_skip_sql
 from ormah.models.node import Connection, EdgeType
 
 logger = logging.getLogger(__name__)
+
+_CONFLICT_ERROR_BACKOFF = "-6 hours"
+_CONFLICT_TERMINAL_RESULTS = ("none", "evolution", "tension")
+
+# Sentinel: the LLM answered but the response was internally inconsistent
+# (e.g. conflict=false with type != "none"). This is a terminal outcome —
+# record result='none' so it doesn't churn on the error backoff — but it
+# must NOT be conflated with "LLM unavailable/invalid" (which records 'error').
+_INCONSISTENT = object()
+
+_CONFLICT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "same_subject": {"type": "boolean"},
+        "conflict": {"type": "boolean"},
+        "type": {"type": "string", "enum": ["evolution", "tension", "none"]},
+        "evolved_node": {"type": ["string", "null"]},
+        "explanation": {"type": ["string", "null"]},
+    },
+    "required": ["same_subject", "conflict", "type", "evolved_node", "explanation"],
+    "additionalProperties": False,
+}
 
 _LLM_CONFLICT_PROMPT = """\
 You are checking whether two memories genuinely contradict each other. False positives create noise in the graph and waste the user's time resolving non-conflicts. Be very conservative — only flag true contradictions.
@@ -57,11 +80,15 @@ Return JSON only:
 }}"""
 
 
-def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
+def _llm_check_conflict(settings, node_row, other_row) -> dict | object | None:
     """Ask LLM whether two nodes contradict each other.
 
-    Returns parsed dict or None if the LLM is unavailable or returns
-    invalid output.
+    Returns:
+    - a parsed, semantically-consistent dict on success.
+    - ``_INCONSISTENT`` if the LLM answered but the response was
+      internally inconsistent (answered-but-invalid; terminal 'none').
+    - ``None`` if the LLM is unavailable or returned unparseable output
+      (truly unavailable; terminal 'error', subject to backoff retry).
     """
     from ormah.background.llm_client import extract_json, llm_generate
 
@@ -82,7 +109,12 @@ def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
         space_b=_get(other_row, "space", "global"),
     )
 
-    raw = llm_generate(settings, prompt, json_mode=True)
+    raw = llm_generate(
+        settings,
+        prompt,
+        json_mode=True,
+        response_format={"type": "json_schema", "json_schema": {"schema": _CONFLICT_RESPONSE_SCHEMA}},
+    )
     if raw is None:
         return None
 
@@ -92,10 +124,31 @@ def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
             return None
         if "type" in result:
             result["type"] = normalize_conflict_type(result["type"])
-        return result
     except (json.JSONDecodeError, TypeError):
         logger.warning("LLM returned invalid JSON for conflict check")
         return None
+
+    ct = result.get("type")
+    if not result.get("conflict"):
+        if ct != "none":
+            return _INCONSISTENT
+    else:  # conflict is true
+        if not result.get("same_subject") or ct not in ("evolution", "tension"):
+            return _INCONSISTENT
+        if ct == "evolution" and result.get("evolved_node") not in ("a", "b"):
+            return _INCONSISTENT
+        if ct == "tension" and result.get("evolved_node") is not None:
+            result["evolved_node"] = None  # tension has no evolved node
+
+    return result
+
+
+def _record_terminal(engine, pair: tuple[str, str], result: str, now: str) -> None:
+    """Persist a terminal (stand-alone, non-edge) conflict_checked outcome."""
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO conflict_checked (node_a, node_b, result, checked_at) "
+            "VALUES (?, ?, ?, ?)", (*pair, result, now))
 
 
 _BELIEF_TYPES = ('preference', 'fact', 'observation', 'goal')
@@ -157,13 +210,14 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
                 if match["id"] == node["id"]:
                     continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
+                pair = normalize_pair(node["id"], match["id"])
                 if pair in checked:
                     continue
                 checked.add(pair)
 
                 already_checked = engine.db.conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                    pair_skip_sql("conflict_checked", _CONFLICT_TERMINAL_RESULTS),
+                    (*pair, _CONFLICT_ERROR_BACKOFF),
                 ).fetchone()
                 if already_checked:
                     continue
@@ -221,24 +275,50 @@ def run_conflict_detection(engine) -> None:
             logger.debug("Conflict detection skipped: LLM not enabled")
             return
 
-        candidates = _find_conflict_candidates(engine, limit=10000)
+        max_calls = getattr(engine.settings, "conflict_check_max_llm_calls_per_run", -1)
+        candidate_limit = max_calls if max_calls >= 0 else 10000
+        candidates = _find_conflict_candidates(engine, limit=candidate_limit)
         edges_created = 0
         dirty_nodes: dict[str, list[Connection]] = {}
+        llm_calls = 0
+        consecutive_failures = 0
 
         for candidate in candidates:
+            if consecutive_failures >= 3:
+                logger.warning("Conflict detection: 3 consecutive LLM failures, aborting run")
+                break
+            if max_calls >= 0 and llm_calls >= max_calls:
+                break
+
             node_a = candidate["node_a"]
             node_b = candidate["node_b"]
+            pair = normalize_pair(node_a["id"], node_b["id"])
 
             llm_result = _llm_check_conflict(settings, node_a, node_b)
+            llm_calls += 1
+            _now = datetime.now(timezone.utc).isoformat()
+
             if llm_result is None:
+                # LLM unavailable or unparseable output -> terminal 'error', backoff-retried.
+                consecutive_failures += 1
+                _record_terminal(engine, pair, "error", _now)
                 continue
+
+            if llm_result is _INCONSISTENT:
+                # LLM answered but the response was semantically inconsistent -> terminal
+                # 'none', not 'error' (does not churn on the backoff retry window).
+                consecutive_failures = 0
+                _record_terminal(engine, pair, "none", _now)
+                continue
+
+            consecutive_failures = 0
+
             if not llm_result.get("conflict"):
-                continue
-            if not llm_result.get("same_subject", True):
+                _record_terminal(engine, pair, "none", _now)
                 continue
 
             explanation = llm_result.get("explanation", "")
-            now = datetime.now(timezone.utc).isoformat()
+            now = _now
             conflict_type = llm_result.get("type", "tension")
 
             with engine.db.transaction() as db_conn:
@@ -265,6 +345,10 @@ def run_conflict_detection(engine) -> None:
                     edge_type_str = "contradicts"
                     source_id, target_id = node_a["id"], node_b["id"]
 
+                db_conn.execute(
+                    "INSERT OR REPLACE INTO conflict_checked (node_a, node_b, result, checked_at) "
+                    "VALUES (?, ?, ?, ?)", (*pair, conflict_type, now))
+
             md_conn = Connection(
                 target=target_id,
                 edge=EdgeType(edge_type_str),
@@ -287,6 +371,11 @@ def run_conflict_detection(engine) -> None:
 
         if edges_created:
             logger.info("Conflict detector created %d edges", edges_created)
+        logger.info(
+            "Conflict detection run: llm_calls=%d edges=%d cap=%d cap_hit=%s",
+            llm_calls, edges_created, max_calls,
+            bool(max_calls >= 0 and llm_calls >= max_calls),
+        )
 
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)

@@ -19,8 +19,17 @@ class IndexBuilder:
         self.db = db
         self.file_store = file_store
 
-    def full_rebuild(self) -> int:
-        """Drop and rebuild the entire index from markdown files. Returns node count."""
+    def full_rebuild(self, *, allow_partial: bool = False) -> int:
+        """Drop and rebuild the entire index from markdown files. Returns node count.
+
+        Atomic: DELETE + both insert passes run in ONE transaction, and the method aborts
+        (-> ROLLBACK) rather than commit a partial index when any source file fails to
+        index. A partial failure or an fd-exhaustion storm therefore preserves the prior
+        committed state instead of persisting a truncated index. Pass allow_partial=True
+        to accept a partial rebuild anyway (e.g. known-corrupt files that should be skipped).
+        """
+        paths = list(self.file_store.list_paths())
+        count = 0
         with self.db.transaction() as conn:
             conn.execute("DELETE FROM node_tags")
             conn.execute("DELETE FROM edges")
@@ -31,14 +40,11 @@ class IndexBuilder:
             except Exception:
                 pass  # table may not exist
 
-        # Mass reindex re-allocates seq from the durable counter; clear the watermark so the
-        # rebuilt store is reprocessed even if the counter was also reset (wiped meta).
-        self.db.conn.execute("DELETE FROM meta WHERE key = 'auto_link_watermark'")
+            # Mass reindex re-allocates seq from the durable counter; clear the watermark so
+            # the rebuilt store is reprocessed even if the counter was also reset (wiped meta).
+            conn.execute("DELETE FROM meta WHERE key = 'auto_link_watermark'")
 
-        # Two-pass: nodes first, then edges (to satisfy FK constraints)
-        paths = list(self.file_store.list_paths())
-        count = 0
-        with self.db.transaction():
+            # Two-pass: nodes first, then edges (to satisfy FK constraints)
             for path in paths:
                 try:
                     self._index_file_nodes_only(path)
@@ -46,11 +52,35 @@ class IndexBuilder:
                 except Exception as e:
                     logger.warning("Failed to index %s: %s", path, e)
 
+            # Never commit a partial index when the source-of-truth files exist. A mass or
+            # partial failure (e.g. fd exhaustion) would otherwise persist a truncated index —
+            # the exact 2026-07-05 incident. Raising here rolls the whole transaction back.
+            if paths and not allow_partial and count != len(paths):
+                failed = len(paths) - count
+                raise RuntimeError(
+                    f"full_rebuild indexed {count}/{len(paths)} files ({failed} failed); "
+                    "aborting to avoid persisting a partial index (pass allow_partial=True "
+                    "to override)"
+                )
+
+            edge_failures = 0
             for path in paths:
                 try:
                     self._index_file_edges(path)
                 except Exception as e:
+                    edge_failures += 1
                     logger.warning("Failed to index edges for %s: %s", path, e)
+            if edge_failures:
+                # Edges are DERIVED (auto_linker regenerates them; the watermark was cleared above),
+                # so a per-file edge failure is best-effort and must NOT abort the rebuild the way a
+                # missing node does — aborting on one bad link would roll back every good node and
+                # could leave the store empty, the exact failure this rebuild guards against. Surface
+                # the aggregate so the loss is not swallowed silently (council-pr H1).
+                logger.error(
+                    "full_rebuild: %d/%d files failed edge indexing; nodes are complete, edges are "
+                    "best-effort and will be rebuilt by auto_linker",
+                    edge_failures, len(paths),
+                )
 
         return count
 

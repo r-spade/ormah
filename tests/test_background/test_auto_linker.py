@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 from unittest.mock import patch, MagicMock
 
+import pytest
+
+from ormah.background import auto_linker
 from ormah.models.node import CreateNodeRequest, NodeType
 
 _LLM_PATCH = "ormah.background.llm_client.llm_generate"
@@ -411,3 +415,97 @@ def test_checked_pairs_invalidated_on_update(engine):
         run_auto_linker(engine)
 
     assert mock_llm.call_count >= 1  # LLM was called again for this pair
+
+
+def _rows():
+    a = {"title": "Uses SQLite", "type": "fact", "space": "proj", "content": "The API stores data in SQLite."}
+    b = {"title": "SQLite chosen for API", "type": "decision", "space": "proj", "content": "Chose SQLite for the API layer."}
+    return a, b
+
+
+def test_classify_link_passes_strict_schema(monkeypatch):
+    captured = {}
+    def spy(settings, prompt, **kwargs):
+        captured.update(kwargs)
+        return '{"relationship": "related_to", "reason": "same subject"}'
+    monkeypatch.setattr("ormah.background.llm_client.llm_generate", spy)
+    a, b = _rows()
+    result = auto_linker._llm_classify_link(object(), a, b)
+    rf = captured["response_format"]
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["schema"] is auto_linker._LINK_RESPONSE_SCHEMA
+    assert result["relationship"] == "related_to"
+
+
+def test_classify_link_fail_closed_when_llm_unavailable(monkeypatch):
+    monkeypatch.setattr("ormah.background.llm_client.llm_generate", lambda *a, **k: None)
+    a, b = _rows()
+    assert auto_linker._llm_classify_link(object(), a, b) is None
+
+
+def test_run_auto_link_stops_at_cap(monkeypatch, engine):
+    """Cap bounds LLM calls across the whole run (mirrors test_duplicate_merger.py:248-261)."""
+    calls = {"n": 0}
+    def _spy(settings, node_row, other_row):
+        calls["n"] += 1
+        return {"relationship": "none", "reason": "x"}
+    monkeypatch.setattr(auto_linker, "_llm_classify_link", _spy)
+
+    # Three mutually-similar pairs -> up to 3+ candidate pairs available.
+    _create_pair(engine, title_a="A", content_a="shared topic alpha", title_b="B", content_b="shared topic alpha beta")
+    _create_pair(engine, title_a="C", content_a="shared topic alpha gamma", title_b="D", content_b="shared topic alpha delta")
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.auto_link_max_llm_calls_per_run = 1
+    _reset_adapter()
+
+    auto_linker.run_auto_linker(engine)
+
+    assert calls["n"] == 1
+
+
+def test_run_auto_link_watermark_stops_on_llm_cap(monkeypatch, engine):
+    """Cap hit mid-node (candidate pairs still unclassified) must NOT advance the watermark
+    past that node — otherwise the unclassified pairs are silently lost."""
+    from ormah.background.auto_linker import _get_watermark, _select_nodes_after
+
+    calls = {"n": 0}
+    def _spy(settings, node_row, other_row):
+        calls["n"] += 1
+        return {"relationship": "none", "reason": "x"}
+    monkeypatch.setattr(auto_linker, "_llm_classify_link", _spy)
+
+    # Three mutually-similar nodes so the first node in seq order has >1 candidate match.
+    id_a, _ = _create_pair(engine, title_a="A", content_a="shared topic alpha",
+                            title_b="B", content_b="shared topic alpha beta")
+    _create_pair(engine, title_a="C", content_a="shared topic alpha gamma",
+                 title_b="D", content_b="shared topic alpha delta")
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.auto_link_max_llm_calls_per_run = 1
+    _reset_adapter()
+
+    rows = _select_nodes_after(engine.db.conn, 0, limit=100)
+    first_seq = rows[0]["seq"]
+
+    auto_linker.run_auto_linker(engine)
+
+    wm = _get_watermark(engine.db.conn)
+    assert calls["n"] == 1  # proves the node was genuinely interrupted mid-node, not never started
+    assert wm < first_seq  # watermark stayed before the interrupted node
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+def test_real_claude_cli_classify_link_returns_valid_relationship(engine):
+    """End-to-end: --json-schema -> structured_output round-trips for the link prompt."""
+    engine.settings.llm_provider = "claude_cli"
+    _reset_adapter()
+
+    a, b = _rows()
+    result = auto_linker._llm_classify_link(engine.settings, a, b)
+
+    assert result is not None
+    assert result["relationship"] in (
+        "supports", "contradicts", "part_of", "depends_on", "related_to", "none",
+    )

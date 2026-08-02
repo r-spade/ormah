@@ -402,9 +402,21 @@ def _spawn_background_store(transcript_path: Path, cwd: str, session_id: str) ->
         pass  # fire and forget
 
 
+def _whisper_store_timeout(s) -> float:
+    """Client timeout for whisper-out. When the ingest provider is claude_cli the
+    server-side extraction can run up to claude_cli_timeout_seconds, so the client
+    timeout must cover that budget (plus margin) or it fires first and the cursor
+    never advances (permanent stall on the same slice)."""
+    timeout = 60.0
+    ingest_provider = s.ingest_llm_provider or s.llm_provider
+    if ingest_provider == "claude_cli":
+        timeout = max(timeout, s.claude_cli_timeout_seconds + 15.0)
+    return timeout
+
+
 def _whisper_store_client() -> httpx.Client:
     """Client with longer timeout for whisper-out — extraction can take 30s+."""
-    return httpx.Client(base_url=BASE, timeout=60.0)
+    return httpx.Client(base_url=BASE, timeout=_whisper_store_timeout(settings))
 
 
 _WHISPER_CURSOR_DIR = Path(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))) / "ormah"
@@ -501,8 +513,20 @@ def cmd_whisper_store(args):
         with _whisper_store_client() as c:
             r = c.post("/ingest/conversation", json=body, params=params)
             r.raise_for_status()
+            resp = r.json()
+            # Advance the cursor ONLY on an explicit successful extraction. /ingest/conversation
+            # returns HTTP 200 {"status":"processed"} on success (even extracted==0 — a
+            # legitimate empty extraction that MUST advance, else the same slice reprocesses
+            # forever) and {"status":"error"} when extraction fails (e.g. claude_cli returned
+            # None). Anything else — a non-object body from a rogue proxy (null/list/number,
+            # whose .get() would raise), a missing status, or an unrecognized status — is
+            # treated as failure: do NOT advance, so the slice is retried rather than lost.
+            extraction_ok = isinstance(resp, dict) and resp.get("status") == "processed"
     except Exception:
         # Server down, timeout, or any error — exit silently, never block compaction
+        sys.exit(0)
+
+    if not extraction_ok:
         sys.exit(0)
 
     # Update cursor only after successful extraction, to the closed boundary so a

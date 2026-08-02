@@ -40,6 +40,24 @@ def test_valid_providers():
         assert s.llm_provider == p
 
 
+# --- Duplicate detection LLM call cap ---
+
+def test_dedup_cap_default_sentinel_and_validator():
+    assert Settings().duplicate_check_max_llm_calls_per_run == 100
+    assert Settings(duplicate_check_max_llm_calls_per_run=-1).duplicate_check_max_llm_calls_per_run == -1
+    with pytest.raises(ValueError):
+        Settings(duplicate_check_max_llm_calls_per_run=-2)
+
+
+# --- Conflict detection LLM call cap ---
+
+def test_conflict_cap_default_sentinel_and_validator():
+    assert Settings().conflict_check_max_llm_calls_per_run == 100
+    assert Settings(conflict_check_max_llm_calls_per_run=-1).conflict_check_max_llm_calls_per_run == -1
+    with pytest.raises(ValueError):
+        Settings(conflict_check_max_llm_calls_per_run=-2)
+
+
 def test_llm_provider_defaults_to_none():
     s = _settings()
     assert s.llm_provider == "none"
@@ -76,6 +94,34 @@ def test_llm_num_predict_env(monkeypatch):
     monkeypatch.setenv("ORMAH_LLM_NUM_PREDICT", "1024")
     s = Settings(memory_dir="/tmp/ormah_test")
     assert s.llm_num_predict == 1024
+
+
+# --- ingest_llm_provider / ingest_llm_model ---
+
+def test_ingest_llm_provider_and_model_override():
+    s = _settings(llm_provider="ollama", ingest_llm_provider="claude_cli", ingest_llm_model="haiku")
+    assert s.ingest_llm_provider == "claude_cli"
+    assert s.ingest_llm_model == "haiku"
+
+
+def test_ingest_llm_provider_without_model_raises():
+    with pytest.raises(ValidationError, match="ingest_llm_model is required"):
+        _settings(ingest_llm_provider="claude_cli")
+
+
+def test_empty_ingest_llm_provider_does_not_require_model():
+    s = _settings()
+    assert s.ingest_llm_provider == ""
+    assert s.ingest_llm_model == ""
+
+
+def test_claude_cli_timeout_must_be_positive():
+    with pytest.raises(ValidationError, match="claude_cli_timeout_seconds must be >= 1"):
+        _settings(claude_cli_timeout_seconds=0)
+
+
+def test_claude_cli_timeout_default_is_valid():
+    assert _settings().claude_cli_timeout_seconds >= 1
 
 
 def test_llm_num_predict_zero():

@@ -12,6 +12,19 @@ logger = logging.getLogger(__name__)
 
 _WATERMARK_KEY = "auto_link_watermark"
 
+_LINK_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "relationship": {
+            "type": "string",
+            "enum": ["supports", "contradicts", "part_of", "depends_on", "related_to", "none"],
+        },
+        "reason": {"type": ["string", "null"]},
+    },
+    "required": ["relationship", "reason"],
+    "additionalProperties": False,
+}
+
 
 def _get_watermark(conn) -> int:
     """Return the seq of the last fully-processed node, or 0 if unset."""
@@ -135,7 +148,12 @@ def _llm_classify_link(settings, node_row, other_row) -> dict | None:
         content_b=other_row["content"][:2000],
     )
 
-    raw = llm_generate(settings, prompt, json_mode=True)
+    raw = llm_generate(
+        settings,
+        prompt,
+        json_mode=True,
+        response_format={"type": "json_schema", "json_schema": {"schema": _LINK_RESPONSE_SCHEMA}},
+    )
     if raw is None:
         return None  # LLM UNAVAILABLE — transient; caller leaves the node unresolved
 
@@ -328,16 +346,20 @@ def run_auto_linker(engine) -> None:
         threshold = settings.auto_link_similarity_threshold
         cross_space_penalty = settings.auto_link_cross_space_penalty
         max_edges = settings.auto_link_max_edges_per_run
+        max_calls = getattr(engine.settings, "auto_link_max_llm_calls_per_run", -1)
 
         watermark = _get_watermark(conn)
         nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
         created = 0
+        llm_calls = 0
         last_complete: int | None = None
 
         for node in nodes:
             if created >= max_edges:
                 break  # batch budget spent; do not advance past this node
+            if max_calls >= 0 and llm_calls >= max_calls:
+                break  # LLM-call budget spent; do not advance past this node
 
             node_resolved = True
             text = f"{node['title'] or ''} {node['content']}".strip()
@@ -390,7 +412,14 @@ def run_auto_linker(engine) -> None:
                     if other is None:
                         continue
 
+                    # Placed AFTER the filters (unlike the max_edges guard above): only a match
+                    # that actually reaches the LLM should trip the cap, else a node whose
+                    # remaining pairs are all pre-filtered would falsely stall the watermark.
+                    if max_calls >= 0 and llm_calls >= max_calls:
+                        node_resolved = False  # interrupted mid-node
+                        break
                     llm_result = _llm_classify_link(settings, node, other)
+                    llm_calls += 1
                     if llm_result is None:
                         # LLM UNAVAILABLE (raw None) — transient. Leave node unresolved so the
                         # watermark does not pass it. Not a poison: if the LLM is down, EVERY node
@@ -415,6 +444,10 @@ def run_auto_linker(engine) -> None:
             _set_watermark(engine, last_complete)
         if created:
             logger.info("Auto-linker created %d edges", created)
+        logger.info(
+            "Auto-linker run: llm_calls=%d cap=%d cap_hit=%s",
+            llm_calls, max_calls, bool(max_calls >= 0 and llm_calls >= max_calls),
+        )
 
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)

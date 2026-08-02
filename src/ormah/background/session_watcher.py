@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,7 +17,12 @@ from threading import Event, Lock, Thread, Timer
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from ormah.engine.memory_engine import MemoryEngine
+from ormah.background.llm_client import ingest_provider_configured
+from ormah.engine.memory_engine import (
+    EXTRACT_ERR_CALL_FAILED,
+    EXTRACT_ERR_NO_PROVIDER,
+    MemoryEngine,
+)
 from ormah.text.tokens import distinctive_tokens
 from ormah.transcript.parser import (
     TranscriptResult,
@@ -37,11 +43,11 @@ class IngestResult(Enum):
 
 _STATE_FILENAME = ".session_watcher_state"
 MAX_RECONCILE_RETRIES = 3
+MAX_EXTRACT_FAILURES = 3  # per-slice extraction failures (provider present) before skipping it
 _HEURISTIC_SOURCE = "transcript_watcher_heuristic"
 _LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
 _HEURISTIC_AFFINITY_SOURCE = "auto_heuristic"
 _LLM_JUDGE_AFFINITY_SOURCE = "auto_llm_judge"
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
 _DEFAULT_SESSION_WATCHER_DIR = Path("~/.claude/projects")
 _CODEX_SESSION_WATCHER_DIR = Path("~/.codex/sessions")
 
@@ -157,25 +163,6 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     }
 
 
-def _extract_json(raw: str) -> str:
-    """Extract JSON from an LLM response that may contain fences or prose."""
-    stripped = raw.strip()
-    if stripped.startswith(("{", "[")):
-        return stripped
-
-    match = _FENCE_RE.search(raw)
-    if match:
-        return match.group(1).strip()
-
-    for start_char, end_char in [("{", "}"), ("[", "]")]:
-        start = raw.find(start_char)
-        end = raw.rfind(end_char)
-        if start != -1 and end > start:
-            return raw[start : end + 1]
-
-    return stripped
-
-
 def _normalise_judge_verdict(raw: object) -> str:
     """Map loose LLM verdict labels to the canonical feedback verdicts."""
     value = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
@@ -254,7 +241,7 @@ def _llm_judge_whisper_usage(
     if not rows:
         return {}
 
-    from ormah.background.llm_client import llm_generate
+    from ormah.background.llm_client import extract_json, llm_generate
 
     candidates = [
         {
@@ -285,19 +272,10 @@ def _llm_judge_whisper_usage(
         max_tokens=512,
     )
     if raw is None:
-        logger.info("LLM feedback judge schema call failed; falling back to JSON object mode")
-        raw = llm_generate(
-            engine.settings,
-            prompt,
-            json_mode=True,
-            temperature=0,
-            max_tokens=512,
-        )
-    if raw is None:
         return {}
 
     try:
-        parsed = json.loads(_extract_json(raw))
+        parsed = json.loads(extract_json(raw))
     except (json.JSONDecodeError, TypeError, ValueError):
         logger.warning("LLM returned invalid JSON for feedback judgment")
         return {}
@@ -587,9 +565,11 @@ def _record_whisper_usage_signals(
 def _is_subagent_transcript(path: Path) -> bool:
     """True for subagent transcripts (Claude Code writes them under ``<uuid>/subagents/``).
 
-    These are internal agent scratch, not user-facing sessions — ingesting them balloons
-    the store with low-value granular memories under a junk ``subagents`` space. Matches a
-    ``subagents`` segment at any depth so nested layouts are covered too.
+    Skipped for cost and redundancy, not for low value: a subagent transcript is large
+    (often ~10x a normal session), so ingesting one would burn many extraction calls, and
+    its deliverable already reaches the store through the parent session's tool-result — only
+    the intermediate tool-call noise is dropped. Matches a ``subagents`` segment at any depth
+    so nested layouts are covered too.
     """
     return "subagents" in path.parts
 
@@ -728,13 +708,36 @@ def _save_state(watch_dir: Path, state: dict) -> None:
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def _commit_state(state: dict, rel: str, entry: dict, state_lock, watch_dir: Path) -> None:
+    """Write one state entry and persist, honoring the optional cross-thread lock."""
+    if state_lock is not None:
+        with state_lock:
+            state[rel] = entry
+            _save_state(watch_dir, state)
+    else:
+        state[rel] = entry
+        _save_state(watch_dir, state)
+
+
+def _should_flush(is_idle: bool, capped: bool) -> bool:
+    """A Batch closes once idle, or once the parser filled a full flush_bytes batch.
+
+    Gating on ``capped`` (not ``pending >= flush_bytes``) matters: break-before capping
+    guarantees a multi-turn slice's pending bytes stay BELOW flush_bytes, so a
+    byte-threshold comparison would never fire for the common multi-turn case. ``capped``
+    is the parser's own "a full batch is ready, more closed content remains" signal.
+    """
+    return is_idle or capped
+
+
 def _ingest_session(
     engine: MemoryEngine,
     path: Path,
     state: dict,
     watch_dir: Path,
     min_turns: int,
-    idle_threshold: float = 30.0,
+    idle_threshold: float = 600.0,
+    flush_bytes: int = 60000,
     on_defer_active=None,
     state_lock=None,
 ) -> IngestResult:
@@ -775,7 +778,7 @@ def _ingest_session(
         prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
 
     try:
-        result = parse_transcript(path, start_offset=prev_offset)
+        result = parse_transcript(path, start_offset=prev_offset, max_bytes=flush_bytes)
         if should_rewind(result, prev_offset):
             # Orphan with NO forward progress: a genuine cursor left mid-response by an
             # older version. Re-parse the whole file so the dropped tail is re-paired with
@@ -785,12 +788,17 @@ def _ingest_session(
             original_offset = prev_offset
             logger.info("Session watcher recovering legacy mid-response cursor for %s", rel)
             prev_offset = 0
-            result = parse_transcript(path, start_offset=0)
-            if result.safe_end_offset <= original_offset:
+            # UNCAPPED probe: the progress decision must read the true whole-file boundary.
+            # A capped re-parse of a file whose cursor sits past max_bytes would report
+            # safe_end_offset <= original_offset and park a perfectly recoverable transcript.
+            # Only the decision is uncapped; the work below still drains in max_bytes slices.
+            probe = parse_transcript(path, start_offset=0)
+            if probe.safe_end_offset <= original_offset:
                 # The rewind itself made no progress: the "orphan" tail is a still-open
                 # in-flight response, not a recoverable one. ADR-0003: a no-progress
                 # transcript parks, it does not re-extract the closed prefix every tick.
                 return IngestResult.NO_PROGRESS
+            result = parse_transcript(path, start_offset=0, max_bytes=flush_bytes)
     except Exception as e:  # noqa: BLE001 - transcript parsers can raise provider-specific errors
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS
@@ -806,13 +814,20 @@ def _ingest_session(
     payload_users = result.safe_user_turn_count
     payload_turns = result.safe_turns
 
-    # When the file looks idle/finished, commit whatever is closed even below min_turns,
+    # When the file looks idle/finished, commit whatever is closed even below flush_bytes,
     # so a short finished session is not stranded.
     try:
         age = time.time() - path.stat().st_mtime
     except OSError:
         age = idle_threshold + 1  # treat unstatable file as idle
     is_idle = age > idle_threshold
+
+    # Salience: don't extract from a below-threshold window unless the session is finished (idle).
+    # A short but complete session is still captured; a short ACTIVE window defers to accumulate.
+    if not is_idle and payload_users < min_turns:
+        if on_defer_active is not None:
+            on_defer_active()
+        return IngestResult.TRANSIENT
 
     # Nothing new to commit at the closed boundary.
     if payload_offset <= prev_offset:
@@ -823,8 +838,10 @@ def _ingest_session(
             return IngestResult.TRANSIENT  # will grow; retry, never park
         return IngestResult.NO_PROGRESS   # idle/frozen safe boundary -> park-eligible
 
-    # Short tail on an active session — defer until more turns close or the session idles.
-    if not is_idle and payload_users < min_turns:
+    # Batch gate: flush once idle, or once the parser filled a full flush_bytes batch
+    # (result.capped). Below that, defer so a Batch accumulates instead of round-tripping
+    # the LLM per turn.
+    if not _should_flush(is_idle, result.capped):
         if on_defer_active is not None:
             on_defer_active()  # schedule a retry so the tail is not lost
         return IngestResult.TRANSIENT
@@ -838,6 +855,64 @@ def _ingest_session(
     space = _space_for_transcript(engine, path, result)
     signals_recorded = _record_whisper_usage_signals(engine, result, turns=payload_turns)
 
+    provider_on = ingest_provider_configured(engine.settings)
+
+    def _record_extract_failure(reason: str) -> IngestResult:
+        """Per-slice failure cap: a deterministically un-processable slice would otherwise pin the
+        byte-cursor forever (every retry re-parses the same slice, re-fails, never advances). Count
+        failures at this offset (persisted, so it survives restarts); once capped, SKIP the slice
+        forward and record the loss durably (not just a log line) so it can be replayed. Shared by
+        the extract-error-string path and the ingest-exception path so a deterministic non-string
+        failure cannot pin the cursor either (council-pr I1)."""
+        fail_count = (
+            existing.get("extract_fail_count", 0) + 1
+            if existing and existing.get("extract_fail_offset") == prev_offset
+            else 1
+        )
+        if fail_count >= MAX_EXTRACT_FAILURES:
+            skip_entry = dict(existing or {})
+            skipped_slices = list(skip_entry.get("skipped_slices", []))
+            skipped_slices.append({
+                "start": prev_offset,
+                "end": payload_offset,
+                "source_hash": h,
+                "reason": reason,
+                "at": datetime.now(UTC).isoformat(),
+            })
+            skip_entry.update({
+                "hash": h,
+                "end_offset": payload_offset,  # advance past the toxic slice
+                "last_ingested": datetime.now(UTC).isoformat(),
+                "session_id": result.session_id,
+                "source": result.source,
+                "space": space,
+                "skipped_slices": skipped_slices,
+            })
+            skip_entry.pop("extract_fail_offset", None)
+            skip_entry.pop("extract_fail_count", None)
+            _commit_state(state, rel, skip_entry, state_lock, watch_dir)
+            logger.error(
+                "Session watcher SKIPPING un-processable slice for %s after %d failures (%s): "
+                "cursor %d->%d, %d chars dropped (observable data loss)",
+                rel, fail_count, reason, prev_offset, payload_offset, payload_offset - prev_offset,
+            )
+            # The cursor advanced -> progress, like a successful empty extraction. If more
+            # closed content remains past this slice, drain it now instead of waiting for the
+            # next reconcile tick (mirror the success path below).
+            if result.capped and on_defer_active is not None:
+                on_defer_active()
+            return IngestResult.OK
+        # Not yet capped: persist the counter (cursor stays) and retry.
+        fail_entry = dict(existing or {})
+        fail_entry.update({
+            "hash": h,
+            "end_offset": prev_offset,  # cursor unchanged; slice will be retried
+            "extract_fail_offset": prev_offset,
+            "extract_fail_count": fail_count,
+        })
+        _commit_state(state, rel, fail_entry, state_lock, watch_dir)
+        return IngestResult.TRANSIENT
+
     try:
         ingested = engine.ingest_conversation(
             content=payload_conversation,
@@ -845,13 +920,44 @@ def _ingest_session(
             agent_id=result.source,
             extra_tags=["session-transcript"],
         )
-        if isinstance(ingested, str):
-            logger.warning("Session watcher ingestion failed for %s: %s", path, ingested)
-            return IngestResult.TRANSIENT
-        count = len(ingested) if isinstance(ingested, list) else 0
-    except Exception as e:  # noqa: BLE001 - engine providers surface heterogeneous failures
-        logger.warning("Session watcher ingestion error for %s: %s", path, e)
+    except sqlite3.OperationalError as e:
+        # A locked DB (WAL contention with the background scheduler) or a transient disk error is
+        # RETRYABLE — it resolves on a later tick. Never count it toward the cap: doing so would
+        # permanently skip a slice that would have committed once the lock cleared (council-pr H2).
+        # Some OperationalErrors are deterministic (a broken schema) — treating those as transient
+        # too is deliberate (council-pr M): a broken DB should stall LOUDLY (a warning every tick,
+        # no data loss), never silently skip data the way capping would. Loud stall > silent loss.
+        logger.warning("Session watcher transient storage error for %s: %s", path, e)
         return IngestResult.TRANSIENT
+    except OSError as e:
+        # Filesystem-level transient failure — same reasoning as the SQLite lock above.
+        logger.warning("Session watcher transient I/O error for %s: %s", path, e)
+        return IngestResult.TRANSIENT
+    except Exception as e:
+        logger.warning("Session watcher ingestion error for %s: %s", path, e)
+        # A DETERMINISTIC exception (e.g. a memory whose content always breaks a write) would pin
+        # the cursor forever, re-calling the LLM every tick — count it toward the per-slice cap so
+        # it skips after MAX_EXTRACT_FAILURES. Transient storage/IO errors are handled above and
+        # never reach here. Reaching here means extraction produced memories -> provider on (I1).
+        if not provider_on:
+            return IngestResult.TRANSIENT
+        return _record_extract_failure("ingest_exception_x3")
+
+    if isinstance(ingested, str):
+        # Provider-wide failures — no provider, or the LLM call itself failed (binary missing, auth,
+        # network, timeout -> raw is None) — resolve when the provider recovers, so they must NEVER
+        # burn the slice. Counting them would skip every slice during an outage after the cap = mass
+        # silent loss (council-pr H1). Only a SLICE-SPECIFIC failure (the LLM responded but its
+        # content was unparseable/invalid) is deterministic and counts toward the per-slice cap —
+        # this is the class that caused the original 1393x loop (a parse failure), still guarded.
+        if ingested in (EXTRACT_ERR_NO_PROVIDER, EXTRACT_ERR_CALL_FAILED):
+            logger.warning("Session watcher extraction deferred (provider-wide) for %s: %s",
+                           path, ingested)
+            return IngestResult.TRANSIENT
+        logger.warning("Session watcher ingestion failed (slice-specific) for %s: %s", path, ingested)
+        return _record_extract_failure("extract_failed_x3")
+
+    count = len(ingested) if isinstance(ingested, list) else 0
 
     new_node_ids = [m["node_id"] for m in ingested] if isinstance(ingested, list) else []
     # prev_offset == 0 means a fresh/whole re-ingest; don't carry stale cumulative
@@ -860,7 +966,13 @@ def _ingest_session(
     prev_node_ids = existing.get("node_ids", []) if carry else []
     prev_turns = existing.get("user_turns", 0) if carry else 0
 
-    entry = {
+    # Carry forward durable state (esp. skipped_slices — the quarantine trail) when advancing
+    # incrementally. Building the entry from scratch wiped skipped_slices, so the first successful
+    # slice after a capped one destroyed the durable loss record (council-pr C1). A fresh whole
+    # re-ingest (prev_offset == 0, carry False) legitimately starts clean — those byte ranges are
+    # being re-read, so any prior quarantine of them is stale.
+    entry = dict(existing) if carry else {}
+    entry.update({
         "hash": h,
         "end_offset": payload_offset,
         "last_ingested": datetime.now(UTC).isoformat(),
@@ -870,19 +982,20 @@ def _ingest_session(
         "user_turns": prev_turns + payload_users,
         "node_ids": prev_node_ids + new_node_ids,
         "signals_recorded": signals_recorded,
-    }
-    if state_lock is not None:
-        with state_lock:
-            state[rel] = entry
-            _save_state(watch_dir, state)
-    else:
-        state[rel] = entry
-        _save_state(watch_dir, state)
+    })
+    entry.pop("extract_fail_offset", None)  # a success at this offset clears the retry counter
+    entry.pop("extract_fail_count", None)
+    _commit_state(state, rel, entry, state_lock, watch_dir)
 
     logger.info(
         "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",
         rel, payload_users, count, signals_recorded,
     )
+    if result.capped and on_defer_active is not None:
+        # The parse stopped at the byte cap with more closed content past payload_offset —
+        # retrigger the retry timer so the next slice drains promptly instead of waiting
+        # for the next file-append event or reconcile tick.
+        on_defer_active()
     return IngestResult.OK
 
 
@@ -895,6 +1008,11 @@ def _scan_sessions(
     """Scan for new/changed JSONL transcripts. Returns count ingested."""
     state = _load_state(watch_dir)
     ingested = 0
+
+    # Read from settings so a tuned flush_bytes/idle_threshold is honored at catch-up too,
+    # not just _ingest_session's hardcoded defaults.
+    flush_bytes = getattr(engine.settings, "session_watcher_flush_bytes", 60000)
+    idle_threshold = getattr(engine.settings, "session_watcher_idle_threshold", 600.0)
 
     now = time.time()
     cutoff = now - (lookback_hours * 3600) if lookback_hours > 0 else 0
@@ -915,7 +1033,10 @@ def _scan_sessions(
         if rel not in state and lookback_hours < 0:
             continue
 
-        if _ingest_session(engine, jsonl_file, state, watch_dir, min_turns) == IngestResult.OK:
+        if _ingest_session(
+            engine, jsonl_file, state, watch_dir, min_turns,
+            idle_threshold=idle_threshold, flush_bytes=flush_bytes,
+        ) == IngestResult.OK:
             ingested += 1
 
     # Clean stale state entries for deleted files
@@ -940,8 +1061,10 @@ class SessionHandler(FileSystemEventHandler):
         watch_dir: Path,
         debounce_seconds: float,
         min_turns: int,
-        idle_threshold: float = 30.0,
+        idle_threshold: float = 600.0,
         lookback_hours: int = 72,
+        retry_seconds: float = 30.0,
+        flush_bytes: int = 60000,
     ) -> None:
         self.engine = engine
         self.watch_dir = watch_dir
@@ -949,6 +1072,8 @@ class SessionHandler(FileSystemEventHandler):
         self.min_turns = min_turns
         self.idle_threshold = idle_threshold
         self.lookback_hours = lookback_hours
+        self.retry_seconds = retry_seconds
+        self.flush_bytes = flush_bytes
         self._state = _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
         self._ingesting: set[str] = set()
@@ -962,6 +1087,8 @@ class SessionHandler(FileSystemEventHandler):
 
     def _schedule_ingest(self, path: Path) -> None:
         """Schedule a debounced ingestion for the given file."""
+        if self._stop_event.is_set():
+            return
         key = str(path)
         with self._lock:
             if self._stop_event.is_set():
@@ -978,14 +1105,17 @@ class SessionHandler(FileSystemEventHandler):
             timer.start()
 
     def _schedule_retry(self, path: Path) -> None:
-        """Re-attempt ingestion after idle_threshold so an active short tail is not lost."""
+        """Re-attempt ingestion after retry_seconds — decoupled from idle_threshold so an
+        FSEvents-miss (or a capped drain continuation) is retried promptly."""
+        if self._stop_event.is_set():
+            return
         key = str(path)
         with self._lock:
             if self._stop_event.is_set():
                 return
             if key in self._timers:
                 self._timers[key].cancel()
-            timer = Timer(self.idle_threshold, self._do_ingest, args=(path,))
+            timer = Timer(self.retry_seconds, self._do_ingest, args=(path,))
             timer.daemon = True
             self._timers[key] = timer
             timer.start()
@@ -1000,7 +1130,7 @@ class SessionHandler(FileSystemEventHandler):
         key = str(path)
         with self._lock:
             self._timers.pop(key, None)
-            if self._stop_event.is_set():
+            if self._stop_event.is_set():     # shutting down -> reject before claiming / touching DB
                 return IngestResult.TRANSIENT
             if key in self._ingesting:
                 self._pending.add(key)
@@ -1011,6 +1141,7 @@ class SessionHandler(FileSystemEventHandler):
             result = _ingest_session(
                 self.engine, path, self._state, self.watch_dir, self.min_turns,
                 idle_threshold=self.idle_threshold,
+                flush_bytes=self.flush_bytes,
                 on_defer_active=lambda: self._schedule_retry(path),
                 state_lock=self._state_lock,
             )
@@ -1209,6 +1340,8 @@ def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
             handler = SessionHandler(
                 engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
                 s.session_watcher_idle_threshold, s.session_watcher_lookback_hours,
+                retry_seconds=s.session_watcher_retry_seconds,
+                flush_bytes=s.session_watcher_flush_bytes,
             )
             observer = Observer()
             observer.schedule(handler, str(watch_dir), recursive=True)

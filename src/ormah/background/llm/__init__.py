@@ -13,19 +13,19 @@ __all__ = [
 ]
 
 
-def get_adapter(settings) -> LLMAdapter | None:
+def get_adapter(settings, provider: str | None = None, model: str | None = None) -> LLMAdapter | None:
     """Build an adapter from the application settings.
 
-    Returns ``None`` when ``llm_provider`` is ``"none"``.
+    Returns ``None`` when the resolved provider is ``"none"``.
     """
-    provider = settings.llm_provider
+    provider = provider or settings.llm_provider
     timeout = getattr(settings, "llm_timeout_seconds", 60)
 
     if provider == "ollama":
         from ormah.background.llm.ollama_adapter import OllamaAdapter
 
         return OllamaAdapter(
-            model=settings.llm_model,
+            model=model or settings.llm_model,
             base_url=settings.llm_base_url,
             timeout=timeout,
             num_predict=getattr(settings, "llm_num_predict", 4096),
@@ -34,9 +34,19 @@ def get_adapter(settings) -> LLMAdapter | None:
     if provider == "litellm":
         from ormah.background.llm.litellm_adapter import LiteLLMAdapter
 
-        return LiteLLMAdapter(model=settings.llm_model, timeout=timeout)
+        return LiteLLMAdapter(model=model or settings.llm_model, timeout=timeout)
 
     if provider == "none":
         return None
+
+    if provider == "claude_cli":
+        from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
+
+        return ClaudeCliAdapter(
+            model=model or settings.llm_model,
+            timeout=settings.claude_cli_timeout_seconds,
+            bin_path=settings.claude_cli_bin,
+            max_concurrency=settings.claude_cli_max_concurrency,
+        )
 
     raise NotImplementedError(f"LLM provider {provider!r} not implemented")
