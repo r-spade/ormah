@@ -119,6 +119,10 @@ def test_cloud_backup_interval_zero():
         _settings(cloud_backup_interval_hours=0)
 
 
+def test_cloud_api_url_default_uses_the_owned_production_domain():
+    assert Settings.model_fields["cloud_api_url"].default == "https://api.ormah.me"
+
+
 def test_backup_retention_zero():
     with pytest.raises(ValidationError, match="backup_retention_count must be >= 1"):
         _settings(backup_retention_count=0)

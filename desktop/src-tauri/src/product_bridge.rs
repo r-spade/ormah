@@ -652,6 +652,7 @@ fn local_error_message(status: u16, path: &str) -> &'static str {
         }
         409 => "The protection state changed; refresh and try again.",
         429 => "Too many requests; wait briefly and try again.",
+        502 | 503 => "Ormah Cloud is temporarily unavailable. Check your connection and try again.",
         _ => "The local Ormah operation could not be completed.",
     }
 }
@@ -1139,5 +1140,15 @@ mod tests {
             generic,
             "The protection state changed; refresh and try again."
         );
+    }
+
+    #[test]
+    fn cloud_availability_errors_have_an_actionable_message() {
+        for status in [502, 503] {
+            assert_eq!(
+                local_error_message(status, "/admin/account/request-code"),
+                "Ormah Cloud is temporarily unavailable. Check your connection and try again."
+            );
+        }
     }
 }
