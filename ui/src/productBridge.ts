@@ -282,6 +282,13 @@ const BACKUP_FAILURES = new Set([
   "store_busy",
 ]);
 
+const PROTECTION_RECONNECT_DELAYS_MS = [5_000, 15_000, 30_000, 60_000] as const;
+
+export function protectionReconnectDelay(attempt: number): number | null {
+  const index = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return PROTECTION_RECONNECT_DELAYS_MS[index] ?? null;
+}
+
 export function protectionRepairAction(status: ProtectionStatus): ProtectionRepairAction {
   if (status.protection_state === "verification_pending") return "verify";
   const reason = status.last_error_code;
@@ -364,7 +371,7 @@ export function protectionPresentation(state: ProtectionState): ProtectionPresen
       return {
         tone: "warning",
         title: "Cloud protection is offline",
-        detail: "Changes are safe here and will resume when the service is reachable.",
+        detail: "Ormah will retry automatically. Your changes remain safe on this device.",
         action: "retry",
       };
     case "paused":

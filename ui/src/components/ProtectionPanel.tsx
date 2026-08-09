@@ -24,6 +24,7 @@ import {
   productBridge,
   protectionCompletionSummary,
   protectionPresentation,
+  protectionReconnectDelay,
   protectionRepairAction,
   recoveryKitSectionVisible,
   type AccountStatus,
@@ -201,6 +202,7 @@ export default function ProtectionPanel({
   const checkoutCheckInFlight = useRef(false);
   const offerRequested = useRef(false);
   const preparedRestoreRef = useRef<ProtectionOperation | null>(null);
+  const reconnectAttempt = useRef(0);
   const desktop = isDesktopApp();
 
   const refresh = useCallback(async () => {
@@ -241,6 +243,21 @@ export default function ProtectionPanel({
     void refresh();
     requestAnimationFrame(() => headingRef.current?.focus());
   }, [open, refresh]);
+
+  useEffect(() => {
+    if (!open || status?.protection_state !== "offline") {
+      reconnectAttempt.current = 0;
+      return;
+    }
+    if (loading || operationIsActive(operation)) return;
+    const delay = protectionReconnectDelay(reconnectAttempt.current);
+    if (delay === null) return;
+    const timer = window.setTimeout(() => {
+      reconnectAttempt.current += 1;
+      void refresh();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [loading, open, operation?.status, refresh, status?.protection_state]);
 
   useEffect(() => {
     if (!open || !operationIsActive(operation)) return;
@@ -714,6 +731,7 @@ export default function ProtectionPanel({
       await runOperation(repairAction);
       return;
     }
+    reconnectAttempt.current = 0;
     await refresh();
   }, [beginProtection, offer, refresh, repairAction, runOperation, status]);
 

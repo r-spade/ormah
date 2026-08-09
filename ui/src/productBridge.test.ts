@@ -4,6 +4,7 @@ import {
   effectiveProtectionState,
   operationPhaseIsActive,
   protectionCompletionSummary,
+  protectionReconnectDelay,
   protectionRepairAction,
   protectionPresentation,
   recoveryKitSectionVisible,
@@ -48,8 +49,26 @@ describe("protectionPresentation", () => {
   it("does not imply local data loss while offline", () => {
     const result = protectionPresentation("offline");
 
-    expect(result.detail).toContain("safe here");
+    expect(result.detail).toContain("safe on this device");
+    expect(result.detail).toContain("retry automatically");
     expect(result.tone).toBe("warning");
+  });
+});
+
+describe("protectionReconnectDelay", () => {
+  it("backs off and then stops retrying", () => {
+    expect([0, 1, 2, 3, 4].map(protectionReconnectDelay)).toEqual([
+      5_000,
+      15_000,
+      30_000,
+      60_000,
+      null,
+    ]);
+  });
+
+  it("treats an invalid attempt as the first retry", () => {
+    expect(protectionReconnectDelay(Number.NaN)).toBe(5_000);
+    expect(protectionReconnectDelay(-3)).toBe(5_000);
   });
 });
 
