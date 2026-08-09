@@ -1209,6 +1209,23 @@ class MemoryEngine:
         self._reindex_all_embeddings()
         return count
 
+    def reload_restored_graph(self) -> int:
+        """Reload file, identity, and search state after a full memory restore."""
+
+        self.file_store = FileStore(self.settings.nodes_dir)
+        self.builder = IndexBuilder(self.db, self.file_store)
+        self._hybrid_search = None
+        count = self.rebuild_index()
+
+        row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'user_node_id'"
+        ).fetchone()
+        user_node_id = row["value"] if row is not None else None
+        if user_node_id is not None and self.file_store.load(user_node_id) is None:
+            raise RuntimeError("The restored Self pointer does not exist in the restored graph.")
+        self.user_node_id = user_node_id
+        return count
+
     def _reindex_all_embeddings(self) -> None:
         """Re-embed all nodes in the index."""
         try:

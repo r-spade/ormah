@@ -936,9 +936,82 @@ body.in-app .node-detail.tier-core {
 .protection-facts,
 .protection-warnings,
 .protection-progress,
-.recovery-kit-section {
+.recovery-kit-section,
+.restore-entry {
   padding: 18px 0;
   border-bottom: 1px solid var(--border);
+}
+
+.restore-entry > div:first-child,
+.restore-proof {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+}
+
+.restore-entry > div:first-child > svg,
+.restore-proof > svg {
+  margin-top: 1px;
+  color: var(--node-self);
+}
+
+.restore-entry strong,
+.restore-proof strong {
+  display: block;
+  color: var(--text-bright);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.restore-entry span,
+.restore-proof span {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.restore-entry .protection-secondary {
+  margin-top: 12px;
+}
+
+.restore-step .restore-proof {
+  margin-bottom: 16px;
+  padding: 11px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.restore-fallback {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  margin: 0 0 16px;
+  padding: 9px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--bg-surface);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.restore-complete .restore-proof > svg {
+  color: var(--edge-supports);
+}
+
+.restore-complete > p {
+  margin: 0 0 14px;
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.restore-complete > p strong {
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  font-weight: 500;
 }
 
 .protection-progress-heading {

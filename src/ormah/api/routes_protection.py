@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -110,6 +111,10 @@ def _operation_payload(operation: ProtectionOperation) -> dict[str, object]:
         "message": operation.message,
         "snapshot_id": operation.snapshot_id,
         "protection_intent_id": operation.protection_intent_id,
+        "verified_node_count": operation.verified_node_count,
+        "snapshot_created_at": operation.snapshot_created_at,
+        "skipped_newer_snapshots": operation.skipped_newer_snapshots,
+        "safety_backup_name": operation.safety_backup_name,
     }
 
 
@@ -236,6 +241,56 @@ def verify_now(body: VerifyRequest, request: Request):
         operation=f"verify:{suffix}",
         kind=ProtectionOperationKind.VERIFY,
         action=lambda: service.verify_now(body.snapshot_id),
+    )
+
+
+@router.post("/restore/prepare", status_code=status.HTTP_202_ACCEPTED)
+def prepare_restore(body: EmptyRequest, request: Request):
+    """Find and fully verify the newest locally restorable recovery point."""
+
+    del body
+    service = _service(request)
+    return _submit(
+        request,
+        operation="restore:prepare",
+        kind=ProtectionOperationKind.RESTORE,
+        action=service.prepare_restore,
+    )
+
+
+@router.post(
+    "/restore/{preparation_operation_id}/confirm",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def confirm_restore(
+    preparation_operation_id: str,
+    body: EmptyRequest,
+    request: Request,
+):
+    """Consume one verified preparation and replace live memory once."""
+
+    del body
+    try:
+        parsed_operation_id = uuid.UUID(preparation_operation_id)
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid restore preparation ID.") from exc
+    if parsed_operation_id.version != 4 or str(parsed_operation_id) != preparation_operation_id:
+        raise HTTPException(status_code=422, detail="Invalid restore preparation ID.")
+    prepared = _coordinator(request).claim_ready_result(
+        preparation_operation_id,
+        kind=ProtectionOperationKind.RESTORE,
+    )
+    if prepared is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This restore preparation is unavailable. Check the backup again.",
+        )
+    service = _service(request)
+    return _submit(
+        request,
+        operation=f"restore:confirm:{preparation_operation_id}",
+        kind=ProtectionOperationKind.RESTORE,
+        action=lambda: service.restore_prepared(prepared),
     )
 
 

@@ -82,6 +82,32 @@ class FakeProtectionService:
         self.calls.append(("verify_now", snapshot_id))
         return _operation(ProtectionOperationKind.VERIFY)
 
+    def prepare_restore(self):
+        self.calls.append(("prepare_restore",))
+        return ProtectionOperation(
+            operation_id="durable-restore-preparation",
+            kind=ProtectionOperationKind.RESTORE,
+            phase=ProtectionOperationPhase.READY,
+            state=ProtectionState.PROTECTED,
+            snapshot_id=SNAPSHOT_ID,
+            verified_node_count=1817,
+            snapshot_created_at="2026-08-09T10:00:00+00:00",
+            prepared_backup_name="memory_private_prepared_name",
+        )
+
+    def restore_prepared(self, prepared):
+        self.calls.append(("restore_prepared", prepared.prepared_backup_name))
+        return ProtectionOperation(
+            operation_id="durable-restore",
+            kind=ProtectionOperationKind.RESTORE,
+            phase=ProtectionOperationPhase.COMPLETED,
+            state=ProtectionState.PROTECTED,
+            snapshot_id=prepared.snapshot_id,
+            verified_node_count=prepared.verified_node_count,
+            snapshot_created_at=prepared.snapshot_created_at,
+            safety_backup_name="memory_safety_backup",
+        )
+
 
 class FakeRecoveryKitService:
     def __init__(self):
@@ -167,6 +193,12 @@ def test_all_protection_routes_require_local_capability(protection_app):
         ("POST", "/admin/cloud/protection/disable", {}),
         ("POST", "/admin/cloud/protection/backup", {}),
         ("POST", "/admin/cloud/protection/verify", {}),
+        ("POST", "/admin/cloud/protection/restore/prepare", {}),
+        (
+            "POST",
+            f"/admin/cloud/protection/restore/{INTENT_ID}/confirm",
+            {},
+        ),
         ("POST", "/admin/cloud/protection/recovery-kit/prepare", {}),
         (
             "POST",
@@ -257,6 +289,7 @@ def test_product_status_redacts_paths_credentials_and_secret_material(
         ("/admin/cloud/protection/disable", {"delete_remote": True}),
         ("/admin/cloud/protection/backup", {"advance_head": True}),
         ("/admin/cloud/protection/verify", {"presigned_url": "https://example.test"}),
+        ("/admin/cloud/protection/restore/prepare", {"snapshot_id": SNAPSHOT_ID}),
         (
             "/admin/cloud/protection/recovery-kit/prepare",
             {"path": "/secret"},
@@ -315,6 +348,42 @@ def test_repeated_active_backup_joins_one_operation(protection_app):
     service.release_backup.set()
     assert _poll(client, first.json()["operation_id"])["status"] == "completed"
     assert service.calls.count(("backup_and_verify", "manual-ui")) == 1
+
+
+def test_restore_preparation_is_verified_then_claimed_once(protection_app):
+    client, service, _, _ = protection_app
+
+    response = client.post(
+        "/admin/cloud/protection/restore/prepare",
+        headers=HEADERS,
+        json={},
+    )
+    assert response.status_code == 202
+    preparation_id = response.json()["operation_id"]
+    prepared = _poll(client, preparation_id)
+
+    assert prepared["phase"] == "ready"
+    assert prepared["verified_node_count"] == 1817
+    assert prepared["snapshot_created_at"] == "2026-08-09T10:00:00+00:00"
+    assert "memory_private_prepared_name" not in str(prepared)
+
+    confirmed = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/confirm",
+        headers=HEADERS,
+        json={},
+    )
+    assert confirmed.status_code == 202
+    restored = _poll(client, confirmed.json()["operation_id"])
+    assert restored["phase"] == "completed"
+    assert restored["safety_backup_name"] == "memory_safety_backup"
+    assert ("restore_prepared", "memory_private_prepared_name") in service.calls
+
+    repeated = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/confirm",
+        headers=HEADERS,
+        json={},
+    )
+    assert repeated.status_code == 409
 
 
 def test_unknown_operation_returns_404(protection_app):

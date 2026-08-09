@@ -59,16 +59,22 @@ describe("operationPhaseIsActive", () => {
       "pending",
       "running",
       "preparing",
+      "discovering",
       "encrypting",
       "uploading",
       "finalizing",
       "downloading",
+      "decrypting",
+      "checking",
       "verifying",
       "rebuilding",
+      "safety_backup",
+      "restoring",
+      "reloading",
     ] as const) {
       expect(operationPhaseIsActive(phase)).toBe(true);
     }
-    for (const phase of ["completed", "failed", "canceled", null, undefined] as const) {
+    for (const phase of ["ready", "completed", "failed", "canceled", null, undefined] as const) {
       expect(operationPhaseIsActive(phase)).toBe(false);
     }
   });

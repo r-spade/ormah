@@ -10,7 +10,6 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
-from typing import Any
 import uuid
 
 import httpx
@@ -44,6 +43,14 @@ from ormah.cloud.keys import (
     write_recovery_kit,
 )
 from ormah.cloud.recovery import RecoveryKitService
+from ormah.cloud.restore import (
+    CloudRestoreError,
+    CloudRestoreValidationError,
+    PreparedCloudRestore,
+    prepare_cloud_restore,
+    restore_prepared_cloud_snapshot,
+    verify_extracted_bundle,
+)
 from ormah.cloud.settings import set_cloud_backup_enabled
 from ormah.cloud.state import (
     CURRENT_CLOUD_STATE_SCHEMA_VERSION,
@@ -63,11 +70,6 @@ from ormah.cloud.state import (
 )
 from ormah.cloud.store_lock import StoreLock, StoreLockTimeout
 from ormah.cloud.transfer import download_file, put_file, sha256_file
-from ormah.index.builder import IndexBuilder
-from ormah.index.db import Database
-from ormah.index.graph import GraphIndex
-from ormah.store.file_store import FileStore
-from ormah.store.markdown import parse_node
 
 
 logger = logging.getLogger(__name__)
@@ -294,95 +296,26 @@ def _validated_sha256(value: object) -> str:
     return value
 
 
-def _probe_search(database: Database, nodes: list[Any]) -> None:
-    if not nodes:
-        raise RuntimeError("Restored snapshot has no active node available for a search probe.")
-    graph = GraphIndex(database)
-    for node in nodes:
-        words = re.findall(r"\w{2,}", f"{node.title or ''} {node.content}")
-        for word in sorted(words, key=len, reverse=True):
-            if any(result["id"] == node.id for result in graph.fts_search(word, limit=10)):
-                return
-    raise RuntimeError("Scratch search probe did not return a known restored node.")
-
-
 def _verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> int:
-    if info.store_id != expected_store_id:
-        raise RuntimeError(
-            f"Bundle store id {info.store_id!r} does not match local store {expected_store_id!r}."
-        )
-
     try:
-        active_nodes = []
-        for dirname in ("nodes", "deleted"):
-            for path in sorted((extracted / dirname).glob("*.md")):
-                node = parse_node(path.read_text(encoding="utf-8"))
-                if dirname == "nodes":
-                    active_nodes.append(node)
-    except OSError as exc:
-        if _is_disk_full_error(exc):
-            raise
+        return verify_extracted_bundle(extracted, expected_store_id, info)
+    except CloudRestoreValidationError as exc:
         raise _VerificationStageError(
-            "A restored memory node could not be parsed.",
-            ProtectionReasonCode.NODE_PARSE_FAILED,
+            str(exc),
+            ProtectionReasonCode(exc.reason_code),
         ) from exc
-    except Exception as exc:
-        raise _VerificationStageError(
-            "A restored memory node could not be parsed.",
-            ProtectionReasonCode.NODE_PARSE_FAILED,
-        ) from exc
-
-    try:
-        resolve_backup_user_node_id(extracted)
-    except Exception as exc:
-        raise _VerificationStageError(
-            "The backup's active Self pointer does not match the restored memory graph.",
-            ProtectionReasonCode.SELF_POINTER_INVALID,
-        ) from exc
-
-    database = Database(extracted / "scratch-index" / "index.db")
-    try:
-        try:
-            database.init_schema()
-            rebuilt = IndexBuilder(database, FileStore(extracted / "nodes")).full_rebuild()
-        except OSError as exc:
-            if _is_disk_full_error(exc):
-                raise
-            raise _VerificationStageError(
-                "The scratch search index could not be rebuilt in this environment.",
-                ProtectionReasonCode.INDEX_ENVIRONMENT_UNAVAILABLE,
-            ) from exc
-        except Exception as exc:
-            raise _VerificationStageError(
-                "The scratch search index could not be rebuilt in this environment.",
-                ProtectionReasonCode.INDEX_ENVIRONMENT_UNAVAILABLE,
-            ) from exc
-        if rebuilt != info.node_count:
-            raise _VerificationStageError(
-                "The scratch index node count did not match the verified manifest.",
-                ProtectionReasonCode.INDEX_REBUILD_FAILED,
-            )
-        try:
-            _probe_search(database, active_nodes)
-        except Exception as exc:
-            raise _VerificationStageError(
-                "The scratch search probe did not return a restored memory.",
-                ProtectionReasonCode.SEARCH_PROBE_FAILED,
-            ) from exc
-        return rebuilt
-    finally:
-        database.close()
 
 
 class CloudProtectionService:
     """Reusable cloud protection operations constructed from application settings."""
 
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, *, engine=None) -> None:
         self.settings = settings
+        self.engine = engine
 
     @classmethod
     def from_engine(cls, engine) -> CloudProtectionService:
-        return cls(engine.settings)
+        return cls(engine.settings, engine=engine)
 
     def _message(self, value: object) -> str:
         return safe_error_message(value, getattr(self.settings, "account_token", None))
@@ -1779,6 +1712,196 @@ class CloudProtectionService:
             reason_code,
             message,
         )
+
+    def prepare_restore(self) -> ProtectionOperation:
+        """Find and fully verify the newest locally restorable cloud snapshot."""
+
+        operation_id = str(uuid.uuid4())
+        store_id = _existing_store_id(self.settings.memory_dir)
+        if store_id is None:
+            return ProtectionOperation(
+                operation_id,
+                ProtectionOperationKind.RESTORE,
+                ProtectionOperationPhase.FAILED,
+                ProtectionState.ATTENTION_REQUIRED,
+                ProtectionReasonCode.KEY_MISSING,
+                "Import your recovery kit before restoring memory on this device.",
+            )
+
+        def report(phase: str) -> None:
+            update_state(
+                store_id,
+                memory_dir=self.settings.memory_dir,
+                last_operation_id=operation_id,
+                last_operation_kind=ProtectionOperationKind.RESTORE,
+                last_operation_phase=ProtectionOperationPhase(phase),
+            )
+
+        try:
+            with StoreLock(self.settings.memory_dir):
+                state = _load_writable_state(store_id)
+                prepared = prepare_cloud_restore(self.settings, progress=report)
+                report("ready")
+                return ProtectionOperation(
+                    operation_id,
+                    ProtectionOperationKind.RESTORE,
+                    ProtectionOperationPhase.READY,
+                    _known_state(state),
+                    snapshot_id=prepared.snapshot_id,
+                    verified_node_count=prepared.verified_node_count,
+                    snapshot_created_at=prepared.snapshot_created_at,
+                    skipped_newer_snapshots=prepared.skipped_newer_snapshots,
+                    prepared_backup_name=prepared.backup_name,
+                )
+        except StoreLockTimeout:
+            return self._store_busy_operation(
+                operation_id,
+                ProtectionOperationKind.RESTORE,
+            )
+        except Exception as exc:
+            reason = (
+                ProtectionReasonCode(exc.reason_code)
+                if isinstance(exc, CloudRestoreError)
+                and exc.reason_code in ProtectionReasonCode._value2member_map_
+                else ProtectionReasonCode.RESTORE_FAILED
+            )
+            message = safe_product_error_message(
+                exc,
+                getattr(self.settings, "account_token", None),
+            )
+            try:
+                state = _load_writable_state(store_id)
+                update_state(
+                    store_id,
+                    memory_dir=self.settings.memory_dir,
+                    last_operation_id=operation_id,
+                    last_operation_kind=ProtectionOperationKind.RESTORE,
+                    last_operation_phase=ProtectionOperationPhase.FAILED,
+                    last_error_code=reason,
+                    last_error_message=message,
+                    last_error_at=_utc_now(),
+                )
+                protection_state = _known_state(state)
+            except Exception:
+                protection_state = ProtectionState.ATTENTION_REQUIRED
+            return ProtectionOperation(
+                operation_id,
+                ProtectionOperationKind.RESTORE,
+                ProtectionOperationPhase.FAILED,
+                protection_state,
+                reason,
+                message,
+            )
+
+    def restore_prepared(self, prepared: ProtectionOperation) -> ProtectionOperation:
+        """Apply one coordinator-held preparation through BackupService.restore()."""
+
+        operation_id = str(uuid.uuid4())
+        store_id = _existing_store_id(self.settings.memory_dir)
+        if (
+            store_id is None
+            or prepared.kind is not ProtectionOperationKind.RESTORE
+            or prepared.phase is not ProtectionOperationPhase.READY
+            or not prepared.prepared_backup_name
+            or not prepared.snapshot_id
+        ):
+            return ProtectionOperation(
+                operation_id,
+                ProtectionOperationKind.RESTORE,
+                ProtectionOperationPhase.FAILED,
+                ProtectionState.ATTENTION_REQUIRED,
+                ProtectionReasonCode.RESTORE_FAILED,
+                "The prepared recovery point is no longer available. Check again.",
+            )
+
+        def report(phase: str) -> None:
+            update_state(
+                store_id,
+                memory_dir=self.settings.memory_dir,
+                last_operation_id=operation_id,
+                last_operation_kind=ProtectionOperationKind.RESTORE,
+                last_operation_phase=ProtectionOperationPhase(phase),
+            )
+
+        try:
+            with StoreLock(self.settings.memory_dir):
+                state = _load_writable_state(store_id)
+                result = restore_prepared_cloud_snapshot(
+                    self.settings,
+                    PreparedCloudRestore(
+                        snapshot_id=prepared.snapshot_id,
+                        backup_name=prepared.prepared_backup_name,
+                        verified_node_count=prepared.verified_node_count or 0,
+                        snapshot_created_at=prepared.snapshot_created_at,
+                        skipped_newer_snapshots=prepared.skipped_newer_snapshots,
+                    ),
+                    rebuild_index=True,
+                    engine=self.engine,
+                    progress=report,
+                )
+                update_state(
+                    store_id,
+                    memory_dir=self.settings.memory_dir,
+                    last_operation_id=operation_id,
+                    last_operation_kind=ProtectionOperationKind.RESTORE,
+                    last_operation_phase=ProtectionOperationPhase.COMPLETED,
+                    last_error_code=None,
+                    last_error_message=None,
+                    last_error_at=None,
+                )
+                return ProtectionOperation(
+                    operation_id,
+                    ProtectionOperationKind.RESTORE,
+                    ProtectionOperationPhase.COMPLETED,
+                    _known_state(state),
+                    snapshot_id=result.snapshot_id,
+                    verified_node_count=result.restore.rebuilt_nodes,
+                    snapshot_created_at=prepared.snapshot_created_at,
+                    skipped_newer_snapshots=result.skipped_newer_snapshots,
+                    safety_backup_name=(
+                        result.restore.safety_backup.name
+                        if result.restore.safety_backup is not None
+                        else None
+                    ),
+                )
+        except StoreLockTimeout:
+            return self._store_busy_operation(
+                operation_id,
+                ProtectionOperationKind.RESTORE,
+                snapshot_id=prepared.snapshot_id,
+            )
+        except Exception as exc:
+            message = safe_product_error_message(
+                exc,
+                getattr(self.settings, "account_token", None),
+            )
+            try:
+                state = _load_writable_state(store_id)
+                update_state(
+                    store_id,
+                    memory_dir=self.settings.memory_dir,
+                    last_operation_id=operation_id,
+                    last_operation_kind=ProtectionOperationKind.RESTORE,
+                    last_operation_phase=ProtectionOperationPhase.FAILED,
+                    last_error_code=ProtectionReasonCode.RESTORE_FAILED,
+                    last_error_message=message,
+                    last_error_at=_utc_now(),
+                )
+                protection_state = _known_state(state)
+            except Exception:
+                protection_state = ProtectionState.ATTENTION_REQUIRED
+            return ProtectionOperation(
+                operation_id,
+                ProtectionOperationKind.RESTORE,
+                ProtectionOperationPhase.FAILED,
+                protection_state,
+                ProtectionReasonCode.RESTORE_FAILED,
+                message,
+                prepared.snapshot_id,
+                verified_node_count=prepared.verified_node_count,
+                snapshot_created_at=prepared.snapshot_created_at,
+                skipped_newer_snapshots=prepared.skipped_newer_snapshots,
+            )
 
     def verify_now(self, snapshot_id: str | None = None) -> ProtectionOperation:
         """Download and prove one committed snapshot entirely in scratch space."""

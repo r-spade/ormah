@@ -19,7 +19,7 @@ use url::Url;
 
 use crate::commands::base_url;
 
-const BRIDGE_VERSION: u16 = 1;
+const BRIDGE_VERSION: u16 = 2;
 const LOCAL_ADMIN_HEADER: &str = "X-Ormah-Local-Token";
 // Synchronous intent routes may wait for the canonical store lock for up to
 // 30 seconds. Keep the native request alive long enough to receive their
@@ -112,6 +112,11 @@ pub struct RecoveryKitActionResult {
 #[derive(Debug, Serialize)]
 pub struct PrintableRecoveryKitResult {
     opened: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecoveryKitImportResult {
+    status: &'static str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -247,6 +252,53 @@ pub async fn operation_status(
     let operation_id = validate_uuid4(&operation_id, "operation")?;
     let path = format!("/admin/cloud/protection/operations/{operation_id}");
     request_sanitized("GET", &path, None).await
+}
+
+#[tauri::command]
+pub async fn prepare_restore(window: WebviewWindow) -> Result<Value, String> {
+    require_product_origin(&window)?;
+    request_sanitized(
+        "POST",
+        "/admin/cloud/protection/restore/prepare",
+        Some(json!({})),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn confirm_restore(
+    window: WebviewWindow,
+    preparation_operation_id: String,
+) -> Result<Value, String> {
+    require_product_origin(&window)?;
+    let preparation_operation_id =
+        validate_uuid4(&preparation_operation_id, "restore preparation")?;
+    let path = format!("/admin/cloud/protection/restore/{preparation_operation_id}/confirm");
+    request_sanitized("POST", &path, Some(json!({}))).await
+}
+
+#[tauri::command]
+pub async fn import_recovery_kit<R: Runtime>(
+    app: AppHandle<R>,
+    window: WebviewWindow<R>,
+) -> Result<RecoveryKitImportResult, String> {
+    require_product_origin(&window)?;
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Choose your Ormah recovery kit")
+        .add_filter("Ormah recovery kit", &["md", "txt"])
+        .blocking_pick_file();
+    let Some(selected) = selected else {
+        return Ok(RecoveryKitImportResult { status: "canceled" });
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|_| "Could not use the selected recovery kit.".to_string())?;
+    let bytes = read_bounded_recovery_kit(&selected)
+        .map_err(|_| "The selected recovery kit is invalid or unavailable.".to_string())?;
+    import_recovery_kit_bytes(&bytes)?;
+    Ok(RecoveryKitImportResult { status: "imported" })
 }
 
 #[tauri::command]
@@ -439,6 +491,50 @@ fn read_bounded_recovery_kit_with_metadata(path: &Path) -> Result<(Vec<u8>, Meta
         return Err("The recovery kit is invalid.".to_string());
     }
     Ok((bytes, metadata))
+}
+
+struct TemporaryRecoveryMaterial(PathBuf);
+
+impl Drop for TemporaryRecoveryMaterial {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn import_recovery_kit_bytes(bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_RECOVERY_KIT_BYTES {
+        return Err("The selected recovery kit is invalid.".to_string());
+    }
+    let bin = crate::sidecar::find_ormah()
+        .ok_or_else(|| "The local Ormah runtime is unavailable.".to_string())?;
+    let path =
+        std::env::temp_dir().join(format!("ormah-recovery-import-{}.md", uuid::Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|_| "Could not securely stage the recovery kit.".to_string())?;
+    let temporary = TemporaryRecoveryMaterial(path.clone());
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "Could not securely stage the recovery kit.".to_string())?;
+    drop(file);
+
+    let output = crate::sidecar::clean_python_env(std::process::Command::new(bin))
+        .args(["cloud", "init", "--import-key"])
+        .arg(&temporary.0)
+        .arg("--json")
+        .output()
+        .map_err(|_| "Could not import the recovery kit.".to_string())?;
+    if !output.status.success() {
+        return Err("The recovery kit could not be imported on this device.".to_string());
+    }
+    Ok(())
 }
 
 fn save_selected_recovery_kit(
@@ -650,6 +746,9 @@ fn local_error_message(status: u16, path: &str) -> &'static str {
         409 if path == RECOVERY_CONFIRM_PATH => {
             "The saved recovery kit no longer matches current recovery material. Run `ormah cloud kit`, then save it again."
         }
+        409 if path.contains("/restore/") => {
+            "That checked recovery point is no longer available. Check it again."
+        }
         409 => "The protection state changed; refresh and try again.",
         429 => "Too many requests; wait briefly and try again.",
         502 | 503 => "Ormah Cloud is temporarily unavailable. Check your connection and try again.",
@@ -757,6 +856,7 @@ fn reject_forbidden_response_fields(value: &Value) -> Result<(), String> {
         "identity",
         "identities",
         "recoverykit",
+        "preparedbackupname",
     ];
     match value {
         Value::Object(values) => {
@@ -967,6 +1067,7 @@ mod tests {
             "path",
             "recovery-kit",
             "identity",
+            "prepared_backup_name",
         ] {
             let mut nested = serde_json::Map::new();
             nested.insert(key.to_string(), Value::String("secret".to_string()));

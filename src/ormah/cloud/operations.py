@@ -19,6 +19,7 @@ from ormah.cloud.state import (
     ProtectionIntentStatus,
     ProtectionOperation,
     ProtectionOperationKind,
+    ProtectionOperationPhase,
     load_state,
 )
 
@@ -68,6 +69,9 @@ class LocalOperation:
             "snapshot_id": result.snapshot_id if result else None,
             "protection_intent_id": result.protection_intent_id if result else None,
             "verified_node_count": result.verified_node_count if result else None,
+            "snapshot_created_at": result.snapshot_created_at if result else None,
+            "skipped_newer_snapshots": result.skipped_newer_snapshots if result else 0,
+            "safety_backup_name": result.safety_backup_name if result else None,
             "error_code": self.error_code,
         }
 
@@ -97,6 +101,7 @@ class ProtectionOperationCoordinator:
         self._operations: dict[str, LocalOperation] = {}
         self._active_by_key: dict[tuple[str, ...], str] = {}
         self._finished: deque[str] = deque()
+        self._claimed_results: set[str] = set()
         self._closed = False
 
     def submit(
@@ -131,6 +136,28 @@ class ProtectionOperationCoordinator:
         with self._lock:
             operation = self._operations.get(operation_id)
             return replace(operation) if operation is not None else None
+
+    def claim_ready_result(
+        self,
+        operation_id: str,
+        *,
+        kind: ProtectionOperationKind,
+    ) -> ProtectionOperation | None:
+        """Atomically claim one completed preparation for a follow-up action."""
+
+        with self._lock:
+            operation = self._operations.get(operation_id)
+            if (
+                operation is None
+                or operation.kind is not kind
+                or operation.status is not LocalOperationStatus.COMPLETED
+                or operation.result is None
+                or operation.result.phase is not ProtectionOperationPhase.READY
+                or operation_id in self._claimed_results
+            ):
+                return None
+            self._claimed_results.add(operation_id)
+            return replace(operation.result)
 
     def shutdown(self, *, wait: bool = True) -> None:
         with self._lock:
@@ -200,6 +227,7 @@ class ProtectionOperationCoordinator:
             while len(self._finished) > self._max_history:
                 expired_id = self._finished.popleft()
                 self._operations.pop(expired_id, None)
+                self._claimed_results.discard(expired_id)
 
 
 def resume_interrupted_enable(

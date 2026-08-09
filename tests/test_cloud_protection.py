@@ -462,8 +462,10 @@ def test_index_rebuild_failure_is_not_reported_as_backup_corruption(
     bundle, identity = _verification_bundle(tmp_path, settings, store_id)
     client = FakeCloudClient(bundle=bundle)
     _patch_verification(monkeypatch, client, bundle, identity)
+    from ormah.cloud import restore as cloud_restore
+
     monkeypatch.setattr(
-        protection,
+        cloud_restore,
         "IndexBuilder",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             RuntimeError("embedding model is unavailable")
@@ -538,14 +540,18 @@ def test_verification_reports_the_failed_restore_stage(
             ),
         )
     elif failure == "node":
+        from ormah.cloud import restore as cloud_restore
+
         monkeypatch.setattr(
-            protection,
+            cloud_restore,
             "parse_node",
             lambda *args: (_ for _ in ()).throw(ValueError(secret)),
         )
     else:
+        from ormah.cloud import restore as cloud_restore
+
         monkeypatch.setattr(
-            protection,
+            cloud_restore,
             "_probe_search",
             lambda *args: (_ for _ in ()).throw(RuntimeError("probe failed")),
         )

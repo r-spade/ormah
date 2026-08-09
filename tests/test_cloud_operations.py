@@ -132,6 +132,45 @@ def test_coordinator_bounds_finished_history():
         coordinator.shutdown()
 
 
+def test_ready_restore_preparation_can_only_be_claimed_once():
+    coordinator = ProtectionOperationCoordinator(max_workers=1)
+
+    def prepared_result():
+        return ProtectionOperation(
+            operation_id="durable-restore-preparation",
+            kind=ProtectionOperationKind.RESTORE,
+            phase=ProtectionOperationPhase.READY,
+            state=ProtectionState.PROTECTED,
+            snapshot_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            verified_node_count=42,
+            prepared_backup_name="private-prepared-backup",
+        )
+
+    try:
+        operation, _ = coordinator.submit(
+            key=("store", "restore", "prepare"),
+            kind=ProtectionOperationKind.RESTORE,
+            action=prepared_result,
+        )
+        completed = _wait_for_terminal(coordinator, operation.operation_id)
+        assert "private-prepared-backup" not in str(completed.to_payload())
+
+        claimed = coordinator.claim_ready_result(
+            operation.operation_id,
+            kind=ProtectionOperationKind.RESTORE,
+        )
+        repeated = coordinator.claim_ready_result(
+            operation.operation_id,
+            kind=ProtectionOperationKind.RESTORE,
+        )
+
+        assert claimed is not None
+        assert claimed.prepared_backup_name == "private-prepared-backup"
+        assert repeated is None
+    finally:
+        coordinator.shutdown()
+
+
 def test_startup_resumes_and_deduplicates_running_enable(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir()

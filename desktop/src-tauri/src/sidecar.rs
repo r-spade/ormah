@@ -207,8 +207,13 @@ fn should_upgrade(output: &[u8], required: &str) -> bool {
 /// AppImage mounts itself and sets PYTHONHOME/PYTHONPATH to paths inside the
 /// mount — any subprocess that spawns Python inherits them and fails to find
 /// the stdlib with "No module named 'encodings'".
-fn clean_python_env(mut cmd: std::process::Command) -> std::process::Command {
-    for var in &["PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONEXECUTABLE"] {
+pub(crate) fn clean_python_env(mut cmd: std::process::Command) -> std::process::Command {
+    for var in &[
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONEXECUTABLE",
+    ] {
         cmd.env_remove(var);
     }
     cmd

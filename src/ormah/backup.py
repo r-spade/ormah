@@ -11,6 +11,7 @@ import re
 import shutil
 import sqlite3
 import threading
+from typing import Callable
 
 from ormah.index.builder import IndexBuilder
 from ormah.index.db import Database
@@ -400,7 +401,13 @@ class BackupService:
             logger.info("Pruned %d old Ormah memory backups", len(removed))
         return removed
 
-    def restore(self, backup_ref: str, *, rebuild_index: bool = True) -> RestoreResult:
+    def restore(
+        self,
+        backup_ref: str,
+        *,
+        rebuild_index: bool = True,
+        progress: Callable[[str], None] | None = None,
+    ) -> RestoreResult:
         """Restore source-of-truth memory files from a backup.
 
         A safety backup of the current memory files is created before any
@@ -409,6 +416,8 @@ class BackupService:
         backup_path = self._resolve_backup_ref(backup_ref)
         restored_info = self._info_for(backup_path)
         user_node_id = resolve_backup_user_node_id(backup_path)
+        if progress is not None:
+            progress("safety_backup")
         safety_backup = self.create(reason=f"pre-restore:{restored_info.name}", prune=False)
 
         self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -418,6 +427,8 @@ class BackupService:
         restore_tmp.mkdir(parents=True)
 
         try:
+            if progress is not None:
+                progress("restoring")
             for dirname in SOURCE_DIRS:
                 source = backup_path / dirname
                 staged = restore_tmp / dirname
@@ -434,6 +445,8 @@ class BackupService:
         finally:
             shutil.rmtree(restore_tmp, ignore_errors=True)
 
+        if progress is not None and rebuild_index:
+            progress("rebuilding")
         rebuilt_nodes = self.rebuild_index() if rebuild_index else None
         self._write_user_node_id(user_node_id)
         self.prune()

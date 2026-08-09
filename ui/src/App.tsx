@@ -106,19 +106,28 @@ export default function App() {
     hasDetail: selectedDetail !== null,
   });
 
-  useEffect(() => {
-    fetchGraph().then((data) => {
-      setGraph(data);
-      setUserNodeId(data.user_node_id);
-      const spaces = new Set<string>();
-      data.nodes.forEach((n) => {
-        if (n.space) spaces.add(n.space);
-      });
-      const spaceList = Array.from(spaces).sort();
-      setAllSpaces(spaceList);
-      setFilters((f) => ({ ...f, spaces: new Set(spaceList) }));
+  const loadGraph = useCallback(async () => {
+    const data = await fetchGraph();
+    setGraph(data);
+    setUserNodeId(data.user_node_id);
+    const spaces = new Set<string>();
+    data.nodes.forEach((node) => {
+      if (node.space) spaces.add(node.space);
     });
+    const spaceList = Array.from(spaces).sort();
+    setAllSpaces(spaceList);
+    setFilters((current) => ({ ...current, spaces: new Set(spaceList) }));
   }, []);
+
+  useEffect(() => {
+    void loadGraph();
+  }, [loadGraph]);
+
+  const handleRestoreComplete = useCallback(async () => {
+    setSelectedDetail(null);
+    setFocusNodeId(null);
+    await loadGraph();
+  }, [loadGraph]);
 
   useEffect(() => {
     if (!isDesktopApp()) return;
@@ -318,6 +327,7 @@ export default function App() {
         onClose={() => setActivePanel(null)}
         onToast={addToast}
         onStatusChange={handleProtectionStatusChange}
+        onRestoreComplete={handleRestoreComplete}
       />
       {themeTransition && (
         <div
