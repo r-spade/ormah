@@ -1,6 +1,6 @@
 [package]
 name = "ormah-desktop"
-version = "0.3.19"
+version = "0.3.20"
 description = "Ormah menubar app — ambient memory counter + one-click agent setup"
 authors = ["Ormah"]
 edition = "2021"
