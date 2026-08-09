@@ -218,6 +218,7 @@ export const productBridge = {
   logout: () => native<LogoutResult>("logout_account"),
   offer: () => native<BillingOffer>("billing_offer"),
   status: () => native<ProtectionStatus>("protection_status"),
+  remoteSnapshot: () => native<RemoteSnapshot>("remote_snapshot"),
   createIntent: () => native<ProtectionOperation>("create_protection_intent"),
   bindIntent: (intentId: string) =>
     native<ProtectionOperation>("bind_protection_intent", { intentId }),
@@ -311,10 +312,83 @@ export function protectionRepairAction(status: ProtectionStatus): ProtectionRepa
   return "none";
 }
 
+/** The newest committed cloud backup, which may come from another device. */
+export interface RemoteSnapshot {
+  snapshot_id: string | null;
+  created_at: string | null;
+  size_bytes: number | null;
+  from_this_device: boolean;
+  /** Only this device's own checks count; it cannot vouch for another's. */
+  restore_tested_here: boolean;
+  error: string | null;
+}
+
+export type TransferDirection =
+  | "in_sync"
+  | "cloud_newer"
+  | "device_newer"
+  | "diverged"
+  | "unknown";
+
+export interface TransferState {
+  direction: TransferDirection;
+  headline: string | null;
+}
+
+// Two intervals of the weekly restore-verification job. Inside that window an
+// unchecked upload is the normal resting state, not a problem, so it must not
+// paint the panel with a warning.
+const VERIFICATION_OVERDUE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
+
+export function verificationIsOverdue(
+  status: ProtectionStatus | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!status?.last_successful_verify_at) return true;
+  const verifiedAt = new Date(status.last_successful_verify_at).getTime();
+  if (!Number.isFinite(verifiedAt)) return true;
+  return now - verifiedAt > VERIFICATION_OVERDUE_AFTER_MS;
+}
+
+/**
+ * Which way memory needs to move between this device and the cloud.
+ *
+ * The cloud copy is newer whenever the newest snapshot is not the one this
+ * device uploaded — that is the only signal a second machine leaves behind.
+ */
+export function transferState(
+  status: ProtectionStatus | null | undefined,
+  remote: RemoteSnapshot | null | undefined,
+): TransferState {
+  if (!remote || remote.error || !remote.snapshot_id) {
+    return { direction: "unknown", headline: null };
+  }
+  const cloudNewer = !remote.from_this_device;
+  const deviceNewer = status?.protection_state === "changes_pending";
+
+  if (cloudNewer && deviceNewer) {
+    return {
+      direction: "diverged",
+      headline: "Both have newer memory. Restoring replaces this device's changes.",
+    };
+  }
+  if (cloudNewer) {
+    return { direction: "cloud_newer", headline: "Another device has newer memory." };
+  }
+  if (deviceNewer) {
+    return {
+      direction: "device_newer",
+      headline: "This device has changes that are not backed up yet.",
+    };
+  }
+  return { direction: "in_sync", headline: "Up to date with the cloud." };
+}
+
 export type ProtectionActionKind =
   | "signin"
   | "protect"
   | "backup"
+  | "restore"
   | "verify"
   | "repair"
   | "subscribe";
@@ -329,6 +403,7 @@ export interface ProtectionAction {
 }
 
 const BACKUP_LABEL = "Back up now";
+const RESTORE_LABEL = "Restore newest backup";
 
 const REPAIR_LABELS: Record<Exclude<ProtectionRepairAction, "none">, string> = {
   verify: "Retry recovery check",
@@ -349,17 +424,61 @@ function blockedBackup(reason: string): ProtectionAction {
   };
 }
 
+/** Push and pull, ordered and weighted by which side holds newer memory. */
+function transferActions(direction: TransferDirection): ProtectionAction[] {
+  const backup: ProtectionAction = {
+    kind: "backup",
+    label: BACKUP_LABEL,
+    variant: "secondary",
+    disabled: false,
+    reason: null,
+  };
+  const restore: ProtectionAction = {
+    kind: "restore",
+    label: RESTORE_LABEL,
+    variant: "secondary",
+    disabled: false,
+    reason: "Replaces this device's memory. Ormah checks the backup and shows"
+      + " what is inside before anything changes, and saves a local safety copy first.",
+  };
+
+  switch (direction) {
+    case "cloud_newer":
+      return [{ ...restore, variant: "primary" }, backup];
+    case "device_newer":
+      return [{ ...backup, variant: "primary" }, restore];
+    // Neither side is safe to favour: pulling discards local changes and
+    // pushing supersedes the other machine. Make the user choose deliberately.
+    case "diverged":
+      return [
+        { ...backup, reason: "Uploads this device's changes. The other device's newer memory stays in the cloud." },
+        restore,
+      ];
+    default:
+      return [
+        {
+          ...backup,
+          reason: "Ormah backs up on a schedule; this captures changes since then straight away.",
+        },
+        restore,
+      ];
+  }
+}
+
 /**
  * The summary-view actions for one protection state.
  *
  * Backup is the product's core capability, so it never vanishes from a signed-in
  * summary without a reason attached. States that cannot accept a new upload
- * return it disabled and explained rather than omitted.
+ * return it disabled and explained rather than omitted. Restore appears
+ * whenever the cloud actually holds something to restore — including on a
+ * machine that has never been protected itself.
  */
 export function protectionActions(
   signedIn: boolean,
   state: ProtectionState,
   status: ProtectionStatus | null | undefined,
+  remote?: RemoteSnapshot | null,
 ): ProtectionAction[] {
   if (!signedIn) {
     return [{
@@ -379,77 +498,67 @@ export function protectionActions(
     disabled: false,
     reason: null,
   }];
+  const restorable = Boolean(remote?.snapshot_id);
+  const { direction } = transferState(status, remote);
+  const restoreOnly: ProtectionAction[] = restorable
+    ? [{
+      kind: "restore",
+      label: RESTORE_LABEL,
+      variant: "secondary",
+      disabled: false,
+      reason: "Brings the newest cloud backup onto this device.",
+    }]
+    : [];
 
   switch (state) {
     case "local_only":
     case "sign_in_required":
     case "stopped":
-      return [{
-        kind: "protect",
-        label: "Protect this memory",
-        variant: "primary",
-        disabled: false,
-        reason: null,
-      }];
-
-    // Nothing is outstanding, so backup must not claim the primary slot: a
-    // full-width primary button reads as "do this next" and makes a healthy
-    // store look like it still owes work. It also has to lose that slot to the
-    // recovery-kit prompt, which is a genuine outstanding task.
-    case "protected":
-      return [{
-        kind: "backup",
-        label: BACKUP_LABEL,
-        variant: "secondary",
-        disabled: false,
-        reason: "Already uploaded and restore-tested. Ormah backs up on a schedule;"
-          + " this captures changes since then straight away.",
-      }];
-
-    case "changes_pending":
-      return [{
-        kind: "backup",
-        label: BACKUP_LABEL,
-        variant: "primary",
-        disabled: false,
-        reason: null,
-      }];
-
-    case "verification_pending":
-      // A manual backup uploads *and* restore-tests the new snapshot, so it is
-      // safe here — only slower and more bandwidth than checking what is
-      // already uploaded. Demote it, do not block it.
       return [
         {
-          kind: "verify",
-          label: "Verify this recovery point",
+          kind: "protect",
+          label: "Protect this memory",
           variant: "primary",
           disabled: false,
           reason: null,
         },
-        {
-          kind: "backup",
-          label: BACKUP_LABEL,
-          variant: "secondary",
-          disabled: false,
-          reason:
-            "Uploads another recovery point and restore-tests that one instead."
-            + " Checking the backup you already uploaded is faster.",
-        },
+        ...restoreOnly,
+      ];
+
+    case "protected":
+    case "changes_pending":
+      return transferActions(direction);
+
+    case "verification_pending":
+      // An unchecked upload inside the weekly check window is the normal
+      // resting state. Only offer the manual check once it is genuinely
+      // overdue, so a routine condition stops looking like a task.
+      return [
+        ...(verificationIsOverdue(status)
+          ? [{
+            kind: "verify" as const,
+            label: "Check this backup restores",
+            variant: "primary" as const,
+            disabled: false,
+            reason: null,
+          }]
+          : []),
+        ...transferActions(direction),
       ];
 
     case "offline":
     case "attention_required": {
       // When repair *is* the backup retry, a second backup button would be a
       // duplicate of the primary action.
-      if (repair === "backup") return repairButton;
+      if (repair === "backup") return [...repairButton, ...restoreOnly];
       return [
         ...repairButton,
         blockedBackup(
           state === "offline"
             ? "Ormah Cloud is unreachable. Ormah keeps retrying, and your changes stay safe on this device."
-            : "Resolve the problem above before creating another recovery point.",
+            : "Resolve the problem above before backing up again.",
         ),
+        ...restoreOnly,
       ];
     }
 
@@ -463,16 +572,20 @@ export function protectionActions(
           disabled: false,
           reason: null,
         },
-        blockedBackup("An active subscription is required to upload new recovery points."),
+        blockedBackup("An active subscription is required to upload new backups."),
+        ...restoreOnly,
       ];
 
     default:
       // initializing, uploading_first_backup, verifying_first_backup
-      return [blockedBackup("Ormah is already working on this recovery point.")];
+      return [blockedBackup("Ormah is already working on this backup.")];
   }
 }
 
-export function protectionPresentation(state: ProtectionState): ProtectionPresentation {
+export function protectionPresentation(
+  state: ProtectionState,
+  status?: ProtectionStatus | null,
+): ProtectionPresentation {
   switch (state) {
     case "sign_in_required":
       return {
@@ -485,7 +598,7 @@ export function protectionPresentation(state: ProtectionState): ProtectionPresen
       return {
         tone: "neutral",
         title: "Subscription required",
-        detail: "Subscribe to create encrypted, verified recovery points.",
+        detail: "Subscribe to keep encrypted backups that are proven to restore.",
         action: "subscribe",
       };
     case "initializing":
@@ -498,37 +611,50 @@ export function protectionPresentation(state: ProtectionState): ProtectionPresen
     case "uploading_first_backup":
       return {
         tone: "working",
-        title: "Uploading encrypted recovery point",
+        title: "Uploading encrypted backup",
         detail: "Only ciphertext is leaving this machine.",
         action: "wait",
       };
     case "verifying_first_backup":
       return {
         tone: "working",
-        title: "Checking recovery",
+        title: "Proving it restores",
         detail: "Downloading, decrypting, rebuilding, and probing a temporary copy.",
         action: "wait",
       };
     case "verification_pending":
-      return {
-        tone: "warning",
-        title: "Recovery check needed",
-        detail: "Your newest encrypted backup is uploaded but has not yet passed a restore test."
-          + " Verify it before creating another recovery point.",
-        action: "retry",
-      };
+      // Scheduled backups upload daily and the check runs weekly, so an
+      // unchecked upload is where a healthy store spends most of its life.
+      // Warn only once the check is genuinely overdue, or the panel cries
+      // wolf six days in seven.
+      return verificationIsOverdue(status)
+        ? {
+          tone: "warning",
+          title: "Backup not proven restorable",
+          detail: "Your newest backup is uploaded, but Ormah has not been able to"
+            + " confirm it restores. Run a check to be sure.",
+          action: "retry",
+        }
+        : {
+          tone: "success",
+          title: "Protected",
+          detail: "Your newest backup is uploaded. Ormah restore-tests it on a"
+            + " schedule, and your last proven backup stays available.",
+          action: "backup",
+        };
     case "protected":
       return {
         tone: "success",
-        title: "Protected and verified",
-        detail: "The latest recovery point was restored and checked on this device.",
+        title: "Protected",
+        detail: "Your newest backup was downloaded, decrypted, and rebuilt on this"
+          + " device to prove it restores.",
         action: "backup",
       };
     case "changes_pending":
       return {
-        tone: "warning",
-        title: "Changes waiting for protection",
-        detail: "Your last verified recovery point remains available.",
+        tone: "neutral",
+        title: "Changes not backed up yet",
+        detail: "Your last proven backup stays available until this device uploads again.",
         action: "backup",
       };
     case "offline":
@@ -542,14 +668,14 @@ export function protectionPresentation(state: ProtectionState): ProtectionPresen
       return {
         tone: "warning",
         title: "Cloud uploads are paused",
-        detail: "Local memory and retained recovery points remain available.",
+        detail: "Local memory and existing backups remain available.",
         action: "subscribe",
       };
     case "stopped":
       return {
         tone: "neutral",
         title: "Cloud protection stopped",
-        detail: "Existing recovery points remain available. Billing is managed separately.",
+        detail: "Existing backups remain available. Billing is managed separately.",
         action: "resume",
       };
     case "attention_required":
@@ -563,7 +689,7 @@ export function protectionPresentation(state: ProtectionState): ProtectionPresen
       return {
         tone: "neutral",
         title: "Protect this memory",
-        detail: "Keep an encrypted, verified recovery copy that Ormah Cloud cannot read.",
+        detail: "Keep an encrypted backup that Ormah Cloud cannot read, proven to restore.",
         action: "protect",
       };
   }

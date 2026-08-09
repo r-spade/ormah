@@ -9,10 +9,13 @@ import {
   protectionRepairAction,
   protectionPresentation,
   recoveryKitSectionVisible,
+  transferState,
+  verificationIsOverdue,
   type ProtectionAction,
   type ProtectionActionKind,
   type ProtectionStatus,
   type ProtectionState,
+  type RemoteSnapshot,
 } from "./productBridge";
 
 describe("protectionPresentation", () => {
@@ -27,25 +30,38 @@ describe("protectionPresentation", () => {
     expect(result.action).toBe("wait");
   });
 
-  it("makes an uploaded but unchecked backup an explicit recovery action", () => {
+  it("warns about an unchecked upload only when no check has ever passed", () => {
     const result = protectionPresentation("verification_pending");
 
-    expect(result.title).toBe("Recovery check needed");
+    expect(result.title).toBe("Backup not proven restorable");
     expect(result.tone).toBe("warning");
     expect(result.action).toBe("retry");
   });
 
-  it("uses the verified claim only for the protected state", () => {
+  it("stays calm while a routine weekly check is still pending", () => {
+    // Daily uploads and weekly checks make this the normal resting state; an
+    // amber panel six days in seven trains the user to ignore it.
+    const result = protectionPresentation(
+      "verification_pending",
+      status({ last_successful_verify_at: new Date(Date.now() - 86_400_000).toISOString() }),
+    );
+
+    expect(result.tone).toBe("success");
+    expect(result.title).toBe("Protected");
+  });
+
+  it("uses the proven claim only for the protected state", () => {
     const result = protectionPresentation("protected");
 
-    expect(result.title).toBe("Protected and verified");
+    expect(result.title).toBe("Protected");
+    expect(result.detail).toContain("prove it restores");
     expect(result.tone).toBe("success");
   });
 
-  it("keeps retained recovery points explicit when uploads stop", () => {
+  it("keeps retained backups explicit when uploads stop", () => {
     const result = protectionPresentation("stopped");
 
-    expect(result.detail).toContain("recovery points remain available");
+    expect(result.detail).toContain("Existing backups remain available");
     expect(result.action).toBe("resume");
   });
 
@@ -226,6 +242,81 @@ describe("effectiveProtectionState", () => {
   });
 });
 
+describe("verificationIsOverdue", () => {
+  const now = Date.parse("2026-08-09T18:00:00Z");
+
+  it("treats a never-proven backup as overdue", () => {
+    expect(verificationIsOverdue(status({ last_successful_verify_at: null }), now)).toBe(true);
+    expect(verificationIsOverdue(null, now)).toBe(true);
+  });
+
+  it("tolerates one missed weekly check before calling it overdue", () => {
+    // Uploads are daily and checks weekly, so an unchecked upload is normal.
+    expect(verificationIsOverdue(
+      status({ last_successful_verify_at: "2026-08-04T18:00:00Z" }),
+      now,
+    )).toBe(false);
+    expect(verificationIsOverdue(
+      status({ last_successful_verify_at: "2026-07-20T18:00:00Z" }),
+      now,
+    )).toBe(true);
+  });
+});
+
+function remote(overrides: Partial<RemoteSnapshot> = {}): RemoteSnapshot {
+  return {
+    snapshot_id: "01KZKQNY89FGP5CTS04GT7Y3JX",
+    created_at: "2026-08-09T17:03:44Z",
+    size_bytes: 1238414,
+    from_this_device: true,
+    restore_tested_here: true,
+    error: null,
+    ...overrides,
+  };
+}
+
+describe("transferState", () => {
+  it("cannot judge direction without a readable cloud listing", () => {
+    expect(transferState(status({}), null).direction).toBe("unknown");
+    expect(transferState(status({}), remote({ error: "offline" })).direction).toBe("unknown");
+    expect(transferState(status({}), remote({ snapshot_id: null })).direction).toBe("unknown");
+  });
+
+  it("reads a snapshot this device did not upload as the other machine's work", () => {
+    const result = transferState(
+      status({ protection_state: "protected" }),
+      remote({ from_this_device: false }),
+    );
+
+    expect(result.direction).toBe("cloud_newer");
+    expect(result.headline).toContain("Another device");
+  });
+
+  it("names unbacked-up local changes", () => {
+    const result = transferState(status({ protection_state: "changes_pending" }), remote());
+
+    expect(result.direction).toBe("device_newer");
+    expect(result.headline).toContain("not backed up");
+  });
+
+  it("says plainly when both sides moved", () => {
+    const result = transferState(
+      status({ protection_state: "changes_pending" }),
+      remote({ from_this_device: false }),
+    );
+
+    expect(result.direction).toBe("diverged");
+    expect(result.headline).toContain("replaces this device's changes");
+  });
+
+  it("confirms agreement when the newest backup is this device's own", () => {
+    const result = transferState(status({ protection_state: "protected" }), remote());
+
+    expect(result.direction).toBe("in_sync");
+    expect(result.headline).toContain("Up to date");
+  });
+});
+
 describe("protectionActions", () => {
   const find = (
     actions: ProtectionAction[],
@@ -233,55 +324,105 @@ describe("protectionActions", () => {
   ): ProtectionAction | undefined => actions.find((action) => action.kind === kind);
 
   it("offers only sign-in before an account exists", () => {
-    const actions = protectionActions(false, "protected", status({}));
+    const actions = protectionActions(false, "protected", status({}), remote());
 
     expect(actions.map((action) => action.kind)).toEqual(["signin"]);
   });
 
-  it("makes backup the single primary action when changes are unprotected", () => {
+  it("leads with restore when another device holds newer memory", () => {
+    const actions = protectionActions(
+      true,
+      "protected",
+      status({ protection_state: "protected" }),
+      remote({ from_this_device: false }),
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(["restore", "backup"]);
+    expect(find(actions, "restore")?.variant).toBe("primary");
+    expect(find(actions, "backup")?.variant).toBe("secondary");
+  });
+
+  it("leads with backup when this device holds unprotected changes", () => {
     const actions = protectionActions(
       true,
       "changes_pending",
       status({ protection_state: "changes_pending" }),
+      remote(),
     );
 
-    expect(actions).toEqual([{
-      kind: "backup",
-      label: "Back up now",
-      variant: "primary",
-      disabled: false,
-      reason: null,
-    }]);
+    expect(actions.map((action) => action.kind)).toEqual(["backup", "restore"]);
+    expect(find(actions, "backup")?.variant).toBe("primary");
+  });
+
+  it("refuses to favour either side once both have moved", () => {
+    // Pulling discards local changes and pushing supersedes the other machine,
+    // so neither may be styled as the obvious thing to click.
+    const actions = protectionActions(
+      true,
+      "changes_pending",
+      status({ protection_state: "changes_pending" }),
+      remote({ from_this_device: false }),
+    );
+
+    expect(actions.every((action) => action.variant === "secondary")).toBe(true);
+    expect(find(actions, "backup")?.reason).toContain("stays in the cloud");
+    expect(find(actions, "restore")?.reason).toContain("Replaces this device's memory");
   });
 
   it("does not let a healthy store present backup as an outstanding task", () => {
-    // A primary button reads as "do this next". After a successful enable there
-    // is nothing to do, and the recovery-kit prompt is the real outstanding task.
-    const actions = protectionActions(true, "protected", status({ protection_state: "protected" }));
+    const actions = protectionActions(
+      true,
+      "protected",
+      status({ protection_state: "protected" }),
+      remote(),
+    );
 
-    expect(actions.map((action) => action.kind)).toEqual(["backup"]);
-    const backup = find(actions, "backup");
-    expect(backup?.variant).toBe("secondary");
-    expect(backup?.disabled).toBe(false);
-    expect(backup?.reason).toContain("Already uploaded and restore-tested");
+    expect(find(actions, "backup")?.variant).toBe("secondary");
+    expect(find(actions, "backup")?.disabled).toBe(false);
+    expect(find(actions, "restore")).toBeDefined();
   });
 
-  it("prefers verification but keeps backup usable and explained when a check is pending", () => {
+  it("keeps a routine unchecked upload free of a check prompt", () => {
+    // Daily uploads with a weekly check mean this is the normal resting state.
     const actions = protectionActions(
       true,
       "verification_pending",
-      status({ protection_state: "verification_pending", last_error_code: null }),
+      status({
+        protection_state: "verification_pending",
+        last_successful_verify_at: new Date(Date.now() - 86_400_000).toISOString(),
+      }),
+      remote(),
     );
 
-    expect(actions.map((action) => action.kind)).toEqual(["verify", "backup"]);
-    expect(find(actions, "verify")?.variant).toBe("primary");
+    expect(find(actions, "verify")).toBeUndefined();
+    expect(find(actions, "backup")).toBeDefined();
+  });
 
-    const backup = find(actions, "backup");
-    expect(backup?.label).toBe("Back up now");
-    expect(backup?.variant).toBe("secondary");
-    // A manual backup restore-tests its own upload, so it is slower here, not unsafe.
-    expect(backup?.disabled).toBe(false);
-    expect(backup?.reason).toContain("restore-tests that one instead");
+  it("asks for a check only once one is genuinely overdue", () => {
+    const actions = protectionActions(
+      true,
+      "verification_pending",
+      status({
+        protection_state: "verification_pending",
+        last_successful_verify_at: null,
+      }),
+      remote(),
+    );
+
+    expect(actions[0].kind).toBe("verify");
+    expect(actions[0].variant).toBe("primary");
+  });
+
+  it("offers restore on a machine that has never been protected itself", () => {
+    // How a second device adopts an existing memory.
+    const actions = protectionActions(
+      true,
+      "local_only",
+      status({ protection_state: "local_only", enabled: false }),
+      remote({ from_this_device: false }),
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(["protect", "restore"]);
   });
 
   it("keeps backup visible and explained while cloud protection is offline", () => {
@@ -289,12 +430,12 @@ describe("protectionActions", () => {
       true,
       "offline",
       status({ protection_state: "offline", enabled: false }),
+      remote(),
     );
 
     expect(find(actions, "repair")?.label).toBe("Check connection");
-    const backup = find(actions, "backup");
-    expect(backup?.disabled).toBe(true);
-    expect(backup?.reason).toContain("Ormah Cloud is unreachable");
+    expect(find(actions, "backup")?.disabled).toBe(true);
+    expect(find(actions, "backup")?.reason).toContain("Ormah Cloud is unreachable");
   });
 
   it("does not duplicate backup when repair is itself the backup retry", () => {
@@ -302,6 +443,7 @@ describe("protectionActions", () => {
       true,
       "offline",
       status({ protection_state: "offline", enabled: true }),
+      null,
     );
 
     expect(actions.map((action) => action.kind)).toEqual(["repair"]);
@@ -313,24 +455,12 @@ describe("protectionActions", () => {
       true,
       "attention_required",
       status({ protection_state: "attention_required", last_error_code: "quota_exceeded" }),
+      null,
     );
 
     expect(find(actions, "repair")).toBeUndefined();
-    const backup = find(actions, "backup");
-    expect(backup?.disabled).toBe(true);
-    expect(backup?.reason).toContain("Resolve the problem above");
-  });
-
-  it("keeps the repair path primary and backup explained during a verify failure", () => {
-    const actions = protectionActions(
-      true,
-      "attention_required",
-      status({ protection_state: "attention_required", last_error_code: "verification_failed" }),
-    );
-
-    expect(actions.map((action) => action.kind)).toEqual(["repair", "backup"]);
-    expect(find(actions, "repair")?.label).toBe("Retry recovery check");
     expect(find(actions, "backup")?.disabled).toBe(true);
+    expect(find(actions, "backup")?.reason).toContain("Resolve the problem above");
   });
 
   it("never hides backup from a signed-in, protected store without saying why", () => {
@@ -352,7 +482,7 @@ describe("protectionActions", () => {
     ];
 
     for (const state of states) {
-      const actions = protectionActions(true, state, status({ protection_state: state }));
+      const actions = protectionActions(true, state, status({ protection_state: state }), remote());
 
       expect(actions.length).toBeGreaterThan(0);
       for (const action of actions) {
@@ -360,14 +490,12 @@ describe("protectionActions", () => {
       }
 
       const backup = find(actions, "backup");
-      const repair = find(actions, "repair");
       if (onboarding.includes(state)) {
-        // Protection does not exist yet; "Protect this memory" is the entry point.
         expect(find(actions, "protect")).toBeDefined();
         continue;
       }
       if (!backup) {
-        expect(repair?.label).toBe("Retry encrypted backup");
+        expect(find(actions, "repair")?.label).toBe("Retry encrypted backup");
         continue;
       }
       if (backup.disabled) expect(backup.reason).toBeTruthy();

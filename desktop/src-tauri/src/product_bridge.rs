@@ -191,6 +191,12 @@ pub async fn protection_status(window: WebviewWindow) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub async fn remote_snapshot(window: WebviewWindow) -> Result<Value, String> {
+    require_product_origin(&window)?;
+    request_sanitized("GET", "/admin/cloud/protection/remote", None).await
+}
+
+#[tauri::command]
 pub async fn create_protection_intent(window: WebviewWindow) -> Result<Value, String> {
     require_product_origin(&window)?;
     request_sanitized("POST", "/admin/cloud/protection/intents", Some(json!({}))).await
@@ -1253,4 +1259,34 @@ mod tests {
             );
         }
     }
+
+    /// The invoke handler exposing a command is not enough: Tauri also gates it
+    /// on the capability ACL, and a command missing there fails only at
+    /// runtime, in the webview, with nothing at compile time to catch it.
+    #[test]
+    fn every_bridge_command_is_allowed_by_the_product_capability() {
+        let lib_rs = include_str!("lib.rs");
+        let permissions = include_str!("../permissions/desktop.toml");
+        let allowed = permissions
+            .split_once("identifier = \"desktop-product-bridge\"")
+            .expect("product bridge permission set is missing")
+            .1;
+
+        let handled: Vec<&str> = lib_rs
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("product_bridge::"))
+            .filter_map(|rest| rest.strip_suffix(','))
+            .collect();
+
+        assert!(handled.len() > 20, "expected the full bridge handler list");
+        for command in handled {
+            assert!(
+                allowed.contains(&format!("\"{command}\"")),
+                "command `{command}` is registered in the invoke handler but not \
+                 allowed by the desktop-product-bridge capability; the product UI \
+                 would be denied at runtime",
+            );
+        }
+    }
+
 }
