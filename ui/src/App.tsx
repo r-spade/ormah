@@ -326,6 +326,7 @@ export default function App() {
       />
       <ProtectionPanel
         open={activePanel === "protection"}
+        nodeCount={graph.nodes.length}
         onClose={() => setActivePanel(null)}
         onToast={addToast}
         onStatusChange={handleProtectionStatusChange}

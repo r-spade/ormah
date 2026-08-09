@@ -176,6 +176,7 @@ pub fn run() {
             product_bridge::logout_account,
             product_bridge::billing_offer,
             product_bridge::protection_status,
+            product_bridge::remote_snapshot,
             product_bridge::create_protection_intent,
             product_bridge::bind_protection_intent,
             product_bridge::cancel_protection_intent,

@@ -14,6 +14,7 @@ from ormah.cloud.entitlements import load_entitlement_cache, status_from_cache
 from ormah.cloud.operations import ProtectionOperationCoordinator
 from ormah.cloud.protection import CloudProtectionService, safe_product_error_message
 from ormah.cloud.recovery import RecoveryKitError, RecoveryKitService
+from ormah.cloud.restore import CloudRestoreError, newest_cloud_snapshot
 from ormah.cloud.state import (
     CloudStateError,
     ProtectionOperation,
@@ -169,6 +170,56 @@ def protection_status(request: Request):
         for warning in payload.get("warnings", [])
     ]
     return payload
+
+
+@router.get("/remote")
+def remote_snapshot(request: Request):
+    """Describe the newest cloud backup, including one uploaded by another device.
+
+    Local state records only this device's own uploads and verifications, so a
+    second machine's backup cannot be seen without asking the cloud. Failures
+    degrade to a redacted reason instead of an error status: not knowing what
+    the cloud holds must never take the protection panel down.
+    """
+
+    settings = request.app.state.engine.settings
+    unavailable = {
+        "snapshot_id": None,
+        "created_at": None,
+        "size_bytes": None,
+        "from_this_device": False,
+        "restore_tested_here": False,
+        "error": None,
+    }
+    try:
+        newest = newest_cloud_snapshot(settings)
+    except CloudRestoreError as exc:
+        return {
+            **unavailable,
+            "error": safe_product_error_message(
+                str(exc), getattr(settings, "account_token", None)
+            ),
+        }
+    except Exception as exc:
+        return {
+            **unavailable,
+            "error": safe_product_error_message(
+                f"Could not read cloud backups: {exc}",
+                getattr(settings, "account_token", None),
+            ),
+        }
+    if newest is None:
+        return unavailable
+
+    state = cloud_status_payload(settings, entitlement=_cached_entitlement(settings))
+    snapshot_id = newest["snapshot_id"]
+    return {
+        **newest,
+        "from_this_device": snapshot_id == state.get("last_successful_backup_snapshot_id"),
+        # A device can only vouch for a check it ran itself.
+        "restore_tested_here": snapshot_id == state.get("last_verified_snapshot_id"),
+        "error": None,
+    }
 
 
 @router.post("/intents")

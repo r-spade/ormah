@@ -366,3 +366,98 @@ def test_cli_restore_rejects_missing_source(capsys):
         main()
 
     assert "Provide a local backup name or use --cloud" in capsys.readouterr().err
+
+
+def test_newest_cloud_snapshot_picks_the_lexical_maximum_without_downloading(
+    tmp_path, monkeypatch
+):
+    """Snapshot ids are server-generated ULIDs, so newest is the lexical max.
+
+    Listing order is not guaranteed, and nothing may be downloaded or decrypted
+    just to answer "what does the cloud hold?".
+    """
+
+    from ormah.cloud import restore
+
+    store_id = str(uuid.uuid4())
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    settings = Settings(memory_dir=memory_dir, account_token="test-token")
+
+    listed = {
+        "blobs": [
+            {
+                "snapshot_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "size_bytes": 10,
+                "created_at": "2026-08-01T10:00:00+00:00",
+            },
+            {
+                "snapshot_id": "01KZKQNY89FGP5CTS04GT7Y3JX",
+                "size_bytes": 1238414,
+                "created_at": "2026-08-09T17:03:44+00:00",
+            },
+            {
+                "snapshot_id": "01KZKNPSKVN8CQYRP9K9PHB67K",
+                "size_bytes": 1319221,
+                "created_at": "2026-08-09T16:29:16+00:00",
+            },
+        ]
+    }
+
+    class ListingClient:
+        def __init__(self):
+            self.closed = False
+
+        def list_blobs(self, requested_store_id):
+            assert requested_store_id == store_id
+            return listed
+
+        def close(self):
+            self.closed = True
+
+    client = ListingClient()
+    monkeypatch.setattr(restore, "client_from_settings", lambda settings: client)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("listing must not download a bundle")
+
+    monkeypatch.setattr(restore, "download_file", refuse)
+
+    newest = restore.newest_cloud_snapshot(settings)
+
+    assert newest["snapshot_id"] == "01KZKQNY89FGP5CTS04GT7Y3JX"
+    assert newest["created_at"] == "2026-08-09T17:03:44+00:00"
+    assert newest["size_bytes"] == 1238414
+    assert client.closed is True
+
+
+def test_newest_cloud_snapshot_reports_an_empty_store_as_nothing(tmp_path, monkeypatch):
+    from ormah.cloud import restore
+
+    store_id = str(uuid.uuid4())
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    settings = Settings(memory_dir=memory_dir, account_token="test-token")
+
+    class EmptyClient:
+        def list_blobs(self, requested_store_id):
+            return {"blobs": []}
+
+    monkeypatch.setattr(restore, "client_from_settings", lambda settings: EmptyClient())
+
+    assert restore.newest_cloud_snapshot(settings) is None
+
+
+def test_newest_cloud_snapshot_requires_sign_in(tmp_path):
+    from ormah.cloud import restore
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    settings = Settings(memory_dir=memory_dir, account_token=None)
+
+    with pytest.raises(restore.CloudRestoreError) as excinfo:
+        restore.newest_cloud_snapshot(settings)
+
+    assert excinfo.value.reason_code == "sign_in_required"

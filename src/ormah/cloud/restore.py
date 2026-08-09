@@ -111,6 +111,43 @@ def _committed_blobs(client, store_id: str) -> list[dict[str, Any]]:
     return [blob for blob in blobs if isinstance(blob, dict)]
 
 
+def newest_cloud_snapshot(settings) -> dict[str, Any] | None:
+    """Describe the newest committed snapshot without downloading anything.
+
+    A device records only its own uploads, so a second machine's backup is
+    invisible in local state. One listing call closes that gap: snapshot ids
+    are server-generated ULIDs, so the newest is the lexical maximum. Nothing
+    is decrypted and no cloud-visible metadata is added — the listing already
+    carries these fields.
+    """
+
+    if not settings.account_token:
+        raise CloudRestoreError(
+            "Ormah Cloud login is required before reading cloud backups.",
+            "sign_in_required",
+        )
+    store_id = _existing_store_id(settings.memory_dir)
+    client = client_from_settings(settings)
+    try:
+        blobs = _committed_blobs(client, store_id)
+    finally:
+        close = getattr(client, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
+    if not blobs:
+        return None
+    newest = max(blobs, key=_snapshot_id)
+    size = newest.get("size_bytes")
+    return {
+        "snapshot_id": _snapshot_id(newest),
+        "created_at": _snapshot_created_at(newest),
+        "size_bytes": size if isinstance(size, int) and size >= 0 else None,
+    }
+
+
 def _candidate_blobs(
     blobs: list[dict[str, Any]], requested: str | None
 ) -> list[dict[str, Any]]:
