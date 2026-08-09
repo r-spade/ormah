@@ -597,3 +597,90 @@ def test_recovery_confirmation_failure_does_not_leak_service_error(protection_ap
     assert response.status_code == 409
     assert response.json() == {"detail": "The saved recovery kit could not be verified."}
     assert "secret" not in response.text.lower()
+
+
+def test_remote_reports_a_backup_made_by_another_device(protection_app, monkeypatch):
+    """The only signal a second machine leaves is a snapshot this device did not upload."""
+
+    client, _, _, _ = protection_app
+    monkeypatch.setattr(
+        routes_protection,
+        "cloud_status_payload",
+        lambda settings, **kwargs: {
+            "last_successful_backup_snapshot_id": "01MINE",
+            "last_verified_snapshot_id": "01MINE",
+        },
+    )
+    monkeypatch.setattr(
+        routes_protection,
+        "newest_cloud_snapshot",
+        lambda settings: {
+            "snapshot_id": "01THEIRS",
+            "created_at": "2026-08-09T09:14:00+00:00",
+            "size_bytes": 1238414,
+        },
+    )
+
+    payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
+
+    assert payload["snapshot_id"] == "01THEIRS"
+    assert payload["from_this_device"] is False
+    # This device never checked that snapshot, so it cannot vouch for it.
+    assert payload["restore_tested_here"] is False
+    assert payload["error"] is None
+
+
+def test_remote_recognises_this_devices_own_verified_upload(protection_app, monkeypatch):
+    client, _, _, _ = protection_app
+    monkeypatch.setattr(
+        routes_protection,
+        "cloud_status_payload",
+        lambda settings, **kwargs: {
+            "last_successful_backup_snapshot_id": "01MINE",
+            "last_verified_snapshot_id": "01MINE",
+        },
+    )
+    monkeypatch.setattr(
+        routes_protection,
+        "newest_cloud_snapshot",
+        lambda settings: {
+            "snapshot_id": "01MINE",
+            "created_at": "2026-08-09T17:03:44+00:00",
+            "size_bytes": 10,
+        },
+    )
+
+    payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
+
+    assert payload["from_this_device"] is True
+    assert payload["restore_tested_here"] is True
+
+
+def test_remote_degrades_without_taking_the_panel_down(protection_app, monkeypatch):
+    """Not knowing what the cloud holds must never break protection status."""
+
+    client, _, _, _ = protection_app
+
+    def unreachable(settings):
+        raise RuntimeError("nodename nor servname provided: never-return-this-token")
+
+    monkeypatch.setattr(routes_protection, "newest_cloud_snapshot", unreachable)
+
+    response = client.get("/admin/cloud/protection/remote", headers=HEADERS)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["snapshot_id"] is None
+    assert payload["from_this_device"] is False
+    assert payload["error"]
+    assert "never-return-this-token" not in response.text
+
+
+def test_remote_reports_an_empty_store_without_error(protection_app, monkeypatch):
+    client, _, _, _ = protection_app
+    monkeypatch.setattr(routes_protection, "newest_cloud_snapshot", lambda settings: None)
+
+    payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
+
+    assert payload["snapshot_id"] is None
+    assert payload["error"] is None

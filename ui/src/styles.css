@@ -1401,6 +1401,59 @@ body.in-app .node-detail.tier-core {
 
 .protection-action + .protection-action { margin-top: 10px; }
 
+.protection-machines {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.protection-machine {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.protection-machine > span {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.protection-machine > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.protection-machine > strong {
+  color: var(--text-bright);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.protection-machine .protection-proven { color: var(--node-self); }
+
+.protection-machine-link {
+  display: flex;
+  justify-content: center;
+  padding-top: 18px;
+  color: var(--text-muted);
+}
+
+.protection-direction {
+  margin: 0;
+  padding: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.protection-direction.direction-in_sync { color: var(--node-self); }
+.protection-direction.direction-diverged { color: var(--text-bright); }
+
 .protection-action-reason {
   margin: 6px 0 0;
   color: var(--text-muted);

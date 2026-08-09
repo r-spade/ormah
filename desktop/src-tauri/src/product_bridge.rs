@@ -191,6 +191,12 @@ pub async fn protection_status(window: WebviewWindow) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub async fn remote_snapshot(window: WebviewWindow) -> Result<Value, String> {
+    require_product_origin(&window)?;
+    request_sanitized("GET", "/admin/cloud/protection/remote", None).await
+}
+
+#[tauri::command]
 pub async fn create_protection_intent(window: WebviewWindow) -> Result<Value, String> {
     require_product_origin(&window)?;
     request_sanitized("POST", "/admin/cloud/protection/intents", Some(json!({}))).await

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowUpDown,
   Check,
   ChevronRight,
   Circle,
@@ -24,12 +25,14 @@ import {
   productBridge,
   protectionActions,
   protectionCompletionSummary,
+  transferState,
   protectionPresentation,
   protectionReconnectDelay,
   protectionRepairAction,
   recoveryKitSectionVisible,
   type AccountStatus,
   type ProtectionActionKind,
+  type RemoteSnapshot,
   type BillingOffer,
   type OperationPhase,
   type ProtectionOperation,
@@ -39,6 +42,8 @@ import RecoveryKitSection from "./RecoveryKitSection";
 
 interface Props {
   open: boolean;
+  /** Total memories on this device, for the device-versus-cloud comparison. */
+  nodeCount?: number | null;
   onClose: () => void;
   onToast: (message: string, type?: "success" | "error" | "info") => void;
   onStatusChange?: (status: ProtectionStatus) => void;
@@ -98,28 +103,28 @@ function operationLabel(
     switch (phase) {
       case "pending": return "Queued";
       case "running":
-      case "discovering": return "Finding your latest recovery point";
+      case "discovering": return "Finding your newest backup";
       case "downloading": return "Downloading encrypted memory";
       case "decrypting": return "Decrypting on this device";
       case "checking": return "Checking every memory file";
       case "safety_backup": return "Protecting your current memory first";
-      case "restoring": return "Restoring verified memory";
+      case "restoring": return "Restoring proven memory";
       case "rebuilding": return "Rebuilding local search";
       case "reloading": return "Refreshing your memory graph";
-      default: return "Finishing recovery";
+      default: return "Finishing restore";
     }
   }
   switch (phase) {
     case "pending": return "Queued";
     case "running":
-    case "preparing": return "Creating a local recovery point";
+    case "preparing": return "Preparing a backup";
     case "encrypting": return "Encrypting on this device";
     case "uploading": return "Uploading encrypted data";
-    case "finalizing": return "Securing the cloud recovery point";
-    case "downloading": return "Downloading a temporary recovery test";
+    case "finalizing": return "Securing the cloud backup";
+    case "downloading": return "Downloading a temporary test copy";
     case "verifying": return "Decrypting and checking every file";
     case "rebuilding": return "Rebuilding memory and testing search";
-    default: return "Finishing protection check";
+    default: return "Finishing the check";
   }
 }
 
@@ -127,23 +132,24 @@ const ACTION_ICONS: Record<ProtectionActionKind, JSX.Element> = {
   signin: <LogIn size={16} />,
   protect: <ShieldCheck size={16} />,
   backup: <RefreshCw size={15} />,
+  restore: <CloudDownload size={15} />,
   verify: <ShieldCheck size={15} />,
   repair: <RefreshCw size={15} />,
   subscribe: <CreditCard size={15} />,
 };
 
 const PROTECTION_STAGES = [
-  { phase: "preparing", label: "Create local recovery point" },
+  { phase: "preparing", label: "Prepare a backup" },
   { phase: "encrypting", label: "Encrypt on this device" },
   { phase: "uploading", label: "Upload encrypted data" },
-  { phase: "finalizing", label: "Secure cloud recovery point" },
+  { phase: "finalizing", label: "Secure the cloud backup" },
   { phase: "downloading", label: "Download a temporary test copy" },
   { phase: "verifying", label: "Decrypt and check every file" },
   { phase: "rebuilding", label: "Rebuild memory and test search" },
 ] as const;
 
 const RESTORE_PREPARE_STAGES = [
-  { phase: "discovering", label: "Find latest recovery point" },
+  { phase: "discovering", label: "Find the newest backup" },
   { phase: "downloading", label: "Download encrypted memory" },
   { phase: "decrypting", label: "Decrypt on this device" },
   { phase: "checking", label: "Check files, identity, and search" },
@@ -151,7 +157,7 @@ const RESTORE_PREPARE_STAGES = [
 
 const RESTORE_APPLY_STAGES = [
   { phase: "safety_backup", label: "Save current memory locally" },
-  { phase: "restoring", label: "Replace with verified recovery point" },
+  { phase: "restoring", label: "Replace with the proven backup" },
   { phase: "rebuilding", label: "Rebuild local search" },
   { phase: "reloading", label: "Refresh the memory graph" },
 ] as const;
@@ -171,11 +177,11 @@ function restorePhaseIndex(
 
 function operationSuccessMessage(operation: ProtectionOperation): string {
   switch (operation.kind) {
-    case "enable": return "Memory protected and verified.";
-    case "backup": return "Encrypted recovery point uploaded and restore-tested.";
-    case "verify": return "Recovery point verified.";
+    case "enable": return "Memory backed up and proven to restore.";
+    case "backup": return "Encrypted backup uploaded and proven to restore.";
+    case "verify": return "Backup proven to restore.";
     case "disable": return "Future cloud backups stopped.";
-    case "restore": return "Latest verified memory restored.";
+    case "restore": return "Newest backup restored.";
     default: return "Operation completed.";
   }
 }
@@ -188,6 +194,7 @@ function errorMessage(value: unknown, fallback: string): string {
 
 export default function ProtectionPanel({
   open,
+  nodeCount = null,
   onClose,
   onToast,
   onStatusChange,
@@ -195,6 +202,7 @@ export default function ProtectionPanel({
 }: Props) {
   const [account, setAccount] = useState<AccountStatus | null>(null);
   const [status, setStatus] = useState<ProtectionStatus | null>(null);
+  const [remote, setRemote] = useState<RemoteSnapshot | null>(null);
   const [offer, setOffer] = useState<BillingOffer | null>(null);
   const [operation, setOperation] = useState<ProtectionOperation | null>(null);
   const [view, setView] = useState<View>("summary");
@@ -238,6 +246,12 @@ export default function ProtectionPanel({
       setRefreshFailed(false);
       onStatusChange?.(nextStatus);
       setError(null);
+      // One listing call, and only for a store that has something in the
+      // cloud. A failure here costs the device-versus-cloud comparison, never
+      // the panel itself, so it is deliberately not awaited into the catch.
+      if (nextStatus.enabled || nextStatus.store_id) {
+        productBridge.remoteSnapshot().then(setRemote).catch(() => setRemote(null));
+      }
       if (nextAccount.signed_in && !offerRequested.current) {
         offerRequested.current = true;
         productBridge.offer().then(setOffer).catch(() => {
@@ -664,7 +678,7 @@ export default function ProtectionPanel({
 
   const activeOperation = operationIsActive(operation);
   const presentation = useMemo(
-    () => protectionPresentation(effectiveProtectionState(operation, status)),
+    () => protectionPresentation(effectiveProtectionState(operation, status), status),
     [operation, status],
   );
   const price = formatPrice(offer);
@@ -753,9 +767,12 @@ export default function ProtectionPanel({
       Boolean(account?.signed_in),
       effectiveProtectionState(operation, status),
       status,
+      remote,
     ),
-    [account?.signed_in, operation, status],
+    [account?.signed_in, operation, remote, status],
   );
+
+  const transfer = useMemo(() => transferState(status, remote), [remote, status]);
 
   const runProtectionAction = useCallback(async (kind: ProtectionActionKind) => {
     switch (kind) {
@@ -770,6 +787,9 @@ export default function ProtectionPanel({
       case "backup":
       case "verify":
         await runOperation(kind);
+        return;
+      case "restore":
+        await beginRestore();
         return;
       case "repair":
         await runRepairAction();
@@ -1036,6 +1056,37 @@ export default function ProtectionPanel({
             </section>
           )}
 
+          {view === "summary" && !activeLabel && status?.enabled && (
+            <section className="protection-machines" aria-label="This device and the cloud">
+              <div className="protection-machine">
+                <span>This device</span>
+                <strong>{nodeCount === null ? "—" : `${new Intl.NumberFormat().format(nodeCount)} memories`}</strong>
+                <span>backed up {formatDate(status.last_successful_upload_at)}</span>
+              </div>
+              <div className="protection-machine-link" aria-hidden="true"><ArrowUpDown size={15} /></div>
+              <div className="protection-machine">
+                <span>Cloud</span>
+                {/* Not being able to read the listing is not the same as the
+                    cloud being empty, and must never be shown as one. */}
+                <strong>{
+                  !remote || remote.error
+                    ? "unavailable"
+                    : remote.created_at
+                      ? `newest ${formatDate(remote.created_at)}`
+                      : "no backup yet"
+                }</strong>
+                {remote?.snapshot_id && (
+                  <span>{remote.from_this_device ? "from this device" : "from another device"}</span>
+                )}
+                {remote?.restore_tested_here && <span className="protection-proven">proven to restore</span>}
+              </div>
+            </section>
+          )}
+
+          {view === "summary" && !activeLabel && transfer.headline && (
+            <p className={`protection-direction direction-${transfer.direction}`}>{transfer.headline}</p>
+          )}
+
           {view === "summary" && !activeLabel && (
             <section className="protection-actions">
               {actions.map((action) => (
@@ -1050,29 +1101,6 @@ export default function ProtectionPanel({
                   {action.reason && <p className="protection-action-reason">{action.reason}</p>}
                 </div>
               ))}
-            </section>
-          )}
-
-          {view === "summary" && !activeLabel && (
-            <section className="restore-entry">
-              <div>
-                <CloudDownload size={17} />
-                <div>
-                  <strong>Recover this memory</strong>
-                  <span>Restore the latest cloud recovery point that passes local checks.</span>
-                </div>
-              </div>
-              <button className="protection-secondary" disabled={busy} onClick={() => void beginRestore()}>
-                Restore latest verified backup
-              </button>
-            </section>
-          )}
-
-          {(status?.last_successful_verify_at || status?.last_successful_upload_at) && (
-            <section className="protection-facts" aria-label="Protection details">
-              <div><span>Last verified restorable</span><strong>{formatDate(status.last_successful_verify_at)}</strong></div>
-              <div><span>Last encrypted upload</span><strong>{formatDate(status.last_successful_upload_at)}</strong></div>
-              <div><span>Cloud can read</span><strong>metadata only</strong></div>
             </section>
           )}
 
