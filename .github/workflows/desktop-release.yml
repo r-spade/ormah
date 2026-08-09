@@ -233,7 +233,8 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#desktop-v}"
           BASE_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
-          gh release view "$GITHUB_REF_NAME" --json body --jq .body > release-notes.txt
+          REPO="${{ github.repository }}"
+          gh release view "$GITHUB_REF_NAME" -R "$REPO" --json body --jq .body > release-notes.txt
 
           APPIMAGE=$(find dist -name '*.AppImage' | head -1)
           DEB=$(find dist -name '*.deb' | head -1)
@@ -265,7 +266,6 @@ jobs:
           EOF
           cat latest.json
 
-          REPO="${{ github.repository }}"
           if gh release view desktop-latest -R "$REPO" > /dev/null 2>&1; then
             gh release upload desktop-latest latest.json --clobber -R "$REPO"
           else

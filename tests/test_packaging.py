@@ -114,6 +114,13 @@ class TestReleaseWorkflow:
         assert "id-token: write" in workflow
         assert "gh release create" in workflow
 
+    def test_desktop_publish_commands_have_explicit_repository_context(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/desktop-release.yml").read_text()
+
+        assert 'REPO="${{ github.repository }}"' in workflow
+        assert 'gh release view "$GITHUB_REF_NAME" -R "$REPO"' in workflow
+
 
 class TestEvalCliFallback:
     def test_eval_command_exits_cleanly_when_harness_is_missing(self, monkeypatch, capsys):
