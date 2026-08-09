@@ -1399,6 +1399,15 @@ body.in-app .node-detail.tier-core {
   opacity: 0.5;
 }
 
+.protection-action + .protection-action { margin-top: 10px; }
+
+.protection-action-reason {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .protection-offer {
   display: flex;
   align-items: baseline;

@@ -615,3 +615,139 @@ def test_admin_cloud_status_is_thin_wrapper(monkeypatch):
 
     assert routes_admin.cloud_status(request) == expected
     assert any(route.path == "/admin/cloud-status" for route in routes_admin.router.routes)
+
+
+def _stranded_offline_state(memory_dir: Path, state_dir: Path, *, expires_at, status):
+    """The exact shape a failed first enable leaves behind: never enabled,
+    OFFLINE recorded once, and an intent that nothing will finish."""
+
+    store_id = str(uuid.uuid4())
+    intent_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    save_state(
+        store_id,
+        CloudState(
+            protection_state=ProtectionState.OFFLINE,
+            pending_protection_intent_id=intent_id,
+            pending_protection_store_id=store_id,
+            pending_protection_expires_at=expires_at,
+            pending_protection_status=status,
+            last_operation_id=intent_id,
+            last_operation_kind=ProtectionOperationKind.ENABLE,
+            last_operation_phase=ProtectionOperationPhase.FAILED,
+            last_error_code=ProtectionReasonCode.OFFLINE,
+            last_error_message=(
+                "Could not reach Ormah Cloud: [Errno 8] nodename nor servname "
+                "provided, or not known"
+            ),
+        ),
+        memory_dir=memory_dir,
+        state_dir=state_dir,
+    )
+    return intent_id
+
+
+def test_cloud_status_does_not_strand_a_never_enabled_store_on_a_stale_offline(tmp_path):
+    """A one-off resolver failure must not claim a retry that nobody will run.
+
+    Regression: a failed enable on a laptop whose DNS was not up yet left
+    protection_state=offline durably. Backups were never enabled and the intent
+    expired, so no operation ever rewrote it, and the panel kept promising
+    "Ormah will retry automatically" a week later.
+    """
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    state_dir = tmp_path / "state"
+    failed_at = datetime(2026, 8, 2, 14, 49, tzinfo=timezone.utc)
+    _stranded_offline_state(
+        memory_dir,
+        state_dir,
+        expires_at=failed_at + timedelta(minutes=30),
+        status=ProtectionIntentStatus.PENDING,
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=False),
+        entitlement="active",
+        now=failed_at + timedelta(days=7),
+        state_dir=state_dir,
+    )
+
+    assert payload["protection_state"] == ProtectionState.LOCAL_ONLY.value
+    assert payload["protection_intent_status"] == ProtectionIntentStatus.EXPIRED.value
+    assert any("nodename nor servname" in warning for warning in payload["warnings"])
+    assert any("never finished setting up" in warning for warning in payload["warnings"])
+
+
+def test_cloud_status_keeps_offline_while_scheduled_backups_still_retry(tmp_path):
+    """Offline is honest when the backup job is enabled — it really does retry."""
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    state_dir = tmp_path / "state"
+    failed_at = datetime(2026, 8, 2, 14, 49, tzinfo=timezone.utc)
+    _stranded_offline_state(
+        memory_dir,
+        state_dir,
+        expires_at=failed_at + timedelta(minutes=30),
+        status=ProtectionIntentStatus.COMPLETED,
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=True),
+        entitlement="active",
+        now=failed_at + timedelta(days=7),
+        state_dir=state_dir,
+    )
+
+    assert payload["protection_state"] == ProtectionState.OFFLINE.value
+    assert any("did not finish" in warning for warning in payload["warnings"])
+    assert any("nodename nor servname" in warning for warning in payload["warnings"])
+
+
+def test_cloud_status_keeps_offline_while_an_unexpired_intent_can_still_resume(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    state_dir = tmp_path / "state"
+    failed_at = datetime(2026, 8, 2, 14, 49, tzinfo=timezone.utc)
+    _stranded_offline_state(
+        memory_dir,
+        state_dir,
+        expires_at=failed_at + timedelta(minutes=30),
+        status=ProtectionIntentStatus.RUNNING,
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=False),
+        entitlement="active",
+        now=failed_at + timedelta(minutes=5),
+        state_dir=state_dir,
+    )
+
+    assert payload["protection_state"] == ProtectionState.OFFLINE.value
+    assert payload["protection_intent_status"] == ProtectionIntentStatus.RUNNING.value
+
+
+def test_cloud_status_never_offers_resume_for_an_expired_running_intent(tmp_path):
+    """An intent that expired mid-run is finished; "resume" could only fail."""
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    state_dir = tmp_path / "state"
+    failed_at = datetime(2026, 8, 2, 14, 49, tzinfo=timezone.utc)
+    _stranded_offline_state(
+        memory_dir,
+        state_dir,
+        expires_at=failed_at + timedelta(minutes=30),
+        status=ProtectionIntentStatus.RUNNING,
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=True),
+        entitlement="active",
+        now=failed_at + timedelta(hours=2),
+        state_dir=state_dir,
+    )
+
+    assert payload["protection_intent_status"] == ProtectionIntentStatus.EXPIRED.value

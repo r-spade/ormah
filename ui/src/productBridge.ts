@@ -311,6 +311,154 @@ export function protectionRepairAction(status: ProtectionStatus): ProtectionRepa
   return "none";
 }
 
+export type ProtectionActionKind =
+  | "signin"
+  | "protect"
+  | "backup"
+  | "verify"
+  | "repair"
+  | "subscribe";
+
+export interface ProtectionAction {
+  kind: ProtectionActionKind;
+  label: string;
+  variant: "primary" | "secondary";
+  disabled: boolean;
+  /** Why the action is demoted or unavailable. Never null when disabled. */
+  reason: string | null;
+}
+
+const BACKUP_LABEL = "Back up now";
+
+const REPAIR_LABELS: Record<Exclude<ProtectionRepairAction, "none">, string> = {
+  verify: "Retry recovery check",
+  signin: "Sign in again",
+  subscribe: "Reactivate subscription",
+  refresh: "Check connection",
+  resume: "Resume protection",
+  backup: "Retry encrypted backup",
+};
+
+function blockedBackup(reason: string): ProtectionAction {
+  return {
+    kind: "backup",
+    label: BACKUP_LABEL,
+    variant: "secondary",
+    disabled: true,
+    reason,
+  };
+}
+
+/**
+ * The summary-view actions for one protection state.
+ *
+ * Backup is the product's core capability, so it never vanishes from a signed-in
+ * summary without a reason attached. States that cannot accept a new upload
+ * return it disabled and explained rather than omitted.
+ */
+export function protectionActions(
+  signedIn: boolean,
+  state: ProtectionState,
+  status: ProtectionStatus | null | undefined,
+): ProtectionAction[] {
+  if (!signedIn) {
+    return [{
+      kind: "signin",
+      label: "Sign in to Ormah Cloud",
+      variant: "primary",
+      disabled: false,
+      reason: null,
+    }];
+  }
+
+  const repair = status ? protectionRepairAction(status) : "none";
+  const repairButton: ProtectionAction[] = repair === "none" ? [] : [{
+    kind: "repair",
+    label: REPAIR_LABELS[repair],
+    variant: "primary",
+    disabled: false,
+    reason: null,
+  }];
+
+  switch (state) {
+    case "local_only":
+    case "sign_in_required":
+    case "stopped":
+      return [{
+        kind: "protect",
+        label: "Protect this memory",
+        variant: "primary",
+        disabled: false,
+        reason: null,
+      }];
+
+    case "protected":
+    case "changes_pending":
+      return [{
+        kind: "backup",
+        label: BACKUP_LABEL,
+        variant: "primary",
+        disabled: false,
+        reason: null,
+      }];
+
+    case "verification_pending":
+      // A manual backup uploads *and* restore-tests the new snapshot, so it is
+      // safe here — only slower and more bandwidth than checking what is
+      // already uploaded. Demote it, do not block it.
+      return [
+        {
+          kind: "verify",
+          label: "Verify this recovery point",
+          variant: "primary",
+          disabled: false,
+          reason: null,
+        },
+        {
+          kind: "backup",
+          label: BACKUP_LABEL,
+          variant: "secondary",
+          disabled: false,
+          reason:
+            "Uploads another recovery point and restore-tests that one instead."
+            + " Checking the backup you already uploaded is faster.",
+        },
+      ];
+
+    case "offline":
+    case "attention_required": {
+      // When repair *is* the backup retry, a second backup button would be a
+      // duplicate of the primary action.
+      if (repair === "backup") return repairButton;
+      return [
+        ...repairButton,
+        blockedBackup(
+          state === "offline"
+            ? "Ormah Cloud is unreachable. Ormah keeps retrying, and your changes stay safe on this device."
+            : "Resolve the problem above before creating another recovery point.",
+        ),
+      ];
+    }
+
+    case "subscription_required":
+    case "paused":
+      return [
+        {
+          kind: "subscribe",
+          label: "Reactivate protection",
+          variant: "primary",
+          disabled: false,
+          reason: null,
+        },
+        blockedBackup("An active subscription is required to upload new recovery points."),
+      ];
+
+    default:
+      // initializing, uploading_first_backup, verifying_first_backup
+      return [blockedBackup("Ormah is already working on this recovery point.")];
+  }
+}
+
 export function protectionPresentation(state: ProtectionState): ProtectionPresentation {
   switch (state) {
     case "sign_in_required":
@@ -352,7 +500,8 @@ export function protectionPresentation(state: ProtectionState): ProtectionPresen
       return {
         tone: "warning",
         title: "Recovery check needed",
-        detail: "The encrypted backup is uploaded but has not yet passed a restore test.",
+        detail: "Your newest encrypted backup is uploaded but has not yet passed a restore test."
+          + " Verify it before creating another recovery point.",
         action: "retry",
       };
     case "protected":

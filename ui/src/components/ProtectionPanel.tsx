@@ -22,12 +22,14 @@ import {
   effectiveProtectionState,
   operationPhaseIsActive,
   productBridge,
+  protectionActions,
   protectionCompletionSummary,
   protectionPresentation,
   protectionReconnectDelay,
   protectionRepairAction,
   recoveryKitSectionVisible,
   type AccountStatus,
+  type ProtectionActionKind,
   type BillingOffer,
   type OperationPhase,
   type ProtectionOperation,
@@ -120,6 +122,15 @@ function operationLabel(
     default: return "Finishing protection check";
   }
 }
+
+const ACTION_ICONS: Record<ProtectionActionKind, JSX.Element> = {
+  signin: <LogIn size={16} />,
+  protect: <ShieldCheck size={16} />,
+  backup: <RefreshCw size={15} />,
+  verify: <ShieldCheck size={15} />,
+  repair: <RefreshCw size={15} />,
+  subscribe: <CreditCard size={15} />,
+};
 
 const PROTECTION_STAGES = [
   { phase: "preparing", label: "Create local recovery point" },
@@ -737,6 +748,38 @@ export default function ProtectionPanel({
     await refresh();
   }, [beginProtection, offer, refresh, repairAction, runOperation, status]);
 
+  const actions = useMemo(
+    () => protectionActions(
+      Boolean(account?.signed_in),
+      effectiveProtectionState(operation, status),
+      status,
+    ),
+    [account?.signed_in, operation, status],
+  );
+
+  const runProtectionAction = useCallback(async (kind: ProtectionActionKind) => {
+    switch (kind) {
+      case "signin":
+        setLoginPurpose("account");
+        setError(null);
+        setView("email");
+        return;
+      case "protect":
+        await beginProtection();
+        return;
+      case "backup":
+      case "verify":
+        await runOperation(kind);
+        return;
+      case "repair":
+        await runRepairAction();
+        return;
+      case "subscribe":
+        setView("checkout");
+        if (!offer) productBridge.offer().then(setOffer).catch(() => undefined);
+    }
+  }, [beginProtection, offer, runOperation, runRepairAction]);
+
   return (
     <aside className={`side-panel protection-panel ${open ? "open" : ""}`} aria-hidden={!open}>
       <div className="side-panel-header">
@@ -995,49 +1038,18 @@ export default function ProtectionPanel({
 
           {view === "summary" && !activeLabel && (
             <section className="protection-actions">
-              {!account?.signed_in && (
-                <button className="protection-primary" disabled={busy} onClick={() => {
-                  setLoginPurpose("account");
-                  setError(null);
-                  setView("email");
-                }}>
-                  <LogIn size={16} /> Sign in to Ormah Cloud
-                </button>
-              )}
-              {account?.signed_in && ["local_only", "sign_in_required", "stopped"].includes(status?.protection_state || "local_only") && (
-                <button className="protection-primary" disabled={busy} onClick={() => void beginProtection()}>
-                  <ShieldCheck size={16} /> Protect this memory
-                </button>
-              )}
-              {account?.signed_in && ["protected", "changes_pending"].includes(status?.protection_state || "") && (
-                <button className="protection-primary" disabled={busy} onClick={() => void runOperation("backup")}>
-                  <RefreshCw size={15} /> Back up now
-                </button>
-              )}
-              {account?.signed_in && status?.protection_state === "verification_pending" && (
-                <button className="protection-primary" disabled={busy} onClick={() => void runOperation("verify")}>
-                  <ShieldCheck size={15} /> Verify this recovery point
-                </button>
-              )}
-              {["attention_required", "offline"].includes(status?.protection_state || "") && repairAction !== "none" && (
-                <button className="protection-primary" disabled={busy} onClick={() => void runRepairAction()}>
-                  <RefreshCw size={15} />
-                  {repairAction === "verify" ? "Retry recovery check"
-                    : repairAction === "signin" ? "Sign in again"
-                      : repairAction === "subscribe" ? "Reactivate subscription"
-                        : repairAction === "refresh" ? "Check connection"
-                          : repairAction === "resume" ? "Resume protection"
-                            : "Retry encrypted backup"}
-                </button>
-              )}
-              {["subscription_required", "paused"].includes(status?.protection_state || "") && (
-                <button className="protection-primary" disabled={busy} onClick={() => {
-                  setView("checkout");
-                  if (!offer) productBridge.offer().then(setOffer).catch(() => undefined);
-                }}>
-                  <CreditCard size={15} /> Reactivate protection
-                </button>
-              )}
+              {actions.map((action) => (
+                <div className="protection-action" key={action.kind}>
+                  <button
+                    className={action.variant === "primary" ? "protection-primary" : "protection-secondary"}
+                    disabled={busy || action.disabled}
+                    onClick={() => void runProtectionAction(action.kind)}
+                  >
+                    {ACTION_ICONS[action.kind]} {action.label}
+                  </button>
+                  {action.reason && <p className="protection-action-reason">{action.reason}</p>}
+                </div>
+              ))}
             </section>
           )}
 

@@ -663,6 +663,44 @@ def cloud_status_payload(
                 else ProtectionState.SIGN_IN_REQUIRED
             )
 
+    # A protection intent that outlived its expiry is finished, whatever the
+    # last write recorded. Reporting it as still pending or running invites
+    # callers to offer a "resume" that can only fail with intent_expired.
+    intent_status = state.pending_protection_status
+    intent_live = (
+        state.pending_protection_intent_id is not None
+        and intent_status not in TERMINAL_PROTECTION_INTENT_STATUSES
+    )
+    if (
+        intent_live
+        and state.pending_protection_expires_at is not None
+        and _as_utc(state.pending_protection_expires_at) <= now
+    ):
+        intent_status = ProtectionIntentStatus.EXPIRED
+        intent_live = False
+
+    # OFFLINE is durable: it is written when a cloud call fails and is only
+    # rewritten by the next operation. Nothing performs that next operation
+    # unless scheduled backups are enabled or an intent is still live, so a
+    # transient failure — a laptop whose resolver was not up yet at login —
+    # would otherwise strand the user forever on "Ormah will retry
+    # automatically" while nothing retries. Report the state the user can
+    # actually act on, and keep the original failure visible as the reason.
+    stranded_offline = (
+        protection_state is ProtectionState.OFFLINE
+        and not settings.cloud_backup_enabled
+        and not intent_live
+    )
+    if stranded_offline:
+        protection_state = ProtectionState.LOCAL_ONLY
+    if protection_state is ProtectionState.OFFLINE or stranded_offline:
+        detail = state.last_error_message or "Ormah Cloud could not be reached."
+        warnings.append(
+            f"The last Ormah Cloud attempt did not finish: {detail}"
+            if not stranded_offline
+            else f"Cloud protection was never finished setting up: {detail}"
+        )
+
     return {
         "schema_version": state.schema_version,
         "enabled": settings.cloud_backup_enabled,
@@ -674,7 +712,7 @@ def cloud_status_payload(
         "protection_enabled_at": _serialize_time(state.protection_enabled_at),
         "protection_disabled_at": _serialize_time(state.protection_disabled_at),
         "protection_intent_id": state.pending_protection_intent_id,
-        "protection_intent_status": _serialize_enum(state.pending_protection_status),
+        "protection_intent_status": _serialize_enum(intent_status),
         "protection_intent_created_at": _serialize_time(
             state.pending_protection_created_at
         ),

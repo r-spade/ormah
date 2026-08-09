@@ -4,10 +4,13 @@ import {
   effectiveProtectionState,
   operationPhaseIsActive,
   protectionCompletionSummary,
+  protectionActions,
   protectionReconnectDelay,
   protectionRepairAction,
   protectionPresentation,
   recoveryKitSectionVisible,
+  type ProtectionAction,
+  type ProtectionActionKind,
   type ProtectionStatus,
   type ProtectionState,
 } from "./productBridge";
@@ -220,6 +223,142 @@ describe("effectiveProtectionState", () => {
     };
 
     expect(effectiveProtectionState(running, durable)).toBe("verifying_first_backup");
+  });
+});
+
+describe("protectionActions", () => {
+  const find = (
+    actions: ProtectionAction[],
+    kind: ProtectionActionKind,
+  ): ProtectionAction | undefined => actions.find((action) => action.kind === kind);
+
+  it("offers only sign-in before an account exists", () => {
+    const actions = protectionActions(false, "protected", status({}));
+
+    expect(actions.map((action) => action.kind)).toEqual(["signin"]);
+  });
+
+  it.each<ProtectionState>(["protected", "changes_pending"])(
+    "makes backup the single primary action in %s",
+    (state) => {
+      const actions = protectionActions(true, state, status({ protection_state: state }));
+
+      expect(actions).toEqual([{
+        kind: "backup",
+        label: "Back up now",
+        variant: "primary",
+        disabled: false,
+        reason: null,
+      }]);
+    },
+  );
+
+  it("prefers verification but keeps backup usable and explained when a check is pending", () => {
+    const actions = protectionActions(
+      true,
+      "verification_pending",
+      status({ protection_state: "verification_pending", last_error_code: null }),
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(["verify", "backup"]);
+    expect(find(actions, "verify")?.variant).toBe("primary");
+
+    const backup = find(actions, "backup");
+    expect(backup?.label).toBe("Back up now");
+    expect(backup?.variant).toBe("secondary");
+    // A manual backup restore-tests its own upload, so it is slower here, not unsafe.
+    expect(backup?.disabled).toBe(false);
+    expect(backup?.reason).toContain("restore-tests that one instead");
+  });
+
+  it("keeps backup visible and explained while cloud protection is offline", () => {
+    const actions = protectionActions(
+      true,
+      "offline",
+      status({ protection_state: "offline", enabled: false }),
+    );
+
+    expect(find(actions, "repair")?.label).toBe("Check connection");
+    const backup = find(actions, "backup");
+    expect(backup?.disabled).toBe(true);
+    expect(backup?.reason).toContain("Ormah Cloud is unreachable");
+  });
+
+  it("does not duplicate backup when repair is itself the backup retry", () => {
+    const actions = protectionActions(
+      true,
+      "offline",
+      status({ protection_state: "offline", enabled: true }),
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(["repair"]);
+    expect(find(actions, "repair")?.label).toBe("Retry encrypted backup");
+  });
+
+  it("blocks backup with a reason while an unrepairable failure stands", () => {
+    const actions = protectionActions(
+      true,
+      "attention_required",
+      status({ protection_state: "attention_required", last_error_code: "quota_exceeded" }),
+    );
+
+    expect(find(actions, "repair")).toBeUndefined();
+    const backup = find(actions, "backup");
+    expect(backup?.disabled).toBe(true);
+    expect(backup?.reason).toContain("Resolve the problem above");
+  });
+
+  it("keeps the repair path primary and backup explained during a verify failure", () => {
+    const actions = protectionActions(
+      true,
+      "attention_required",
+      status({ protection_state: "attention_required", last_error_code: "verification_failed" }),
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(["repair", "backup"]);
+    expect(find(actions, "repair")?.label).toBe("Retry recovery check");
+    expect(find(actions, "backup")?.disabled).toBe(true);
+  });
+
+  it("never hides backup from a signed-in, protected store without saying why", () => {
+    const onboarding: ProtectionState[] = ["local_only", "sign_in_required", "stopped"];
+    const states: ProtectionState[] = [
+      "local_only",
+      "sign_in_required",
+      "subscription_required",
+      "initializing",
+      "uploading_first_backup",
+      "verifying_first_backup",
+      "verification_pending",
+      "protected",
+      "changes_pending",
+      "offline",
+      "paused",
+      "stopped",
+      "attention_required",
+    ];
+
+    for (const state of states) {
+      const actions = protectionActions(true, state, status({ protection_state: state }));
+
+      expect(actions.length).toBeGreaterThan(0);
+      for (const action of actions) {
+        if (action.disabled) expect(action.reason).toBeTruthy();
+      }
+
+      const backup = find(actions, "backup");
+      const repair = find(actions, "repair");
+      if (onboarding.includes(state)) {
+        // Protection does not exist yet; "Protect this memory" is the entry point.
+        expect(find(actions, "protect")).toBeDefined();
+        continue;
+      }
+      if (!backup) {
+        expect(repair?.label).toBe("Retry encrypted backup");
+        continue;
+      }
+      if (backup.disabled) expect(backup.reason).toBeTruthy();
+    }
   });
 });
 
