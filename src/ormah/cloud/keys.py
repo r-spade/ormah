@@ -117,7 +117,13 @@ def import_key(source: str, key_path: Path | None = None) -> list[str]:
             "Move it aside first if you really mean to replace it."
         )
     source_path = Path(source).expanduser()
-    text = source_path.read_text(encoding="utf-8") if source_path.is_file() else source
+    try:
+        text = source_path.read_text(encoding="utf-8") if source_path.is_file() else source
+    except OSError:
+        # Raw recovery-kit text can exceed the platform's maximum path length.
+        # `source` is documented to accept either form, so a failed path probe
+        # must fall back to parsing it as text.
+        text = source
     strings = [
         line.strip()
         for line in text.splitlines()
