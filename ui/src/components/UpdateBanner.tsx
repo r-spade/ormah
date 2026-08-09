@@ -34,7 +34,7 @@ export default function UpdateBanner() {
     if (!status || !["checking", "downloading", "installing"].includes(status.phase)) return;
     const timer = window.setInterval(() => void refresh(), POLL_MS);
     return () => window.clearInterval(timer);
-  }, [refresh, status]);
+  }, [refresh, status?.phase]);
 
   const install = useCallback(() => {
     setInstallAttempted(true);
@@ -68,9 +68,10 @@ export default function UpdateBanner() {
     }
   }, []);
 
-  if (!status || status.phase === "checking" || status.phase === "current") return null;
+  if (!status || ["unknown", "checking", "current"].includes(status.phase)) return null;
   if (status.phase === "available" && dismissedVersion === status.version) return null;
-  if (status.phase === "failed" && dismissedVersion === "failed") return null;
+  const dismissalKey = status.phase === "failed" ? (status.version || "failed") : status.version;
+  if (status.phase === "failed" && dismissedVersion === dismissalKey) return null;
 
   const working = status.phase === "downloading" || status.phase === "installing";
   const failed = status.phase === "failed";
@@ -122,7 +123,7 @@ export default function UpdateBanner() {
         <button
           className="update-dismiss"
           aria-label="Dismiss update notice"
-          onClick={() => setDismissedVersion(status.version || "failed")}
+          onClick={() => setDismissedVersion(dismissalKey)}
         ><X size={14} /></button>
       )}
     </section>

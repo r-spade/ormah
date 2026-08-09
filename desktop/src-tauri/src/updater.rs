@@ -9,6 +9,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdatePhase {
+    Unknown,
     Checking,
     Current,
     Available,
@@ -34,6 +35,13 @@ impl UpdateStatus {
             notes: String::new(),
             progress_percent: None,
             message: None,
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            phase: UpdatePhase::Unknown,
+            ..Self::checking()
         }
     }
 
@@ -73,6 +81,7 @@ pub struct UpdateAvailable {
 }
 
 static STATUS: OnceLock<Mutex<UpdateStatus>> = OnceLock::new();
+static AVAILABLE_UPDATE: OnceLock<Mutex<Option<Update>>> = OnceLock::new();
 static INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 struct InstallGuard;
@@ -96,6 +105,23 @@ fn status_store() -> &'static Mutex<UpdateStatus> {
     STATUS.get_or_init(|| Mutex::new(UpdateStatus::checking()))
 }
 
+fn available_update_store() -> &'static Mutex<Option<Update>> {
+    AVAILABLE_UPDATE.get_or_init(|| Mutex::new(None))
+}
+
+fn set_available_update(update: Option<Update>) {
+    *available_update_store()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = update;
+}
+
+fn take_available_update() -> Option<Update> {
+    available_update_store()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+}
+
 fn current_status() -> UpdateStatus {
     status_store()
         .lock()
@@ -114,6 +140,7 @@ fn concise_notes(body: Option<&str>) -> String {
         .unwrap_or_default()
         .lines()
         .map(str::trim)
+        .map(|line| line.trim_start_matches(['#', '-', '*', ' ']))
         .filter(|line| !line.is_empty())
         .take(3)
         .collect::<Vec<_>>()
@@ -124,11 +151,18 @@ fn concise_notes(body: Option<&str>) -> String {
 /// Check once at startup. This only discovers updates; it never installs one.
 pub fn check<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = check_now(&app, true).await {
-            eprintln!("updater check failed: {error}");
-            // Startup checks are best-effort. Being offline is not an app
-            // failure and should not interrupt the user with a warning.
-            set_status(UpdateStatus::current());
+        loop {
+            match check_now(&app, true).await {
+                Ok(status) if status.phase == UpdatePhase::Available => break,
+                Ok(_) => tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await,
+                Err(error) => {
+                    eprintln!("updater check failed: {error}");
+                    // Stay quiet while offline, but do not mistake an unknown
+                    // result for proof that this installation is current.
+                    set_status(UpdateStatus::unknown());
+                    tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+                }
+            }
         }
     });
 }
@@ -145,6 +179,7 @@ async fn check_now<R: Runtime>(
 ) -> tauri_plugin_updater::Result<UpdateStatus> {
     set_status(UpdateStatus::checking());
     let Some(update) = available_update(app).await? else {
+        set_available_update(None);
         let status = UpdateStatus::current();
         set_status(status.clone());
         return Ok(status);
@@ -154,6 +189,7 @@ async fn check_now<R: Runtime>(
         update.version.clone(),
         concise_notes(update.body.as_deref()),
     );
+    set_available_update(Some(update.clone()));
     set_status(status.clone());
     let _ = app.emit(
         "ormah://update-available",
@@ -235,7 +271,11 @@ pub fn install<R: Runtime>(app: AppHandle<R>) {
 }
 
 async fn install_now<R: Runtime>(app: AppHandle<R>) -> tauri_plugin_updater::Result<()> {
-    let Some(update) = available_update(&app).await? else {
+    let update = match take_available_update() {
+        Some(update) => Some(update),
+        None => available_update(&app).await?,
+    };
+    let Some(update) = update else {
         set_status(UpdateStatus::current());
         return Ok(());
     };

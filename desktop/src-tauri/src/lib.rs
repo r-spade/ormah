@@ -229,10 +229,6 @@ pub fn run() {
             // Always enable autostart — ormah should run at login by default.
             let _ = app.handle().autolaunch().enable();
 
-            // Check for a desktop app update in the background — user is
-            // notified and must explicitly click to install.
-            updater::check(app.handle().clone());
-
             // Main window: shows the install/boot flow, then navigates to the
             // graph. Built in Rust so we can attach the scrollbar-hiding init
             // script that also applies after navigating to the graph.
@@ -259,6 +255,10 @@ pub fn run() {
 
             // Build the tray; it owns the stats poller and server controls.
             tray::build(app)?;
+
+            // Check only after the tray has registered its event listeners.
+            // Discovery is background-only; installation still needs a click.
+            updater::check(app.handle().clone());
 
             Ok(())
         })

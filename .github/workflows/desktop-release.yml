@@ -217,6 +217,7 @@ jobs:
       - name: Attach artifacts to GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: |
             dist/**/*.dmg
             dist/**/*.AppImage*
@@ -232,6 +233,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#desktop-v}"
           BASE_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+          gh release view "$GITHUB_REF_NAME" --json body --jq .body > release-notes.txt
 
           APPIMAGE=$(find dist -name '*.AppImage' | head -1)
           DEB=$(find dist -name '*.deb' | head -1)
@@ -240,10 +242,10 @@ jobs:
             [ -s "$f" ] || { echo "missing updater artifact: $f" >&2; exit 1; }
           done
 
-          python3 - "$VERSION" "$BASE_URL" "$APPIMAGE" "$DEB" "$APPTAR" > latest.json <<'EOF'
+          python3 - "$VERSION" "$BASE_URL" "$APPIMAGE" "$DEB" "$APPTAR" release-notes.txt > latest.json <<'EOF'
           import json, pathlib, sys
           from datetime import datetime, timezone
-          version, base_url, appimage, deb, apptar = sys.argv[1:6]
+          version, base_url, appimage, deb, apptar, notes_path = sys.argv[1:7]
           def entry(path):
               p = pathlib.Path(path)
               return {
@@ -252,12 +254,11 @@ jobs:
               }
           print(json.dumps({
               "version": version,
+              "notes": pathlib.Path(notes_path).read_text().strip(),
               "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
               "platforms": {
                   "linux-x86_64-deb": entry(deb),
-                  "linux-x86_64-appimage": entry(appimage),
                   "linux-x86_64": entry(appimage),
-                  "darwin-aarch64-app": entry(apptar),
                   "darwin-aarch64": entry(apptar),
               },
           }, indent=2))

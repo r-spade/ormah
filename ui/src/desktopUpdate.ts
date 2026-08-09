@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type DesktopUpdatePhase =
+  | "unknown"
   | "checking"
   | "current"
   | "available"
