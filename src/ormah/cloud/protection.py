@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import errno
@@ -47,6 +48,7 @@ from ormah.cloud.restore import (
     CloudRestoreError,
     CloudRestoreValidationError,
     PreparedCloudRestore,
+    discard_prepared_cloud_restore,
     prepare_cloud_restore,
     restore_prepared_cloud_snapshot,
     verify_extracted_bundle,
@@ -1825,20 +1827,26 @@ class CloudProtectionService:
 
         try:
             with StoreLock(self.settings.memory_dir):
-                state = _load_writable_state(store_id)
-                result = restore_prepared_cloud_snapshot(
-                    self.settings,
-                    PreparedCloudRestore(
-                        snapshot_id=prepared.snapshot_id,
-                        backup_name=prepared.prepared_backup_name,
-                        verified_node_count=prepared.verified_node_count or 0,
-                        snapshot_created_at=prepared.snapshot_created_at,
-                        skipped_newer_snapshots=prepared.skipped_newer_snapshots,
-                    ),
-                    rebuild_index=True,
-                    engine=self.engine,
-                    progress=report,
+                memory_operation = (
+                    self.engine.memory_operation()
+                    if self.engine is not None
+                    else nullcontext()
                 )
+                with memory_operation:
+                    state = _load_writable_state(store_id)
+                    result = restore_prepared_cloud_snapshot(
+                        self.settings,
+                        PreparedCloudRestore(
+                            snapshot_id=prepared.snapshot_id,
+                            backup_name=prepared.prepared_backup_name,
+                            verified_node_count=prepared.verified_node_count or 0,
+                            snapshot_created_at=prepared.snapshot_created_at,
+                            skipped_newer_snapshots=prepared.skipped_newer_snapshots,
+                        ),
+                        rebuild_index=True,
+                        engine=self.engine,
+                        progress=report,
+                    )
                 update_state(
                     store_id,
                     memory_dir=self.settings.memory_dir,
@@ -1902,6 +1910,20 @@ class CloudProtectionService:
                 snapshot_created_at=prepared.snapshot_created_at,
                 skipped_newer_snapshots=prepared.skipped_newer_snapshots,
             )
+
+    def discard_prepared_restore(self, prepared: ProtectionOperation) -> bool:
+        """Discard one coordinator-held preparation without touching live memory."""
+
+        if (
+            prepared.kind is not ProtectionOperationKind.RESTORE
+            or prepared.phase is not ProtectionOperationPhase.READY
+            or not prepared.prepared_backup_name
+        ):
+            return False
+        return discard_prepared_cloud_restore(
+            self.settings,
+            prepared.prepared_backup_name,
+        )
 
     def verify_now(self, snapshot_id: str | None = None) -> ProtectionOperation:
         """Download and prove one committed snapshot entirely in scratch space."""

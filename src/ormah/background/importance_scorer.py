@@ -6,6 +6,8 @@ import logging
 import math
 from datetime import datetime, timezone
 
+from ormah.background.memory_lock import serialized_memory_job
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +23,7 @@ def _commit_updates_chunked(db, updates, chunk_size: int = 100) -> None:
                 )
 
 
+@serialized_memory_job
 def run_importance_scoring(engine) -> None:
     """Iterate all nodes, compute weighted importance, persist changes."""
     settings = engine.settings

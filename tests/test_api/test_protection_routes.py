@@ -19,6 +19,7 @@ from ormah.cloud.state import (
     ProtectionOperation,
     ProtectionOperationKind,
     ProtectionOperationPhase,
+    ProtectionReasonCode,
     ProtectionState,
 )
 
@@ -48,6 +49,7 @@ def _operation(
 @dataclass
 class FakeProtectionService:
     release_backup: threading.Event | None = None
+    restore_busy_once: bool = False
 
     def __post_init__(self):
         self.calls: list[tuple] = []
@@ -97,6 +99,17 @@ class FakeProtectionService:
 
     def restore_prepared(self, prepared):
         self.calls.append(("restore_prepared", prepared.prepared_backup_name))
+        if self.restore_busy_once:
+            self.restore_busy_once = False
+            return ProtectionOperation(
+                operation_id="durable-restore-busy",
+                kind=ProtectionOperationKind.RESTORE,
+                phase=ProtectionOperationPhase.FAILED,
+                state=ProtectionState.PROTECTED,
+                reason_code=ProtectionReasonCode.STORE_BUSY,
+                message="Memory is busy.",
+                snapshot_id=prepared.snapshot_id,
+            )
         return ProtectionOperation(
             operation_id="durable-restore",
             kind=ProtectionOperationKind.RESTORE,
@@ -107,6 +120,10 @@ class FakeProtectionService:
             snapshot_created_at=prepared.snapshot_created_at,
             safety_backup_name="memory_safety_backup",
         )
+
+    def discard_prepared_restore(self, prepared):
+        self.calls.append(("discard_prepared_restore", prepared.prepared_backup_name))
+        return True
 
 
 class FakeRecoveryKitService:
@@ -384,6 +401,55 @@ def test_restore_preparation_is_verified_then_claimed_once(protection_app):
         json={},
     )
     assert repeated.status_code == 409
+
+
+def test_restore_preparation_cancel_discards_private_copy(protection_app):
+    client, service, _, _ = protection_app
+    response = client.post(
+        "/admin/cloud/protection/restore/prepare", headers=HEADERS, json={}
+    )
+    preparation_id = response.json()["operation_id"]
+    assert _poll(client, preparation_id)["phase"] == "ready"
+
+    canceled = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/cancel",
+        headers=HEADERS,
+        json={},
+    )
+
+    assert canceled.status_code == 200
+    assert canceled.json() == {"status": "discarded"}
+    assert ("discard_prepared_restore", "memory_private_prepared_name") in service.calls
+    repeated = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/cancel",
+        headers=HEADERS,
+        json={},
+    )
+    assert repeated.status_code == 409
+
+
+def test_store_busy_restore_can_retry_same_verified_preparation(protection_app):
+    client, service, _, _ = protection_app
+    service.restore_busy_once = True
+    response = client.post(
+        "/admin/cloud/protection/restore/prepare", headers=HEADERS, json={}
+    )
+    preparation_id = response.json()["operation_id"]
+    assert _poll(client, preparation_id)["phase"] == "ready"
+
+    first = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/confirm",
+        headers=HEADERS,
+        json={},
+    )
+    assert _poll(client, first.json()["operation_id"])["reason_code"] == "store_busy"
+    second = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/confirm",
+        headers=HEADERS,
+        json={},
+    )
+    assert second.status_code == 202
+    assert _poll(client, second.json()["operation_id"])["phase"] == "completed"
 
 
 def test_unknown_operation_returns_404(protection_app):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import io
 import json
 from unittest.mock import patch
 
@@ -86,6 +87,23 @@ def test_cloud_init_import_key(cloud_paths, tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["imported"] is True
     assert cloud_keys.load_identity_strings(key_path) == original
+
+
+def test_cloud_init_imports_recovery_kit_from_stdin(cloud_paths, capsys, monkeypatch):
+    key_path, kit_path, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    original = cloud_keys.load_identity_strings(key_path)
+    original_store_id = (memory_dir / ".store_id").read_text(encoding="utf-8")
+    recovery_text = kit_path.read_text(encoding="utf-8")
+    key_path.rename(key_path.with_suffix(".bak"))
+    (memory_dir / ".store_id").unlink()
+    capsys.readouterr()
+    monkeypatch.setattr("sys.stdin", io.StringIO(recovery_text))
+
+    _run(["cloud", "init", "--import-key", "-", "--json"])
+
+    assert cloud_keys.load_identity_strings(key_path) == original
+    assert (memory_dir / ".store_id").read_text(encoding="utf-8") == original_store_id
 
 
 def test_cloud_rotate_key_json(cloud_paths, capsys):

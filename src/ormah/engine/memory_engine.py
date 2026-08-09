@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+from contextlib import contextmanager
+from functools import wraps
 import logging
 import math
 import re
@@ -74,12 +76,22 @@ _EDGE_TYPE_FACTORS: dict[str, float] = {
 }
 
 
+def _serialized_memory_operation(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._memory_operation_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
 class MemoryEngine:
     """Main facade: remember(), recall(), connect(), context()."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.file_store = FileStore(settings.nodes_dir)
+        self._memory_operation_lock = threading.RLock()
+        self.file_store = FileStore(settings.nodes_dir, self._memory_operation_lock)
         self.db = Database(settings.db_path)
         self.db.init_schema()
         self.db.init_vec_table(settings.embedding_dim)
@@ -470,6 +482,14 @@ class MemoryEngine:
 
     # --- Core operations ---
 
+    @contextmanager
+    def memory_operation(self):
+        """Exclude a live graph mutation while a full restore is swapping files."""
+
+        with self._memory_operation_lock:
+            yield
+
+    @_serialized_memory_operation
     def remember(self, req: CreateNodeRequest, agent_id: str | None = None) -> tuple[str, str]:
         """Store a new memory. Returns (node_id, formatted_text)."""
         title = req.title
@@ -931,6 +951,7 @@ class MemoryEngine:
         enriched = self._attach_feedback_log_ids(enriched, whisper_log_ids)
         return format_search_results(enriched)
 
+    @_serialized_memory_operation
     def update_node(self, node_id: str, req: UpdateNodeRequest) -> str | None:
         """Update a memory node. Returns formatted confirmation or None."""
         node = self.file_store.load(node_id)
@@ -992,6 +1013,7 @@ class MemoryEngine:
 
         return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
 
+    @_serialized_memory_operation
     def delete_node(self, node_id: str) -> str | None:
         """Delete a memory node from disk and index. Returns confirmation or None."""
         if node_id == self.user_node_id:
@@ -1032,6 +1054,7 @@ class MemoryEngine:
         node_type = full_node.type.value if full_node else node.get("type", "unknown") if node else "unknown"
         return f"Deleted [{node_type}]: {title}\nID: {node_id}"
 
+    @_serialized_memory_operation
     def connect(self, req: ConnectRequest) -> str:
         """Create an edge between two nodes."""
         # Verify both nodes exist
@@ -1171,6 +1194,7 @@ class MemoryEngine:
         lines = [line for line in text.splitlines() if not is_maintenance_due_signal(line)]
         return "\n".join(lines).rstrip()
 
+    @_serialized_memory_operation
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:
         """Mark a memory as outdated: set valid_until to now, optionally append reason."""
         node = self.file_store.load(node_id)
@@ -1209,12 +1233,14 @@ class MemoryEngine:
         self._reindex_all_embeddings()
         return count
 
+    @_serialized_memory_operation
     def reload_restored_graph(self) -> int:
         """Reload file, identity, and search state after a full memory restore."""
 
-        self.file_store = FileStore(self.settings.nodes_dir)
+        self.file_store = FileStore(self.settings.nodes_dir, self._memory_operation_lock)
         self.builder = IndexBuilder(self.db, self.file_store)
-        self._hybrid_search = None
+        with self._hybrid_search_lock:
+            self._hybrid_search = None
         count = self.rebuild_index()
 
         row = self.db.conn.execute(
@@ -1386,6 +1412,7 @@ class MemoryEngine:
 
     # --- Merge operations ---
 
+    @_serialized_memory_operation
     def execute_merge(
         self,
         node_id_a: str,
@@ -1561,6 +1588,7 @@ class MemoryEngine:
             f"Merge ID: {merge_id[:8]}"
         )
 
+    @_serialized_memory_operation
     def undo_merge(self, merge_id: str) -> str:
         """Rollback a merge by ID (supports prefix match). Returns confirmation."""
         # Support prefix match
@@ -1737,6 +1765,7 @@ class MemoryEngine:
             "summary": summary,
         }
 
+    @_serialized_memory_operation
     def apply_maintenance_results(self, results: dict) -> dict:
         """Apply Claude's maintenance decisions.
 
@@ -2240,6 +2269,7 @@ class MemoryEngine:
 
     # --- Conversation ingestion ---
 
+    @_serialized_memory_operation
     def ingest_conversation(
         self,
         content: str,

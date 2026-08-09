@@ -130,6 +130,7 @@ class ProtectionReasonCode(StrEnum):
     INDEX_REBUILD_FAILED = "index_rebuild_failed"
     SEARCH_PROBE_FAILED = "search_probe_failed"
     SELF_POINTER_INVALID = "self_pointer_invalid"
+    STORE_MISMATCH = "store_mismatch"
     PROCESSING_LIMIT_EXCEEDED = "processing_limit_exceeded"
     DISK_SPACE_INSUFFICIENT = "disk_space_insufficient"
     OPERATION_INTERRUPTED = "operation_interrupted"

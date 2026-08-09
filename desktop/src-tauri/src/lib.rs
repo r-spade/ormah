@@ -186,6 +186,7 @@ pub fn run() {
             product_bridge::operation_status,
             product_bridge::prepare_restore,
             product_bridge::confirm_restore,
+            product_bridge::cancel_restore,
             product_bridge::import_recovery_kit,
             product_bridge::open_checkout,
             product_bridge::open_billing_portal,

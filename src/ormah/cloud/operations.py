@@ -159,6 +159,15 @@ class ProtectionOperationCoordinator:
             self._claimed_results.add(operation_id)
             return replace(operation.result)
 
+    def release_ready_claim(self, operation_id: str) -> bool:
+        """Allow a verified preparation to be retried after pre-apply failure."""
+
+        with self._lock:
+            if operation_id not in self._claimed_results:
+                return False
+            self._claimed_results.remove(operation_id)
+            return True
+
     def shutdown(self, *, wait: bool = True) -> None:
         with self._lock:
             self._closed = True

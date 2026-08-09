@@ -36,6 +36,7 @@ commands.allow = [
   "operation_status",
   "prepare_restore",
   "confirm_restore",
+  "cancel_restore",
   "import_recovery_kit",
   "open_checkout",
   "open_billing_portal",

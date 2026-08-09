@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 use tauri::{AppHandle, Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -278,6 +279,18 @@ pub async fn confirm_restore(
 }
 
 #[tauri::command]
+pub async fn cancel_restore(
+    window: WebviewWindow,
+    preparation_operation_id: String,
+) -> Result<Value, String> {
+    require_product_origin(&window)?;
+    let preparation_operation_id =
+        validate_uuid4(&preparation_operation_id, "restore preparation")?;
+    let path = format!("/admin/cloud/protection/restore/{preparation_operation_id}/cancel");
+    request_sanitized("POST", &path, Some(json!({}))).await
+}
+
+#[tauri::command]
 pub async fn import_recovery_kit<R: Runtime>(
     app: AppHandle<R>,
     window: WebviewWindow<R>,
@@ -493,43 +506,31 @@ fn read_bounded_recovery_kit_with_metadata(path: &Path) -> Result<(Vec<u8>, Meta
     Ok((bytes, metadata))
 }
 
-struct TemporaryRecoveryMaterial(PathBuf);
-
-impl Drop for TemporaryRecoveryMaterial {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 fn import_recovery_kit_bytes(bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() || bytes.len() as u64 > MAX_RECOVERY_KIT_BYTES {
         return Err("The selected recovery kit is invalid.".to_string());
     }
     let bin = crate::sidecar::find_ormah()
         .ok_or_else(|| "The local Ormah runtime is unavailable.".to_string())?;
-    let path =
-        std::env::temp_dir().join(format!("ormah-recovery-import-{}.md", uuid::Uuid::new_v4()));
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&path)
-        .map_err(|_| "Could not securely stage the recovery kit.".to_string())?;
-    let temporary = TemporaryRecoveryMaterial(path.clone());
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| "Could not securely stage the recovery kit.".to_string())?;
-    drop(file);
-
-    let output = crate::sidecar::clean_python_env(std::process::Command::new(bin))
-        .args(["cloud", "init", "--import-key"])
-        .arg(&temporary.0)
-        .arg("--json")
-        .output()
+    let mut command = crate::sidecar::clean_python_env(std::process::Command::new(bin));
+    command
+        .args(["cloud", "init", "--import-key", "-", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|_| "Could not import the recovery kit.".to_string())?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Could not import the recovery kit.".to_string())?;
+    stdin
+        .write_all(bytes)
+        .map_err(|_| "Could not import the recovery kit.".to_string())?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
         .map_err(|_| "Could not import the recovery kit.".to_string())?;
     if !output.status.success() {
         return Err("The recovery kit could not be imported on this device.".to_string());

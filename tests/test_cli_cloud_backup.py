@@ -184,7 +184,24 @@ def test_prepare_restore_skips_corrupt_newest_without_touching_live_memory(
     assert prepared.verified_node_count == 1
     assert live_path.read_bytes() == before
     assert live_path.stat().st_mtime_ns == before_mtime
+    assert prepared.backup_name.startswith(".ormah-cloud-prepared-")
     assert (settings.backup_dir / prepared.backup_name).is_dir()
+    assert all(item.name != prepared.backup_name for item in service_from_settings(settings).list())
+    assert restore.discard_prepared_cloud_restore(settings, prepared.backup_name) is True
+    assert not (settings.backup_dir / prepared.backup_name).exists()
+
+
+def test_restore_candidates_are_ulid_sorted_and_fallback_is_snapshot_local():
+    from ormah.cloud import restore
+
+    older = {"snapshot_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+    newer = {"snapshot_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW"}
+
+    assert restore._candidate_blobs([older, newer], None) == [newer, older]
+    assert "bundle_corrupt" in restore._FALLBACK_REASON_CODES
+    assert "decrypt_failed" not in restore._FALLBACK_REASON_CODES
+    assert "store_mismatch" not in restore._FALLBACK_REASON_CODES
+    assert "index_environment_unavailable" not in restore._FALLBACK_REASON_CODES
 
 
 def test_cloud_restore_does_not_check_entitlement(tmp_path, monkeypatch):

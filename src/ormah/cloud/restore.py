@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import errno
 import os
 from pathlib import Path
@@ -11,6 +11,7 @@ import re
 import shutil
 import tempfile
 from typing import Any, Callable
+import uuid
 
 import httpx
 
@@ -19,8 +20,9 @@ from ormah.backup import (
     resolve_backup_user_node_id,
     service_from_settings,
 )
-from ormah.cloud.bundle import open_bundle
+from ormah.cloud.bundle import BundleError, open_bundle
 from ormah.cloud.client import client_from_settings
+from ormah.cloud.crypto import CloudCryptoError
 from ormah.cloud.keys import (
     STORE_ID_NAME,
     get_or_create_store_id,
@@ -37,6 +39,19 @@ from ormah.store.markdown import parse_node
 
 _SNAPSHOT_ID_RE = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_PREPARED_PREFIX = ".ormah-cloud-prepared-"
+_PREPARED_NAME_RE = re.compile(r"\.ormah-cloud-prepared-[0-9a-f]{32}")
+_PREPARED_TTL = timedelta(hours=24)
+_FALLBACK_REASON_CODES = frozenset(
+    {
+        "bundle_corrupt",
+        "ciphertext_hash_mismatch",
+        "index_rebuild_failed",
+        "node_parse_failed",
+        "search_probe_failed",
+        "self_pointer_invalid",
+    }
+)
 RestoreProgress = Callable[[str], None]
 
 
@@ -57,7 +72,7 @@ class CloudRestoreValidationError(CloudRestoreError):
 
 @dataclass(frozen=True)
 class PreparedCloudRestore:
-    """A fully verified cloud snapshot installed as a normal local backup."""
+    """A fully verified cloud snapshot held in private temporary staging."""
 
     snapshot_id: str
     backup_name: str
@@ -105,7 +120,10 @@ def _candidate_blobs(
             "no_restorable_backup",
         )
     if requested is None:
-        return blobs
+        # Snapshot IDs are server-generated ULIDs, so lexical descending order
+        # is the protocol's authoritative newest-first order. Calling
+        # _snapshot_id here also fails closed on malformed listing entries.
+        return sorted(blobs, key=_snapshot_id, reverse=True)
     selected = [blob for blob in blobs if blob.get("snapshot_id") == requested]
     if not selected:
         raise CloudRestoreError(f"Cloud snapshot not found: {requested}")
@@ -150,7 +168,7 @@ def verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> in
     if info.store_id != expected_store_id:
         raise CloudRestoreValidationError(
             "The encrypted backup belongs to a different memory store.",
-            "self_pointer_invalid",
+            "store_mismatch",
         )
 
     active_nodes = []
@@ -247,24 +265,45 @@ def _prepare_candidate(
         _progress(progress, "downloading")
         download_file(get_url, encrypted)
         if sha256_file(encrypted) != expected_sha256:
-            raise CloudRestoreError("The encrypted backup did not match its cloud hash.")
+            raise CloudRestoreValidationError(
+                "The encrypted backup did not match its cloud hash.",
+                "ciphertext_hash_mismatch",
+            )
+        with encrypted.open("rb") as stream:
+            has_age_header = stream.read(22) == b"age-encryption.org/v1\n"
+        if not has_age_header:
+            raise CloudRestoreValidationError(
+                "The encrypted backup bundle is corrupt or incompatible.",
+                "bundle_corrupt",
+            )
 
         _progress(progress, "decrypting")
         try:
             info = open_bundle(encrypted, extracted, load_identities())
         except OSError:
             raise
-        except Exception as exc:
+        except CloudCryptoError as exc:
             raise CloudRestoreValidationError(
-                "The encrypted backup could not be decrypted and verified.",
+                "The recovery kit on this device cannot decrypt this memory store.",
                 "decrypt_failed",
+            ) from exc
+        except BundleError as exc:
+            raise CloudRestoreValidationError(
+                "The encrypted backup bundle is corrupt or incompatible.",
+                "bundle_corrupt",
             ) from exc
         _progress(progress, "checking")
         verified_node_count = verify_extracted_bundle(extracted, store_id, info)
 
-        name = backup_service._unique_backup_name(datetime.now(timezone.utc))
-        installed_backup = backup_service.backup_dir / name
-        os.replace(extracted, installed_backup)
+        # The confirmation screen can remain open. Keep its decrypted staging
+        # copy owner-only until the user applies or discards it.
+        extracted.chmod(0o700)
+        for staged_path in extracted.rglob("*"):
+            staged_path.chmod(0o700 if staged_path.is_dir() else 0o600)
+
+        name = f"{_PREPARED_PREFIX}{uuid.uuid4().hex}"
+        prepared_backup = backup_service.backup_dir / name
+        os.replace(extracted, prepared_backup)
         return PreparedCloudRestore(
             snapshot_id=snapshot_id,
             backup_name=name,
@@ -302,6 +341,7 @@ def prepare_cloud_restore(
     store_id = _existing_store_id(settings.memory_dir)
     backup_service = service_from_settings(settings)
     backup_service.backup_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_abandoned_cloud_restores(backup_service.backup_dir)
     client = None
     try:
         _progress(progress, "discovering")
@@ -327,9 +367,9 @@ def prepare_cloud_restore(
                     "This device could not stage the cloud recovery point.",
                     "restore_failed",
                 ) from exc
-            except CloudRestoreError:
+            except CloudRestoreError as exc:
                 rejected += 1
-                if snapshot_id is not None:
+                if snapshot_id is not None or exc.reason_code not in _FALLBACK_REASON_CODES:
                     raise
                 continue
             _progress(progress, "ready")
@@ -364,8 +404,12 @@ def restore_prepared_cloud_snapshot(
 ) -> CloudRestoreResult:
     """Delegate a prepared cloud snapshot to the canonical local restore path."""
 
-    restored = service_from_settings(settings).restore(
-        prepared.backup_name,
+    backup_service = service_from_settings(settings)
+    prepared_path = _prepared_path(backup_service.backup_dir, prepared.backup_name)
+    installed_name = backup_service._unique_backup_name(datetime.now(timezone.utc))
+    os.replace(prepared_path, backup_service.backup_dir / installed_name)
+    restored = backup_service.restore(
+        installed_name,
         rebuild_index=rebuild_index and engine is None,
         progress=progress,
     )
@@ -383,6 +427,64 @@ def restore_prepared_cloud_snapshot(
         restore=restored,
         skipped_newer_snapshots=prepared.skipped_newer_snapshots,
     )
+
+
+def discard_prepared_cloud_restore(settings, prepared_name: str) -> bool:
+    """Delete one unconsumed verified preparation without touching real backups."""
+
+    prepared = _prepared_path(service_from_settings(settings).backup_dir, prepared_name)
+    if not prepared.exists():
+        return False
+    shutil.rmtree(prepared)
+    return True
+
+
+def cleanup_abandoned_cloud_restores(
+    backup_dir: Path,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Remove crash-left preparations after a bounded local-only lifetime."""
+
+    backup_dir = Path(backup_dir).expanduser()
+    if not backup_dir.is_dir():
+        return 0
+    cutoff = (now or datetime.now(timezone.utc)) - _PREPARED_TTL
+    removed = 0
+    for candidate in backup_dir.iterdir():
+        if (
+            candidate.is_symlink()
+            or not candidate.is_dir()
+            or _PREPARED_NAME_RE.fullmatch(candidate.name) is None
+        ):
+            continue
+        try:
+            modified = datetime.fromtimestamp(candidate.stat().st_mtime, timezone.utc)
+        except OSError:
+            continue
+        if modified <= cutoff:
+            shutil.rmtree(candidate, ignore_errors=True)
+            if not candidate.exists():
+                removed += 1
+    return removed
+
+
+def _prepared_path(backup_dir: Path, prepared_name: str) -> Path:
+    if _PREPARED_NAME_RE.fullmatch(prepared_name) is None:
+        raise CloudRestoreError("The prepared recovery point is invalid or unavailable.")
+    backup_dir = Path(backup_dir).expanduser().resolve()
+    candidate = backup_dir / prepared_name
+    if candidate.is_symlink():
+        raise CloudRestoreError("The prepared recovery point is invalid or unavailable.")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise CloudRestoreError(
+            "The prepared recovery point is invalid or unavailable."
+        ) from exc
+    if resolved.parent != backup_dir or not resolved.is_dir():
+        raise CloudRestoreError("The prepared recovery point is invalid or unavailable.")
+    return resolved
 
 
 def restore_cloud_snapshot(

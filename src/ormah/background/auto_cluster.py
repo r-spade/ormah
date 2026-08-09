@@ -5,9 +5,12 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
+from ormah.background.memory_lock import serialized_memory_job
+
 logger = logging.getLogger(__name__)
 
 
+@serialized_memory_job
 def run_auto_cluster(engine) -> None:
     """Assign unassigned nodes to spaces based on their connections."""
     try:

@@ -515,6 +515,7 @@ def _cmd_cloud_init(args):
     from ormah.cloud.crypto import CloudCryptoError
     from ormah.cloud.keys import (
         KEY_PATH,
+        MAX_RECOVERY_KIT_BYTES,
         CloudKeyError,
         extract_store_id,
         get_or_create_store_id,
@@ -529,14 +530,25 @@ def _cmd_cloud_init(args):
 
     try:
         if args.import_key:
+            import_source = args.import_key
+            if import_source == "-":
+                reader = getattr(sys.stdin, "buffer", sys.stdin)
+                raw = reader.read(MAX_RECOVERY_KIT_BYTES + 1)
+                raw_bytes = raw.encode("utf-8") if isinstance(raw, str) else raw
+                if len(raw_bytes) > MAX_RECOVERY_KIT_BYTES:
+                    raise CloudKeyError("The recovery kit exceeds the safe import limit.")
+                try:
+                    import_source = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise CloudKeyError("The recovery kit is not valid UTF-8 text.") from exc
             # The kit's store id is the remote namespace — it must be
             # installed too, or the restored machine would point at a brand
             # new store and orphan every existing backup. Installed first so
             # a store-id conflict aborts before any key material is written.
-            imported_store_id = extract_store_id(args.import_key)
+            imported_store_id = extract_store_id(import_source)
             if imported_store_id:
                 install_store_id(settings.memory_dir, imported_store_id)
-            import_key(args.import_key)
+            import_key(import_source)
         else:
             init_key()
     except (CloudKeyError, CloudCryptoError, OSError) as exc:
@@ -758,7 +770,7 @@ def main():
     cloud_init.add_argument("--json", action="store_true", help="Output result as JSON")
     cloud_init.add_argument(
         "--import-key", metavar="PATH",
-        help="Install identities from a recovery kit or key file (fresh machine)",
+        help="Install identities from a recovery kit/key file, or '-' for standard input",
     )
     cloud_init.set_defaults(func=_cmd_cloud_init)
 

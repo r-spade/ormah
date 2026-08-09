@@ -233,6 +233,8 @@ export const productBridge = {
   prepareRestore: () => native<ProtectionOperation>("prepare_restore"),
   confirmRestore: (preparationOperationId: string) =>
     native<ProtectionOperation>("confirm_restore", { preparationOperationId }),
+  cancelRestore: (preparationOperationId: string) =>
+    native<{ status: "discarded" }>("cancel_restore", { preparationOperationId }),
   importRecoveryKit: () =>
     native<{ status: "imported" | "canceled" }>("import_recovery_kit"),
   openCheckout: (intentId: string) =>
@@ -264,7 +266,6 @@ const VERIFY_FAILURES = new Set([
   "download_failed",
   "ciphertext_hash_unavailable",
   "ciphertext_hash_mismatch",
-  "decrypt_failed",
   "manifest_verification_failed",
   "node_parse_failed",
   "bundle_corrupt",

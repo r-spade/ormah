@@ -6,11 +6,13 @@ import logging
 import math
 from datetime import datetime, timezone
 
+from ormah.background.memory_lock import serialized_memory_job
 from ormah.models.node import Tier, UpdateNodeRequest
 
 logger = logging.getLogger(__name__)
 
 
+@serialized_memory_job
 def run_decay(engine) -> None:
     """Auto-demote working nodes whose FSRS retrievability drops below threshold."""
     try:

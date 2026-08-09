@@ -7,6 +7,8 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from ormah.background.memory_lock import serialized_memory_job
+
 logger = logging.getLogger(__name__)
 
 # Multi-signal weights
@@ -237,6 +239,7 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
         return []
 
 
+@serialized_memory_job
 def run_duplicate_detection(engine) -> None:
     """Find near-duplicate nodes and create merge proposals.
 

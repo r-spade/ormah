@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 
+from ormah.background.memory_lock import serialized_memory_job
+
 logger = logging.getLogger(__name__)
 
 
@@ -177,6 +179,7 @@ def _apply_consolidation(
     return new_id
 
 
+@serialized_memory_job
 def run_consolidation(engine) -> None:
     """Find clusters of similar working memories and consolidate via LLM."""
     settings = engine.settings

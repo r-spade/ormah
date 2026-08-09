@@ -1,5 +1,7 @@
 """Tests for the memory engine."""
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
@@ -669,3 +671,28 @@ def test_get_hybrid_search_constructs_once_under_concurrency(engine):
     assert construct_count == 1
     assert all(r is results[0] for r in results)
     assert results[0] is engine._hybrid_search
+
+
+def test_memory_restore_lock_excludes_live_remember(engine):
+    started = threading.Event()
+    finished = threading.Event()
+    result: list[str] = []
+
+    def writer():
+        started.set()
+        node_id, _ = engine.remember(
+            CreateNodeRequest(content="Written after the restore swap.", type=NodeType.fact)
+        )
+        result.append(node_id)
+        finished.set()
+
+    with engine.memory_operation():
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert started.wait(timeout=1)
+        time.sleep(0.05)
+        assert not finished.is_set()
+
+    thread.join(timeout=2)
+    assert finished.is_set()
+    assert engine.file_store.load(result[0]) is not None

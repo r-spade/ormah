@@ -196,9 +196,11 @@ export default function ProtectionPanel({
   const [confirmStop, setConfirmStop] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState<"save" | "print" | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [bridgeVersion, setBridgeVersion] = useState(0);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const checkoutCheckInFlight = useRef(false);
   const offerRequested = useRef(false);
+  const preparedRestoreRef = useRef<ProtectionOperation | null>(null);
   const desktop = isDesktopApp();
 
   const refresh = useCallback(async () => {
@@ -207,7 +209,8 @@ export default function ProtectionPanel({
     try {
       try {
         const bridge = await productBridge.info();
-        if (bridge.version < 2) throw new Error("unsupported bridge");
+        if (bridge.version < 1) throw new Error("unsupported bridge");
+        setBridgeVersion(bridge.version);
       } catch {
         throw new Error("Update Ormah Desktop to use cloud protection.");
       }
@@ -253,6 +256,7 @@ export default function ProtectionPanel({
         if (!operationIsActive(next)) {
           window.clearInterval(timer);
           if (next.kind === "restore" && next.phase === "ready") {
+            preparedRestoreRef.current = next;
             setView("restore_ready");
             setError(null);
           } else if (next.kind === "restore" && next.reason_code === "key_missing") {
@@ -261,11 +265,21 @@ export default function ProtectionPanel({
           } else if (next.phase === "completed") {
             await refresh();
             if (next.kind === "restore") {
+              preparedRestoreRef.current = null;
               await onRestoreComplete?.();
               setView("restore_complete");
             }
             onToast(operationSuccessMessage(next), "success");
+          } else if (
+            next.kind === "restore"
+            && next.reason_code === "store_busy"
+            && preparedRestoreRef.current
+          ) {
+            setOperation(preparedRestoreRef.current);
+            setView("restore_ready");
+            setError(next.message || "Memory is busy. Close active work and try restore again.");
           } else {
+            if (next.kind === "restore") preparedRestoreRef.current = null;
             setOperation(null);
             if (next.message) setError(next.message);
           }
@@ -378,12 +392,16 @@ export default function ProtectionPanel({
   const beginRestore = useCallback(async () => {
     setLoginPurpose("restore");
     setError(null);
+    if (bridgeVersion < 2) {
+      setError("Update Ormah Desktop to restore a cloud recovery point in the app.");
+      return;
+    }
     if (!account?.signed_in) {
       setView("email");
       return;
     }
     await startRestorePreparation();
-  }, [account?.signed_in, startRestorePreparation]);
+  }, [account?.signed_in, bridgeVersion, startRestorePreparation]);
 
   const requestCode = useCallback(async () => {
     if (!email.trim()) return;
@@ -471,6 +489,27 @@ export default function ProtectionPanel({
       setBusy(false);
     }
   }, [operation?.operation_id, operation?.phase]);
+
+  const cancelPreparedRestore = useCallback(async (closeAfter = false) => {
+    const prepared = preparedRestoreRef.current;
+    if (!prepared?.operation_id) {
+      if (closeAfter) onClose();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await productBridge.cancelRestore(prepared.operation_id);
+      preparedRestoreRef.current = null;
+      setOperation(null);
+      setView("summary");
+      if (closeAfter) onClose();
+    } catch (err) {
+      setError(errorMessage(err, "The temporary recovery copy could not be discarded."));
+    } finally {
+      setBusy(false);
+    }
+  }, [onClose]);
 
   const openCheckout = useCallback(async () => {
     const intentId = operation?.protection_intent_id || status?.protection_intent_id;
@@ -685,7 +724,14 @@ export default function ProtectionPanel({
           <div className="protection-eyebrow">Ormah Cloud</div>
           <h2 className="review-title" ref={headingRef} tabIndex={-1}>Protection</h2>
         </div>
-        <button className="icon-button" onClick={onClose} aria-label="Close protection">
+        <button
+          className="icon-button"
+          onClick={() => {
+            if (view === "restore_ready") void cancelPreparedRestore(true);
+            else onClose();
+          }}
+          aria-label="Close protection"
+        >
           <X size={16} />
         </button>
       </div>
@@ -876,10 +922,11 @@ export default function ProtectionPanel({
 
           {view === "restore_ready" && operation && (
             <section className="protection-step restore-step restore-confirm">
-              <button className="step-back" onClick={() => {
-                setOperation(null);
-                setView("summary");
-              }}>Cancel</button>
+              <button
+                className="step-back"
+                disabled={busy}
+                onClick={() => void cancelPreparedRestore()}
+              >Cancel</button>
               <div className="restore-proof">
                 <ShieldCheck size={18} />
                 <div>

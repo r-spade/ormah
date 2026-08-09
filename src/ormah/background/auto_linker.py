@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_link_type
+from ormah.background.memory_lock import serialized_memory_job
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +313,7 @@ def _apply_edge(
             logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
 
 
+@serialized_memory_job
 def run_auto_linker(engine) -> None:
     """Incrementally link nodes with seq above the watermark; advance only past
     fully-resolved nodes."""

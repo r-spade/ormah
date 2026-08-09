@@ -18,6 +18,7 @@ from ormah.cloud.state import (
     CloudStateError,
     ProtectionOperation,
     ProtectionOperationKind,
+    ProtectionReasonCode,
     cloud_status_payload,
 )
 from ormah.cloud.store_lock import StoreLockTimeout
@@ -276,7 +277,8 @@ def confirm_restore(
         raise HTTPException(status_code=422, detail="Invalid restore preparation ID.") from exc
     if parsed_operation_id.version != 4 or str(parsed_operation_id) != preparation_operation_id:
         raise HTTPException(status_code=422, detail="Invalid restore preparation ID.")
-    prepared = _coordinator(request).claim_ready_result(
+    coordinator = _coordinator(request)
+    prepared = coordinator.claim_ready_result(
         preparation_operation_id,
         kind=ProtectionOperationKind.RESTORE,
     )
@@ -286,12 +288,55 @@ def confirm_restore(
             detail="This restore preparation is unavailable. Check the backup again.",
         )
     service = _service(request)
-    return _submit(
-        request,
-        operation=f"restore:confirm:{preparation_operation_id}",
+
+    def apply_prepared():
+        result = service.restore_prepared(prepared)
+        if result.reason_code is ProtectionReasonCode.STORE_BUSY:
+            coordinator.release_ready_claim(preparation_operation_id)
+        return result
+
+    try:
+        return _submit(
+            request,
+            operation=f"restore:confirm:{preparation_operation_id}",
+            kind=ProtectionOperationKind.RESTORE,
+            action=apply_prepared,
+        )
+    except Exception:
+        coordinator.release_ready_claim(preparation_operation_id)
+        raise
+
+
+@router.post("/restore/{preparation_operation_id}/cancel")
+def cancel_restore(
+    preparation_operation_id: str,
+    body: EmptyRequest,
+    request: Request,
+):
+    """Consume and delete one unneeded verified preparation."""
+
+    del body
+    try:
+        parsed_operation_id = uuid.UUID(preparation_operation_id)
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid restore preparation ID.") from exc
+    if parsed_operation_id.version != 4 or str(parsed_operation_id) != preparation_operation_id:
+        raise HTTPException(status_code=422, detail="Invalid restore preparation ID.")
+    prepared = _coordinator(request).claim_ready_result(
+        preparation_operation_id,
         kind=ProtectionOperationKind.RESTORE,
-        action=lambda: service.restore_prepared(prepared),
     )
+    if prepared is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This restore preparation is no longer available.",
+        )
+    if not _service(request).discard_prepared_restore(prepared):
+        raise HTTPException(
+            status_code=409,
+            detail="This restore preparation is no longer available.",
+        )
+    return {"status": "discarded"}
 
 
 @router.post(

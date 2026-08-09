@@ -147,7 +147,7 @@ function status(overrides: Partial<ProtectionStatus>): ProtectionStatus {
 
 describe("protectionRepairAction", () => {
   it("routes failures only to operations that can repair them", () => {
-    expect(protectionRepairAction(status({ last_error_code: "decrypt_failed" }))).toBe("verify");
+    expect(protectionRepairAction(status({ last_error_code: "decrypt_failed" }))).toBe("none");
     expect(protectionRepairAction(status({ last_error_code: "upload_failed" }))).toBe("backup");
     expect(protectionRepairAction(status({ last_error_code: "sign_in_required" }))).toBe("signin");
     expect(protectionRepairAction(status({ last_error_code: "entitlement_expired" }))).toBe("subscribe");
