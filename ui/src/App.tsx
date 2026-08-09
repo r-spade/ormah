@@ -9,6 +9,7 @@ import InsightsPanel from "./components/InsightsPanel";
 import AdminPanel from "./components/AdminPanel";
 import AgentsPanel from "./components/AgentsPanel";
 import ProtectionPanel from "./components/ProtectionPanel";
+import UpdateBanner from "./components/UpdateBanner";
 import ToastContainer from "./components/Toast";
 import type { ToastData } from "./components/Toast";
 import {
@@ -265,6 +266,7 @@ export default function App() {
         searchInputRef={searchInputRef}
         protectionState={protectionState}
       />
+      <UpdateBanner />
       <div className="graph-container">
         {graph && (
           <GraphView

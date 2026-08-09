@@ -188,6 +188,9 @@ pub fn run() {
             product_bridge::open_billing_portal,
             product_bridge::save_recovery_kit,
             product_bridge::open_printable_recovery_kit,
+            updater::desktop_update_status,
+            updater::check_desktop_update,
+            updater::install_desktop_update,
         ])
         .setup(|app| {
             // Linux: refuse to start a second instance so we never spawn a

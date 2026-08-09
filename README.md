@@ -53,6 +53,11 @@ Silence is better than noise. Ormah should whisper, not shout.
 </p>
 
 No Python or terminal required. Download, open, and Ormah sets itself up.
+Desktop checks for signed releases at startup. When one is available, the main
+app shows its version and concise release notes with **Update now** and
+**Later**. Updates are never installed or restarted silently: installation
+starts only after an explicit click, verifies the configured release signature,
+and keeps the current version available if download or installation fails.
 
 ### Terminal
 

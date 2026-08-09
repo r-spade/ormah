@@ -575,7 +575,7 @@ fn paths_resolve_to_same_file(canonical: &Path, destination: &Path) -> Result<bo
     Ok(resolved_parent.join(filename) == source)
 }
 
-fn require_product_origin<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
+pub(crate) fn require_product_origin<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
     if window.label() != "main" {
         return Err("Desktop product commands are unavailable in this window.".to_string());
     }

@@ -38,4 +38,7 @@ commands.allow = [
   "open_billing_portal",
   "save_recovery_kit",
   "open_printable_recovery_kit",
+  "desktop_update_status",
+  "check_desktop_update",
+  "install_desktop_update",
 ]

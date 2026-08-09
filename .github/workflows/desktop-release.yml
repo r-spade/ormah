@@ -170,6 +170,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --target ${{ matrix.target }}
 
+      # Tauri generates updater signatures for AppImage automatically, but a
+      # desktop installed from our .deb identifies itself as a Debian bundle
+      # and must receive a signed .deb from the update feed.
+      - name: Sign Debian updater artifact
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          DEB=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/deb" -name '*.deb' | head -1)
+          [ -s "$DEB" ] || { echo "missing Debian artifact" >&2; exit 1; }
+          cargo tauri signer sign "$DEB"
+          [ -s "$DEB.sig" ] || { echo "missing Debian updater signature" >&2; exit 1; }
+
       - name: Upload artifacts (macOS)
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
@@ -186,7 +201,7 @@ jobs:
           name: ormah-${{ matrix.target }}
           path: |
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage*
-            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb*
 
   publish:
     needs: build
@@ -219,15 +234,16 @@ jobs:
           BASE_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
 
           APPIMAGE=$(find dist -name '*.AppImage' | head -1)
+          DEB=$(find dist -name '*.deb' | head -1)
           APPTAR=$(find dist -name '*.app.tar.gz' | head -1)
-          for f in "$APPIMAGE" "$APPIMAGE.sig" "$APPTAR" "$APPTAR.sig"; do
+          for f in "$APPIMAGE" "$APPIMAGE.sig" "$DEB" "$DEB.sig" "$APPTAR" "$APPTAR.sig"; do
             [ -s "$f" ] || { echo "missing updater artifact: $f" >&2; exit 1; }
           done
 
-          python3 - "$VERSION" "$BASE_URL" "$APPIMAGE" "$APPTAR" > latest.json <<'EOF'
+          python3 - "$VERSION" "$BASE_URL" "$APPIMAGE" "$DEB" "$APPTAR" > latest.json <<'EOF'
           import json, pathlib, sys
           from datetime import datetime, timezone
-          version, base_url, appimage, apptar = sys.argv[1:5]
+          version, base_url, appimage, deb, apptar = sys.argv[1:6]
           def entry(path):
               p = pathlib.Path(path)
               return {
@@ -238,7 +254,10 @@ jobs:
               "version": version,
               "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
               "platforms": {
+                  "linux-x86_64-deb": entry(deb),
+                  "linux-x86_64-appimage": entry(appimage),
                   "linux-x86_64": entry(appimage),
+                  "darwin-aarch64-app": entry(apptar),
                   "darwin-aarch64": entry(apptar),
               },
           }, indent=2))
