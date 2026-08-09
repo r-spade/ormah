@@ -284,9 +284,11 @@ const BACKUP_FAILURES = new Set([
 
 const PROTECTION_RECONNECT_DELAYS_MS = [5_000, 15_000, 30_000, 60_000] as const;
 
-export function protectionReconnectDelay(attempt: number): number | null {
+export function protectionReconnectDelay(attempt: number): number {
   const index = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
-  return PROTECTION_RECONNECT_DELAYS_MS[index] ?? null;
+  return PROTECTION_RECONNECT_DELAYS_MS[
+    Math.min(index, PROTECTION_RECONNECT_DELAYS_MS.length - 1)
+  ];
 }
 
 export function protectionRepairAction(status: ProtectionStatus): ProtectionRepairAction {

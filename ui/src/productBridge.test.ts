@@ -56,13 +56,14 @@ describe("protectionPresentation", () => {
 });
 
 describe("protectionReconnectDelay", () => {
-  it("backs off and then stops retrying", () => {
-    expect([0, 1, 2, 3, 4].map(protectionReconnectDelay)).toEqual([
+  it("backs off to a capped reconnect interval", () => {
+    expect([0, 1, 2, 3, 4, 5].map(protectionReconnectDelay)).toEqual([
       5_000,
       15_000,
       30_000,
       60_000,
-      null,
+      60_000,
+      60_000,
     ]);
   });
 

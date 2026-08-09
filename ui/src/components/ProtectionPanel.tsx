@@ -192,6 +192,7 @@ export default function ProtectionPanel({
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkoutPolling, setCheckoutPolling] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
@@ -223,6 +224,7 @@ export default function ProtectionPanel({
       const nextStatus = await productBridge.status();
       setAccount(nextAccount);
       setStatus(nextStatus);
+      setRefreshFailed(false);
       onStatusChange?.(nextStatus);
       setError(null);
       if (nextAccount.signed_in && !offerRequested.current) {
@@ -232,6 +234,7 @@ export default function ProtectionPanel({
         });
       }
     } catch (err) {
+      setRefreshFailed(true);
       setError(errorMessage(err, "Protection status is unavailable."));
     } finally {
       setLoading(false);
@@ -245,19 +248,18 @@ export default function ProtectionPanel({
   }, [open, refresh]);
 
   useEffect(() => {
-    if (!open || status?.protection_state !== "offline") {
+    if (!open || (!refreshFailed && status?.protection_state !== "offline")) {
       reconnectAttempt.current = 0;
       return;
     }
     if (loading || operationIsActive(operation)) return;
     const delay = protectionReconnectDelay(reconnectAttempt.current);
-    if (delay === null) return;
     const timer = window.setTimeout(() => {
       reconnectAttempt.current += 1;
       void refresh();
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [loading, open, operation?.status, refresh, status?.protection_state]);
+  }, [loading, open, operation?.status, refresh, refreshFailed, status?.protection_state]);
 
   useEffect(() => {
     if (!open || !operationIsActive(operation)) return;
