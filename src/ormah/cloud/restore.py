@@ -164,12 +164,12 @@ def verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> in
         if exc.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}:
             raise
         raise CloudRestoreValidationError(
-            "A restored memory file could not be validated.",
+            "A restored memory node could not be parsed.",
             "node_parse_failed",
         ) from exc
     except Exception as exc:
         raise CloudRestoreValidationError(
-            "A restored memory file could not be validated.",
+            "A restored memory node could not be parsed.",
             "node_parse_failed",
         ) from exc
 
