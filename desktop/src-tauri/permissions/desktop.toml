@@ -26,6 +26,7 @@ commands.allow = [
   "logout_account",
   "billing_offer",
   "protection_status",
+  "remote_snapshot",
   "create_protection_intent",
   "bind_protection_intent",
   "cancel_protection_intent",
