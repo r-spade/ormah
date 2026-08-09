@@ -322,7 +322,8 @@ def cancel_restore(
         raise HTTPException(status_code=422, detail="Invalid restore preparation ID.") from exc
     if parsed_operation_id.version != 4 or str(parsed_operation_id) != preparation_operation_id:
         raise HTTPException(status_code=422, detail="Invalid restore preparation ID.")
-    prepared = _coordinator(request).claim_ready_result(
+    coordinator = _coordinator(request)
+    prepared = coordinator.claim_ready_result(
         preparation_operation_id,
         kind=ProtectionOperationKind.RESTORE,
     )
@@ -331,7 +332,12 @@ def cancel_restore(
             status_code=409,
             detail="This restore preparation is no longer available.",
         )
-    if not _service(request).discard_prepared_restore(prepared):
+    try:
+        discarded = _service(request).discard_prepared_restore(prepared)
+    except Exception:
+        coordinator.release_ready_claim(preparation_operation_id)
+        raise
+    if not discarded:
         raise HTTPException(
             status_code=409,
             detail="This restore preparation is no longer available.",
