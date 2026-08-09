@@ -392,7 +392,20 @@ export function protectionActions(
         reason: null,
       }];
 
+    // Nothing is outstanding, so backup must not claim the primary slot: a
+    // full-width primary button reads as "do this next" and makes a healthy
+    // store look like it still owes work. It also has to lose that slot to the
+    // recovery-kit prompt, which is a genuine outstanding task.
     case "protected":
+      return [{
+        kind: "backup",
+        label: BACKUP_LABEL,
+        variant: "secondary",
+        disabled: false,
+        reason: "Already uploaded and restore-tested. Ormah backs up on a schedule;"
+          + " this captures changes since then straight away.",
+      }];
+
     case "changes_pending":
       return [{
         kind: "backup",

@@ -238,20 +238,33 @@ describe("protectionActions", () => {
     expect(actions.map((action) => action.kind)).toEqual(["signin"]);
   });
 
-  it.each<ProtectionState>(["protected", "changes_pending"])(
-    "makes backup the single primary action in %s",
-    (state) => {
-      const actions = protectionActions(true, state, status({ protection_state: state }));
+  it("makes backup the single primary action when changes are unprotected", () => {
+    const actions = protectionActions(
+      true,
+      "changes_pending",
+      status({ protection_state: "changes_pending" }),
+    );
 
-      expect(actions).toEqual([{
-        kind: "backup",
-        label: "Back up now",
-        variant: "primary",
-        disabled: false,
-        reason: null,
-      }]);
-    },
-  );
+    expect(actions).toEqual([{
+      kind: "backup",
+      label: "Back up now",
+      variant: "primary",
+      disabled: false,
+      reason: null,
+    }]);
+  });
+
+  it("does not let a healthy store present backup as an outstanding task", () => {
+    // A primary button reads as "do this next". After a successful enable there
+    // is nothing to do, and the recovery-kit prompt is the real outstanding task.
+    const actions = protectionActions(true, "protected", status({ protection_state: "protected" }));
+
+    expect(actions.map((action) => action.kind)).toEqual(["backup"]);
+    const backup = find(actions, "backup");
+    expect(backup?.variant).toBe("secondary");
+    expect(backup?.disabled).toBe(false);
+    expect(backup?.reason).toContain("Already uploaded and restore-tested");
+  });
 
   it("prefers verification but keeps backup usable and explained when a check is pending", () => {
     const actions = protectionActions(
