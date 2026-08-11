@@ -43,6 +43,7 @@ class Connection(BaseModel):
     target: str
     edge: EdgeType = EdgeType.related_to
     weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    reason: str | None = None
 
 
 class MemoryNode(BaseModel):

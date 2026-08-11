@@ -192,10 +192,10 @@ class IndexBuilder:
 
             conn.execute(
                 """
-                INSERT OR REPLACE INTO edges (source_id, target_id, edge_type, weight, created)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO edges (source_id, target_id, edge_type, weight, created, reason)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (node.id, c.target, c.edge.value, c.weight, node.created.isoformat()),
+                (node.id, c.target, c.edge.value, c.weight, node.created.isoformat(), c.reason),
             )
 
     def _remove_node(self, node_id: str, *, keep_vectors: bool = False) -> None:

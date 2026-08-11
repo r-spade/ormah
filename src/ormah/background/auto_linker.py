@@ -305,6 +305,12 @@ def _apply_edge(
                     target=node_b_id,
                     edge=EdgeType(edge_type),
                     weight=round(similarity, 2),
+                    # Coerce: the LLM can return JSON-valid non-strings (reason: 123).
+                    # SQLite takes them, but Connection.reason is typed — a ValidationError
+                    # here is swallowed by the except below, and the edge would end up in
+                    # the index with no markdown connection, which the next reindex deletes
+                    # while auto_link_checked blocks reevaluation. The link would be lost.
+                    reason=str(reason) if reason else None,
                 )
                 mem_node.connections.append(md_conn)
                 mem_node.touch_updated()
