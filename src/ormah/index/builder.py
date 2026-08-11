@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 
 from ormah.index.db import Database
+from ormah.index.fingerprint import content_fingerprint
 from ormah.store.file_store import FileStore
 from ormah.store.markdown import parse_node
 
@@ -22,6 +24,16 @@ class IndexBuilder:
     def full_rebuild(self) -> int:
         """Drop and rebuild the entire index from markdown files. Returns node count."""
         with self.db.transaction() as conn:
+            # #126: capture the fingerprints BEFORE the wipe. A rebuild over CHANGED content
+            # (a restore from an older/newer backup, an edited file) must drop that node's
+            # cached pair verdicts, or the fresh seq is useless — auto_linker skips any pair
+            # already in auto_link_checked, so the old content's link decisions would silently
+            # carry over to the new content. Unchanged nodes keep their verdicts: re-judging an
+            # untouched store with the LLM would be an enormous, pointless cost.
+            prior_fps = {
+                row["id"]: row["content_fingerprint"]
+                for row in conn.execute("SELECT id, content_fingerprint FROM nodes")
+            }
             conn.execute("DELETE FROM node_tags")
             conn.execute("DELETE FROM edges")
             conn.execute("DELETE FROM nodes_fts")
@@ -41,7 +53,7 @@ class IndexBuilder:
         with self.db.transaction():
             for path in paths:
                 try:
-                    self._index_file_nodes_only(path)
+                    self._index_file_nodes_only(path, prior_fingerprints=prior_fps)
                     count += 1
                 except Exception as e:
                     logger.warning("Failed to index %s: %s", path, e)
@@ -78,8 +90,9 @@ class IndexBuilder:
                         self._index_file(path)
                         added += 1
                     elif indexed[node.id] != file_hash:
+                        prior = self._prior_row(node.id)  # read BEFORE the delete (#126)
                         self._remove_node(node.id, keep_vectors=True)
-                        self._index_file(path)
+                        self._index_file(path, prior)
                         updated += 1
                 except Exception as e:
                     logger.warning("Failed to process %s: %s", path, e)
@@ -95,29 +108,61 @@ class IndexBuilder:
         """Index or re-index a single file."""
         node = parse_node(path.read_text(encoding="utf-8"))
         with self.db.transaction():
-            self._remove_node(node.id)
-            self._index_file(path)
+            prior = self._prior_row(node.id)  # read BEFORE the delete (#126)
+            # The vector is still valid exactly when the content fingerprint is: title and
+            # content are what feed the embedding. Dropping it on an unchanged-content
+            # reindex is permanent loss — nothing re-embeds it — and the node would sit
+            # behind the watermark with no vector, invisible to the linker and unable to be
+            # anyone else's semantic candidate. mark_outdated() (valid_until only) walks
+            # exactly this path.
+            unchanged = prior is not None and prior["content_fingerprint"] == content_fingerprint(
+                node.title, node.content, node.type.value, node.space
+            )
+            self._remove_node(node.id, keep_vectors=unchanged)
+            self._index_file(path, prior)
 
-    def _index_file(self, path: Path) -> None:
+    def _prior_row(self, node_id: str) -> sqlite3.Row | None:
+        """The stored fingerprint + seq, read BEFORE _remove_node deletes the row.
+
+        Only the persisted fingerprint may serve as the baseline — see the comparison in
+        _index_file_nodes_only for why the row's live columns must not.
+        """
+        return self.db.conn.execute(
+            "SELECT seq, content_fingerprint FROM nodes WHERE id = ?", (node_id,)
+        ).fetchone()
+
+    def _index_file(self, path: Path, prior: sqlite3.Row | None = None) -> None:
         """Index a single markdown file into the database (nodes + edges)."""
-        self._index_file_nodes_only(path)
+        self._index_file_nodes_only(path, prior)
         self._index_file_edges(path)
 
-    def _index_file_nodes_only(self, path: Path) -> None:
-        """Index node, tags, and FTS from a markdown file (no edges)."""
+    def _index_file_nodes_only(
+        self,
+        path: Path,
+        prior: sqlite3.Row | None = None,
+        prior_fingerprints: dict[str, str | None] | None = None,
+    ) -> None:
+        """Index node, tags, and FTS from a markdown file (no edges).
+
+        ``prior_fingerprints`` is full_rebuild's own invalidation path (#126): prior=None there
+        so every node gets a fresh seq, but a node whose content actually changed (a restore
+        from a stale/edited backup) must still drop its cached pair verdicts.
+        """
         text = path.read_text(encoding="utf-8")
         node = parse_node(text)
         file_hash = self.file_store.file_hash(path)
         conn = self.db.conn
+        new_fp = content_fingerprint(node.title, node.content, node.type.value, node.space)
 
         conn.execute(
             """
             INSERT OR REPLACE INTO nodes
             (id, type, tier, source, space, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
-             valid_until, stability, last_review, file_path, file_hash)
+             valid_until, stability, last_review, file_path, file_hash,
+             content_fingerprint)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?)
             """,
             (
                 node.id,
@@ -138,21 +183,42 @@ class IndexBuilder:
                 node.last_review.isoformat() if node.last_review else None,
                 str(path),
                 file_hash,
+                new_fp,
             ),
         )
 
-        # Durable monotonic change-sequence (council v2 crit#1): allocate the next seq from
-        # meta.node_seq_next — never decreases, independent of current rows, unlike MAX(seq)+1
-        # which is non-monotonic across INSERT OR REPLACE. Every content (re)write lands the node
-        # at the head, so reindex/import/restore re-enter the delta regardless of frontmatter
-        # timestamps. Metadata-only UPDATEs elsewhere do not pass through here.
-        row = conn.execute("SELECT value FROM meta WHERE key = 'node_seq_next'").fetchone()
-        next_seq = int(row[0]) if row else 1
-        conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (next_seq, node.id))
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
-            (str(next_seq + 1),),
-        )
+        # Durable monotonic change-sequence (council v2 crit#1): allocate from meta.node_seq_next
+        # — never decreases, unlike MAX(seq)+1 which is non-monotonic across INSERT OR REPLACE.
+        #
+        # #126: only a CONTENT change requeues. A reindex whose only delta is the connection
+        # block (an edge write by auto_linker/conflict_detector) is not a content change —
+        # requeueing it sent the node back to the end of the queue with nothing to learn, which
+        # pinned the backlog at ~the size of the store. Compare against the PERSISTED fingerprint,
+        # never against the row's live columns: auto_cluster writes `space` directly into SQLite,
+        # so the row can already hold the new value while the fingerprint still reflects the last
+        # indexed content — comparing rows would freeze that node out of relinking for good.
+        if prior is not None and prior["content_fingerprint"] == new_fp:
+            conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (prior["seq"], node.id))
+        else:
+            row = conn.execute("SELECT value FROM meta WHERE key = 'node_seq_next'").fetchone()
+            next_seq = int(row[0]) if row else 1
+            conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (next_seq, node.id))
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+                (str(next_seq + 1),),
+            )
+            if prior is not None:
+                # An INCREMENTAL reindex of an existing node always invalidates its cached
+                # verdicts (the seq only bumped here because the fingerprint changed).
+                self._invalidate_checked_pairs(conn, node.id)
+            elif prior_fingerprints is not None and prior_fingerprints.get(node.id) is not None \
+                    and prior_fingerprints[node.id] != new_fp:
+                # full_rebuild path (#126): prior is None so every node lands a fresh seq, but
+                # a node whose PERSISTED fingerprint actually changed (restore over an
+                # edited/older backup) must still drop its cached pair verdicts, or the old
+                # content's link decisions silently carry over. Unchanged nodes are left alone
+                # — re-judging an untouched store with the LLM would be a huge pointless cost.
+                self._invalidate_checked_pairs(conn, node.id)
 
         # Tags
         for tag in node.tags:
@@ -166,6 +232,23 @@ class IndexBuilder:
         conn.execute(
             "INSERT INTO nodes_fts (id, title, content, tags) VALUES (?, ?, ?, ?)",
             (node.id, node.title or "", node.content, tags_str),
+        )
+
+    def _invalidate_checked_pairs(self, conn: sqlite3.Connection, node_id: str) -> None:
+        """Drop cached pair verdicts for a node whose content fingerprint changed (#126).
+
+        The auto_linker skips any pair already in `auto_link_checked` BEFORE it looks at the
+        edge, so a fresh `seq` alone changes nothing: the node is re-scanned and every one of
+        its pairs is skipped. memory_engine.update_node clears this table only for
+        content/title edits (a type/space edit clears nothing today) — doing it here covers
+        every path into the index, including disk edits and sync.
+
+        Only `auto_link_checked` exists (schema.sql) — duplicate_merger and conflict_detector
+        share this same table (distinguished by the `result` column), there are no separate
+        duplicate_checked / conflict_checked tables.
+        """
+        conn.execute(
+            "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?", (node_id, node_id)
         )
 
     def _index_file_edges(self, path: Path) -> None:

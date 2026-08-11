@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_review TEXT,
     file_path TEXT NOT NULL,
     file_hash TEXT NOT NULL,
-    seq INTEGER NOT NULL DEFAULT 0
+    seq INTEGER NOT NULL DEFAULT 0,
+    content_fingerprint TEXT
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS auto_link_checked (
     checked_at TEXT NOT NULL,
     PRIMARY KEY (node_a, node_b)
 );
+CREATE INDEX IF NOT EXISTS idx_auto_link_checked_node_b ON auto_link_checked(node_b);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

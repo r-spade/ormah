@@ -332,6 +332,28 @@ def test_max_edges_does_not_skip_interrupted_node(engine):
     assert wm < rows[-1]["seq"]  # did not reach the last node
 
 
+def test_max_pairs_per_run_caps_llm_calls_and_does_not_skip_interrupted_node(engine):
+    """#126: pairs_judged must cap LLM calls even when every verdict is 'none' (created stays 0),
+    and the interrupted node must not be marked resolved (fail-closed, like max_edges)."""
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
+    # four mutually-similar nodes -> node A alone has several candidate pairs
+    _create_pair(engine, title_a="A", content_a="shared topic alpha", title_b="B", content_b="shared topic alpha beta")
+    _create_pair(engine, title_a="C", content_a="shared topic alpha gamma", title_b="D", content_b="shared topic alpha delta")
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.auto_link_max_pairs_per_run = 1
+    _reset_adapter()
+    rows = _select_nodes_after(engine.db.conn, 0, limit=100)
+
+    mock_llm = MagicMock(return_value=json.dumps({"relationship": "none", "reason": "x"}))
+    with patch(_LLM_PATCH, mock_llm):
+        run_auto_linker(engine)
+
+    assert mock_llm.call_count == 1, "the run must stop after the first LLM judgement"
+    wm = _get_watermark(engine.db.conn)
+    assert wm < rows[-1]["seq"], "watermark must not advance past the interrupted node"
+
+
 def test_full_rebuild_resets_watermark(engine):
     """A mass reindex must not leave a stale watermark hiding the whole store."""
     from ormah.background.auto_linker import _set_watermark, _get_watermark

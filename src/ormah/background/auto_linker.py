@@ -330,16 +330,26 @@ def run_auto_linker(engine) -> None:
         threshold = settings.auto_link_similarity_threshold
         cross_space_penalty = settings.auto_link_cross_space_penalty
         max_edges = settings.auto_link_max_edges_per_run
+        # #126: created only counts POSITIVE edges — a 'none'/'error' verdict still costs an
+        # LLM call but was free of budget. Before this PR that was harmless (cached pairs were
+        # skipped), but invalidating verdicts on content change makes those pairs eligible
+        # again: a bulk space/content change can now issue thousands of judging calls that
+        # create zero edges, with nothing to stop it. pairs_judged hard-caps every judgement
+        # call, fail-closed exactly like max_edges below (0 = unlimited).
+        max_pairs = settings.auto_link_max_pairs_per_run
 
         watermark = _get_watermark(conn)
         nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
         created = 0
+        pairs_judged = 0
         last_complete: int | None = None
 
         for node in nodes:
             if created >= max_edges:
                 break  # batch budget spent; do not advance past this node
+            if max_pairs > 0 and pairs_judged >= max_pairs:
+                break  # judgement budget spent; do not advance past this node
 
             node_resolved = True
             text = f"{node['title'] or ''} {node['content']}".strip()
@@ -360,6 +370,9 @@ def run_auto_linker(engine) -> None:
 
                 for match in similar:
                     if created >= max_edges:
+                        node_resolved = False  # interrupted mid-node
+                        break
+                    if max_pairs > 0 and pairs_judged >= max_pairs:
                         node_resolved = False  # interrupted mid-node
                         break
                     if match["id"] == node["id"]:
@@ -393,6 +406,7 @@ def run_auto_linker(engine) -> None:
                         continue
 
                     llm_result = _llm_classify_link(settings, node, other)
+                    pairs_judged += 1
                     if llm_result is None:
                         # LLM UNAVAILABLE (raw None) — transient. Leave node unresolved so the
                         # watermark does not pass it. Not a poison: if the LLM is down, EVERY node
