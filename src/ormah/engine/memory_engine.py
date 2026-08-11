@@ -112,8 +112,14 @@ class MemoryEngine:
         """Initialize on server start: rebuild index if empty, ensure self node."""
         count = self.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         if count == 0:
-            n = self.builder.full_rebuild()
-            logger.info("Initial index rebuild: %d nodes", n)
+            try:
+                n = self.builder.full_rebuild()
+                logger.info("Initial index rebuild: %d nodes", n)
+            except Exception as e:
+                # Rebuild aborted (e.g. fd exhaustion) — the index is left as-is instead of
+                # partially overwritten. Log loudly and continue; do NOT crash-loop under
+                # launchd KeepAlive.
+                logger.error("Initial index rebuild FAILED; index left as-is: %s", e)
 
         # Rebuild FTS index if tokenizer was migrated
         fts_rebuild_row = self.db.conn.execute(
@@ -121,12 +127,16 @@ class MemoryEngine:
         ).fetchone()
         if fts_rebuild_row and fts_rebuild_row["value"] == "1":
             logger.info("Rebuilding FTS index after tokenizer migration")
-            n = self.builder.full_rebuild()
-            logger.info("FTS rebuild complete: %d nodes", n)
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_needs_rebuild', '0')"
-                )
+            try:
+                n = self.builder.full_rebuild()
+                logger.info("FTS rebuild complete: %d nodes", n)
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_needs_rebuild', '0')"
+                    )
+            except Exception as e:
+                # Leave fts_needs_rebuild='1' so the next startup retries once fds recover.
+                logger.error("FTS rebuild FAILED; will retry next startup: %s", e)
 
         # Re-embed nodes if the vector store is missing entries or schema version changed
         vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
