@@ -943,9 +943,15 @@ class ContextBuilder:
             # The strongest applicable rule is first so its content, not just
             # its title, reaches the agent; remaining topical results keep order.
             room_for_main = max(max_nodes - len(applicable_preferences), 0)
+            topical_results = search_results[:room_for_main]
+            _mark_removed(
+                search_results,
+                topical_results,
+                "preference_displacement",
+            )
             search_results = (
                 applicable_preferences[:1]
-                + search_results[:room_for_main]
+                + topical_results
                 + applicable_preferences[1:]
             )
 

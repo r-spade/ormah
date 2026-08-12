@@ -159,7 +159,7 @@ This does not infer a preference mode from prompt keywords and does not alter or
 
 ## Whisper candidate diagnostics
 
-For session-scoped whispers, `whisper_log` retains every non-temporal retrieved candidate, including candidates removed before reranking. Rows include retrieval rank and score, raw cosine, cross-encoder signals when available, the absolute gate score, final rank, and the stage that injected or rejected the candidate. This makes floor, topical-filter, gate, and candidate-cap failures distinguishable in live replays.
+For session-scoped whispers, `whisper_log` retains every non-temporal retrieved candidate, including candidates removed before reranking. Rows include retrieval rank and score, raw cosine, cross-encoder signals when available, the absolute gate score, final rank, and the stage that injected or rejected the candidate. This makes floor, topical-filter, gate, candidate-cap, and preference-displacement failures distinguishable in live replays.
 
 Prompt-level payloads live in `retrieval_events`: one text/vector record is shared by every candidate from the same whisper or deliberate-recall call. `whisper_log.id` remains the stable candidate-event key used by exact feedback, while legacy rows are migrated without changing those IDs.
 

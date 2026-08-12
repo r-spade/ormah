@@ -112,9 +112,12 @@ def clear_eval_db(engine, *, preserve_self: bool = False) -> None:
     with engine.db.transaction() as conn:
         # full_rebuild clears nodes/edges/fts; we also clear tables that can
         # leak state across runs and affect scoring (affinity boost, logs, etc).
+        # Keep whisper_log before retrieval_events: the FK uses ON DELETE RESTRICT.
         for table in (
             "node_vectors",
             "whisper_log",
+            "retrieval_events",
+            "whisper_decisions",
             "affinity",
             "review_log",
             "audit_log",

@@ -104,6 +104,9 @@ For a case about the whisper eval pipeline:
    - silence/suppression expectations
 5. aggregate those prompt-level results across the corpus
 
+Seeding clears both candidate-level and prompt-level Whisper diagnostics before each case,
+so one case cannot contaminate another case's measurements.
+
 ## Code Anchors
 
 - `eval/whisper/cli.py`
