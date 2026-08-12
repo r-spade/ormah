@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import tomllib
 from argparse import Namespace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -39,6 +41,29 @@ class TestMakeEngine:
         assert settings.whisper_exploration_enabled is True
         assert settings.fts_weight == 0.4
         assert settings.whisper_out_enabled is False
+
+
+class TestRunMetadata:
+    def test_records_corpus_config_and_code_provenance(self, tmp_path):
+        from eval.whisper.cli import _run_metadata
+
+        corpus = tmp_path / "fixture.jsonl"
+        corpus.write_text('{"id":"case"}\n')
+        metadata = _run_metadata(
+            corpus,
+            Namespace(category="noise", simulate_session=True, preserve_self=False),
+            [{"id": "case", "prompts": []}],
+        )
+
+        assert metadata["corpus_sha256"] == hashlib.sha256(corpus.read_bytes()).hexdigest()
+        assert metadata["category_filter"] == "noise"
+        assert metadata["simulate_session"] is True
+        assert metadata["eval_settings"]["whisper_exploration_enabled"] is True
+        assert len(metadata["code_revision"]) == 40
+        source_version = tomllib.loads(
+            (__import__("pathlib").Path(__file__).parents[2] / "pyproject.toml").read_text()
+        )["project"]["version"]
+        assert metadata["ormah_source_version"] == source_version
 
 
 class TestEvalWhisperCLI:
@@ -117,7 +142,7 @@ class TestEvalWhisperCLI:
                          include_provisional=False)
         with pytest.raises(SystemExit, match="1"):
             cmd_eval_whisper_run(args)
-        assert "no confirmed cases" in capsys.readouterr().err
+        assert "no binding cases" in capsys.readouterr().err
 
     def test_include_provisional_flag_includes_mined(self, monkeypatch):
         from eval.whisper.cli import cmd_eval_whisper_run
@@ -243,6 +268,121 @@ class TestEvalWhisperCLI:
 
         err = capsys.readouterr().err
         assert "Error: broken corpus" in err
+
+    def test_holdout_refuses_failure_details(self, monkeypatch, capsys):
+        from eval.whisper.cli import cmd_eval_whisper_run
+
+        cases = [{
+            "schema_version": "2.0",
+            "id": "holdout-case",
+            "corpus": {"dataset_version": "private-1", "partition": "holdout"},
+            "prompts": [{
+                "id": "turn-1",
+                "text": "private prompt",
+                "expected": {
+                    "adjudication": {"status": "reviewed", "reviewer_count": 1}
+                },
+            }],
+        }]
+        monkeypatch.setattr("eval.whisper.corpus.load_corpus", lambda path: cases)
+        make_engine = MagicMock()
+        monkeypatch.setattr("eval.whisper.cli._make_engine", make_engine)
+
+        args = Namespace(
+            corpus="private.jsonl",
+            category=None,
+            simulate_session=False,
+            preserve_self=False,
+            json=False,
+            show_failures=True,
+            include_provisional=False,
+        )
+        with pytest.raises(SystemExit, match="1"):
+            cmd_eval_whisper_run(args)
+        assert "holdout runs are aggregate-only" in capsys.readouterr().err
+        make_engine.assert_not_called()
+
+    def test_holdout_json_omits_category_aggregates(self, monkeypatch, capsys):
+        from eval.whisper.cli import cmd_eval_whisper_run
+
+        cases = [{
+            "schema_version": "2.0",
+            "id": "holdout-case",
+            "corpus": {"dataset_version": "private-1", "partition": "holdout"},
+            "prompts": [{
+                "id": "turn-1",
+                "text": "private prompt",
+                "expected": {
+                    "adjudication": {"status": "reviewed", "reviewer_count": 1}
+                },
+            }],
+        }]
+        engine = MagicMock()
+        fake_result = SimpleNamespace(
+            metadata={"corpus_schema_mode": "2.0"},
+            aggregate={"total_prompts": 1},
+            category_aggregates={"unique_private_slice": {"total_prompts": 1}},
+        )
+        monkeypatch.setattr("eval.whisper.corpus.load_corpus", lambda path: cases)
+        monkeypatch.setattr("eval.whisper.cli._make_engine", lambda: engine)
+        monkeypatch.setattr(
+            "eval.whisper.runner.run_whisper_eval", lambda *args, **kwargs: fake_result
+        )
+
+        args = Namespace(
+            corpus="private.jsonl",
+            category=None,
+            simulate_session=False,
+            preserve_self=False,
+            json=True,
+            show_failures=False,
+            include_provisional=False,
+            fail_below=None,
+        )
+        cmd_eval_whisper_run(args)
+        payload = json.loads(capsys.readouterr().out)
+        assert "category_aggregates" not in payload
+        engine.shutdown.assert_called_once()
+
+    def test_provisional_labels_cannot_drive_fail_below(self, monkeypatch, capsys):
+        from eval.whisper.cli import cmd_eval_whisper_run
+
+        cases = [{"id": "draft", "provisional": True, "prompts": [{"text": "q"}]}]
+        monkeypatch.setattr("eval.whisper.corpus.load_corpus", lambda path: cases)
+        make_engine = MagicMock()
+        monkeypatch.setattr("eval.whisper.cli._make_engine", make_engine)
+        args = Namespace(
+            corpus=None,
+            category=None,
+            simulate_session=False,
+            preserve_self=False,
+            json=False,
+            show_failures=False,
+            include_provisional=True,
+            fail_below="f1=1.0",
+        )
+        with pytest.raises(SystemExit, match="1"):
+            cmd_eval_whisper_run(args)
+        assert "non-binding" in capsys.readouterr().err
+        make_engine.assert_not_called()
+
+
+class TestFailBelow:
+    def test_legacy_fp_alias_keeps_old_metric(self):
+        from eval.whisper.cli import _check_fail_below
+
+        assert _check_fail_below({"false_positive_rate": 0.1}, "fp_rate=0.2") == 0
+
+    def test_v2_fp_alias_uses_abstain_turn_rate(self):
+        from eval.whisper.cli import _check_fail_below
+
+        aggregate = {"false_positive_rate": 0.0, "false_positive_turn_rate": 0.3}
+        assert _check_fail_below(aggregate, "fp_rate=0.2") == 1
+
+    def test_useful_alias_is_explicit(self):
+        from eval.whisper.cli import _check_fail_below
+
+        assert _check_fail_below({"useful_recall": 0.8}, "useful=0.9") == 1
 
     def test_root_cli_parses_simulate_session_and_preserve_self(self, monkeypatch):
         import ormah.cli as root_cli

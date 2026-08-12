@@ -292,10 +292,12 @@ ormah eval whisper mine         # mine provisional cases from your live whisper_
 ormah eval whisper import-labels  # confirm mined labels after human review
 ```
 
-Eval corpora are intentionally **local-only and gitignored**: they seed real
-memories from the developer's own usage, so they never ship in the repo. See
-`eval/whisper/corpus/README.md` for the case-design and honest-labeling rules.
-CI runs tests and lint only; eval bars are enforced locally via `make eval`.
+Private eval corpora are **local-only and gitignored** because they can contain
+real memories. Public-safe synthetic contract fixtures are tracked under
+`eval/whisper/corpus/public/`. The existing `make eval` bars retain the legacy
+metric contract; schema-v2 point-estimate checks are regression aids, not C08
+release evidence. See `eval/whisper/corpus/README.md` for schema, privacy,
+holdout, and honest-labeling rules. CI runs tests and lint only.
 
 ## Release Process
 

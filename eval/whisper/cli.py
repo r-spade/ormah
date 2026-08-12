@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import platform
+import subprocess
 import sys
+import tomllib
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from eval.settings import RETRIEVAL_EVAL_SETTINGS_OVERRIDES
@@ -55,8 +60,89 @@ def _make_engine():
     return engine
 
 
+def _run_metadata(corpus_path: Path, args, cases: list[dict], engine=None) -> dict:
+    """Capture diagnostic provenance without claiming release reproducibility."""
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        installed_version = version("ormah")
+    except PackageNotFoundError:
+        installed_version = "uninstalled"
+    try:
+        source_version = tomllib.loads((repo_root / "pyproject.toml").read_text())["project"][
+            "version"
+        ]
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        source_version = "unknown"
+    try:
+        revision_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        revision = revision_result.stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=normal"],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        revision = "unknown"
+        dirty = None
+    corpus_sha256 = (
+        hashlib.sha256(corpus_path.read_bytes()).hexdigest() if corpus_path.exists() else None
+    )
+    effective_bytes = json.dumps(
+        cases,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    corpus_metadata = cases[0].get("corpus", {}) if cases else {}
+    runtime_packages = {}
+    for package in ("fastembed", "onnxruntime"):
+        try:
+            runtime_packages[package] = version(package)
+        except PackageNotFoundError:
+            runtime_packages[package] = "uninstalled"
+    return {
+        "provenance_scope": "diagnostic_only",
+        "release_reproducibility_claim": False,
+        "reproducibility_limit": (
+            "Model artifact revisions and clustered release intervals are not captured yet"
+        ),
+        "corpus_name": corpus_path.name,
+        "corpus_sha256": corpus_sha256,
+        "effective_corpus_sha256": hashlib.sha256(effective_bytes).hexdigest(),
+        "effective_case_count": len(cases),
+        "effective_prompt_count": sum(len(case.get("prompts", [])) for case in cases),
+        "dataset_version": corpus_metadata.get("dataset_version"),
+        "partition": corpus_metadata.get("partition"),
+        "code_revision": revision,
+        "code_dirty": dirty,
+        "ormah_source_version": source_version,
+        "installed_distribution_version": installed_version,
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "category_filter": getattr(args, "category", None),
+        "simulate_session": bool(getattr(args, "simulate_session", False)),
+        "preserve_self": bool(getattr(args, "preserve_self", False)),
+        "include_provisional": bool(getattr(args, "include_provisional", False)),
+        "eval_settings": dict(sorted(_EVAL_SETTINGS_OVERRIDES.items())),
+        "runtime_packages": runtime_packages,
+        "reranker_available": (
+            getattr(engine, "_whisper_reranker_available", None) if engine is not None else None
+        ),
+    }
+
+
 def cmd_eval_whisper_run(args):
-    from eval.whisper.corpus import CorpusError, load_corpus
+    from eval.whisper.corpus import CorpusError, filter_binding_cases, load_corpus
     from eval.whisper.runner import run_whisper_eval
     from eval.whisper.report import format_report
 
@@ -74,21 +160,43 @@ def cmd_eval_whisper_run(args):
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Provisional (mined, unreviewed) labels must not bind: their drafts
-    # describe current behavior, not ground truth, until a human confirms
-    # them via `ormah eval whisper import-labels`.
-    if not getattr(args, "include_provisional", False):
-        provisional = sum(1 for c in cases if c.get("provisional"))
-        if provisional:
-            print(
-                f"Skipping {provisional} provisional cases (unreviewed labels do not bind; "
-                "use --include-provisional for a smoke run)",
-                file=sys.stderr,
-            )
-        cases = [c for c in cases if not c.get("provisional")]
+    include_provisional = bool(getattr(args, "include_provisional", False))
+    cases, skipped_prompts = filter_binding_cases(
+        cases, include_provisional=include_provisional
+    )
+    if skipped_prompts:
+        print(
+            f"Skipping {skipped_prompts} provisional/draft prompt(s); "
+            "use --include-provisional for a non-binding smoke run",
+            file=sys.stderr,
+        )
     if not cases:
         print(
-            f"Error: no confirmed cases in corpus '{corpus_path}' — refusing to pass on zero cases",
+            f"Error: no binding cases in corpus '{corpus_path}' — refusing to pass on zero cases",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if include_provisional and getattr(args, "fail_below", None):
+        print(
+            "Error: provisional/draft labels are non-binding and cannot be used with --fail-below",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    partitions = {
+        case.get("corpus", {}).get("partition")
+        for case in cases
+        if case.get("schema_version")
+    }
+    is_holdout = "holdout" in partitions
+    if is_holdout and (
+        getattr(args, "show_failures", False)
+        or getattr(args, "category", None)
+        or include_provisional
+    ):
+        print(
+            "Error: holdout runs are aggregate-only; category filtering, failure details, "
+            "and provisional labels are forbidden",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -105,26 +213,43 @@ def cmd_eval_whisper_run(args):
 
     engine = _make_engine()
     try:
+        metadata = _run_metadata(corpus_path, args, cases, engine=engine)
         result = run_whisper_eval(
             cases,
             engine,
             simulate_session=bool(getattr(args, "simulate_session", False)),
             preserve_self=True if getattr(args, "preserve_self", False) else None,
+            metadata=metadata,
         )
     finally:
         engine.shutdown()
 
     if getattr(args, "json", False):
-        print(json.dumps({
+        payload = {
+            "metadata": getattr(result, "metadata", {}),
             "aggregate": result.aggregate,
-            "category_aggregates": result.category_aggregates,
-        }, indent=2))
+        }
+        if not is_holdout:
+            payload["category_aggregates"] = result.category_aggregates
+        print(json.dumps(payload, indent=2))
     else:
         show_failures = getattr(args, "show_failures", False)
-        print(format_report(result, show_failures=show_failures))
+        if is_holdout:
+            from dataclasses import replace
+
+            display_result = replace(result, prompt_results=[], category_aggregates={})
+        else:
+            display_result = result
+        print(format_report(display_result, show_failures=show_failures))
 
     fail_below = getattr(args, "fail_below", None)
     if fail_below:
+        if result.metadata.get("corpus_schema_mode") == "2.0":
+            print(
+                "Warning: --fail-below checks point estimates for regression only; "
+                "it is not a C08 release-quality gate",
+                file=sys.stderr,
+            )
         sys.exit(_check_fail_below(result.aggregate, fail_below))
 
 
@@ -181,17 +306,18 @@ def cmd_eval_whisper_import_labels(args):
 def _check_fail_below(aggregate: dict, spec: str) -> int:
     """Parse 'f1=0.65,suppression=0.90' and check thresholds. Returns 1 if any fails.
 
-    Metric aliases: recall→injection_recall, precision→injection_precision,
+    Metric aliases: recall→injection_recall, useful→useful_recall,
+    precision→injection_precision,
     top2→top2_recall, suppression→suppression_accuracy. fp_rate is a
     below-is-better metric and is checked as an upper bound.
     """
     key_map = {
         "recall": "injection_recall",
+        "useful": "useful_recall",
         "precision": "injection_precision",
         "f1": "f1",
         "top2": "top2_recall",
         "suppression": "suppression_accuracy",
-        "fp_rate": "false_positive_rate",
     }
     failed = False
     for part in spec.split(","):
@@ -200,9 +326,15 @@ def _check_fail_below(aggregate: dict, spec: str) -> int:
             continue
         metric_raw, threshold_str = part.split("=", 1)
         key = key_map.get(metric_raw.strip().lower(), metric_raw.strip().lower())
+        if key == "fp_rate":
+            key = (
+                "false_positive_turn_rate"
+                if "false_positive_turn_rate" in aggregate
+                else "false_positive_rate"
+            )
         val = aggregate.get(key)
         threshold = float(threshold_str)
-        if key == "false_positive_rate":
+        if key in {"false_positive_turn_rate", "false_positive_rate"}:
             bad = val is None or val > threshold
             op = ">"
         else:
