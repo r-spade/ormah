@@ -152,11 +152,49 @@ class TestSeedCase:
         seed_case(tmp_engine, _CASE)
 
         with tmp_engine.db.transaction() as conn:
+            retrieval_event_id = tmp_engine.db.insert_retrieval_event(
+                conn,
+                surface="whisper",
+                session_id="sess",
+                space="ormah",
+                prompt_hash="hash",
+                prompt_text="prompt",
+                prompt_vec=b"1234",
+                logged_at="2026-01-01T00:00:00Z",
+            )
             conn.execute(
                 "INSERT INTO whisper_log "
-                "(session_id, space, prompt_hash, prompt_text, prompt_vec, node_id, score, was_injected, logged_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("sess", "ormah", "hash", "prompt", b"1234", "aaa-portfact", 0.8, 1, "2026-01-01T00:00:00Z"),
+                "(session_id, space, prompt_hash, prompt_text, prompt_vec, node_id, score, "
+                "was_injected, logged_at, retrieval_event_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "sess",
+                    "ormah",
+                    "hash",
+                    "prompt",
+                    b"1234",
+                    "aaa-portfact",
+                    0.8,
+                    1,
+                    "2026-01-01T00:00:00Z",
+                    retrieval_event_id,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO whisper_decisions "
+                "(session_id, space, prompt_hash, outcome, candidate_count, "
+                "injected_count, max_gate_score, logged_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "sess",
+                    "ormah",
+                    "hash",
+                    "injected",
+                    1,
+                    1,
+                    0.8,
+                    "2026-01-01T00:00:00Z",
+                ),
             )
             conn.execute(
                 "INSERT INTO affinity "
@@ -182,7 +220,15 @@ class TestSeedCase:
 
         clear_eval_db(tmp_engine)
 
-        for table in ("whisper_log", "affinity", "review_log", "audit_log", "auto_link_checked"):
+        for table in (
+            "whisper_log",
+            "retrieval_events",
+            "whisper_decisions",
+            "affinity",
+            "review_log",
+            "audit_log",
+            "auto_link_checked",
+        ):
             row = tmp_engine.db.conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
             assert row["n"] == 0
 

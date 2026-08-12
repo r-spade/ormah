@@ -1255,6 +1255,59 @@ class TestPreferenceApplicability:
         assert "Graph component implementation" in result
         assert "Prefer dark themes" not in result
 
+    def test_preference_displacement_records_terminal_stage(self, mock_graph, tmp_path):
+        from ormah.index.db import Database
+
+        first = _make_node_dict("fact-1", "Primary topical result")
+        displaced = _make_node_dict("fact-2", "Displaced topical result")
+        preference = _make_node_dict(
+            "pref-1", "Prefer simple designs", node_type="preference"
+        )
+        builder, engine = self._builder(
+            mock_graph,
+            [
+                {"node": first, "score": 0.80, "source": "hybrid"},
+                {"node": displaced, "score": 0.75, "source": "hybrid"},
+            ],
+            [{"node": preference, "score": 0.65, "source": "hybrid"}],
+        )
+        diagnostics_db = Database(tmp_path / "diagnostics.db")
+        diagnostics_db.init_schema()
+        engine.db = diagnostics_db
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = [[3.0, 2.0], [0.0]]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), patch(
+            "ormah.engine.context_builder.ContextBuilder._get_classifier",
+            return_value=None,
+        ), patch(
+            "ormah.engine.affinity.batch_fetch_affinity", return_value={}
+        ), patch(
+            "ormah.engine.affinity.compute_affinity_boost", return_value=0.0
+        ):
+            result = builder.build_whisper_context(
+                prompt="build the graph component",
+                max_nodes=2,
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.45,
+                preference_applicability_enabled=True,
+                preference_applicability_gate=0.40,
+                session_id="preference-displacement",
+            )
+
+        rows = diagnostics_db.conn.execute(
+            "SELECT node_id, decision_stage, was_injected FROM whisper_log"
+        ).fetchall()
+        diagnostics = {row["node_id"]: dict(row) for row in rows}
+
+        assert "Primary topical result" in result
+        assert "Prefer simple designs" in result
+        assert "Displaced topical result" not in result
+        assert diagnostics["fact-2"]["decision_stage"] == "preference_displacement"
+        assert diagnostics["fact-2"]["was_injected"] == 0
+
     def test_empty_preference_store_skips_search_and_rerank(self, mock_graph):
         factual = _make_node_dict("fact-1", "Graph component implementation")
         builder, engine = self._builder(
