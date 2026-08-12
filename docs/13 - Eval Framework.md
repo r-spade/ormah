@@ -1,6 +1,6 @@
 # Eval Framework
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-08-12.
 
 Ormah includes an in-repo eval harness for the whisper system under `eval/whisper/`.
 
@@ -50,36 +50,49 @@ ormah eval whisper run --preserve-self
 ormah eval whisper run --json
 ```
 
-## Metrics
+## Metric contracts
 
-Aggregate metrics currently include:
+Legacy local corpora retain their original macro-averaged metrics and report so
+the existing July baseline and `make eval` thresholds do not silently change.
 
-- `injection_recall`
-- `injection_precision`
-- `f1`
-- `top2_recall`
-- `false_positive_rate`
-- `suppression_accuracy` for noise/silent cases
+New schema-v2 corpora use explicit inject/abstain/ask-qualify decisions and report:
 
-## Current Snapshot
+- micro node injection precision and recall;
+- inject-required turns receiving all critical nodes (`useful_recall`);
+- abstain-turn false-positive rate;
+- forbidden-node suppression accuracy;
+- strict exact-label turn precision as an offline proxy;
+- explicit unavailable metrics rather than inferred usage, delivery, or downstream lift.
 
-On 2026-04-07, a local run of:
+The full product `turn_precision` remains unavailable until material helpfulness
+is actually judged. Reported Wilson intervals are descriptive and assume
+independent observations; correlated replay/session release evidence still needs
+a cluster-aware method. `--fail-below` checks point estimates for regression and
+does not constitute the C08 release gate.
 
-```bash
-uv run python3 -m ormah.cli eval whisper run --json
-```
+## Corpus and provenance
 
-produced:
+Schema-v2 files require stable case and prompt IDs, consistent dataset version and
+partition, explicit eligible/required/acceptable/forbidden nodes, a rationale,
+slice labels, and asserted adjudication status. Drafts do not bind unless
+`--include-provisional` is explicitly used for a smoke run.
 
-- `total_prompts = 50`
-- `injection_recall = 0.9069767441860465`
-- `injection_precision = 0.8953488372093024`
-- `f1 = 0.8837209302325582`
-- `top2_recall = 0.9069767441860465`
-- `false_positive_rate = 0.12`
-- `suppression_accuracy = 0.8571428571428571`
+Private holdouts are aggregate-only: the CLI refuses category filtering,
+`--show-failures`, and provisional execution for a holdout partition. Run metadata
+hashes both source and effective selected corpus input and records settings,
+runtime versions, code revision, dirty state, and reranker availability. This is
+diagnostic provenance, not a release reproducibility claim, because model artifact
+revisions and cluster-aware uncertainty are not frozen yet.
 
-These numbers are more current than older notes that cited larger corpus totals such as `158` and `90`.
+## Historical legacy snapshot
+
+The private legacy corpus has changed over time, so historical values must be
+compared only under the legacy contract. The corpus README records dated snapshots.
+For example, the 2026-07-03 100-prompt run reported overall F1 0.69 and silence
+accuracy 0.95. These values are not comparable to schema-v2 metrics.
+
+The tracked `public/contract-smoke-v2.jsonl` fixture validates the schema and
+end-to-end harness only. Its two synthetic prompts are not a product benchmark.
 
 ## Session Simulation
 
@@ -98,10 +111,11 @@ For a case about the whisper eval pipeline:
 1. seed the case-specific memories into the isolated eval DB
 2. call `engine.get_whisper_context(..., _return_debug=True)`
 3. capture returned injected node ids
-4. compare them against:
+4. compare them against either the legacy labels or schema-v2 decision unit:
    - `should_inject`
    - `should_not_inject`
    - silence/suppression expectations
+   - target decision, eligibility, rationale, slice, and adjudication metadata
 5. aggregate those prompt-level results across the corpus
 
 ## Code Anchors

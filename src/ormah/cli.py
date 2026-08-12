@@ -961,7 +961,7 @@ def main():
     ev_wh_run.add_argument("--corpus", default=None,
                            help="Corpus file (absolute, or relative to eval/whisper/corpus/)")
     ev_wh_run.add_argument("--fail-below", default=None, dest="fail_below",
-                           help="Fail if metrics below threshold, e.g. f1=0.65,suppression=0.90")
+                           help="Regression-only point-estimate check, e.g. f1=0.65,suppression=0.90")
     ev_wh_run.add_argument("--include-provisional", action="store_true", dest="include_provisional",
                            help="Include unreviewed mined (provisional) cases in the run (smoke only)")
     ev_wh_run.set_defaults(func=_cmd_eval_whisper_run)

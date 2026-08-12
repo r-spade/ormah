@@ -195,36 +195,147 @@ class TestRunWhisperEval:
 
 
 class TestAggregate:
-    def _make_result(self, category, recall, suppression_correct=None):
+    def _make_result(
+        self,
+        category,
+        *,
+        injected=0,
+        relevant=0,
+        critical=0,
+        found=0,
+        forbidden=0,
+        suppressed=0,
+        target_decision="inject",
+        false_positive_turn=False,
+        turn_helpful=None,
+        useful_turn=False,
+        suppression_correct=None,
+    ):
         from eval.whisper.runner import PromptResult
         metrics = {
-            "injection_recall": recall,
-            "injection_precision": recall,
-            "f1": recall,
-            "top2_recall": recall,
+            "injection_recall": found / critical if critical else None,
+            "injection_precision": relevant / injected if injected else None,
+            "f1": None,
+            "top2_recall": found / critical if critical else None,
             "suppression_correct": suppression_correct,
             "false_positive_present": False,
-            "injection_fired": recall is not None and recall > 0,
+            "false_positive_turn": false_positive_turn,
+            "injection_fired": injected > 0,
+            "injected_count": injected,
+            "relevant_injected_count": relevant,
+            "critical_count": critical,
+            "critical_found_count": found,
+            "forbidden_count": forbidden,
+            "forbidden_suppressed_count": suppressed,
+            "turn_helpful": turn_helpful,
+            "useful_turn": useful_turn,
         }
         return PromptResult(
             case_id="x", prompt="q", category=category,
             should_inject=[], injected_ids=[], metrics=metrics,
+            target_decision=target_decision,
+            schema_version="2.0",
         )
 
-    def test_mean_recall_across_prompts(self):
-        results = [self._make_result("factual", 1.0), self._make_result("factual", 0.5)]
-        agg = _aggregate(results)
-        assert agg["injection_recall"] == pytest.approx(0.75)
-
-    def test_suppression_accuracy(self):
+    def test_injection_recall_is_micro_averaged(self):
         results = [
-            self._make_result("noise", None, suppression_correct=True),
-            self._make_result("noise", None, suppression_correct=False),
+            self._make_result("factual", critical=1, found=1),
+            self._make_result("factual", critical=3, found=1),
         ]
         agg = _aggregate(results)
-        assert agg["suppression_accuracy"] == pytest.approx(0.5)
+        assert agg["injection_recall"] == pytest.approx(0.5)
+
+    def test_useful_recall_counts_inject_turns_receiving_all_critical_memory(self):
+        results = [
+            self._make_result(
+                "factual", critical=2, found=2, useful_turn=True
+            ),
+            self._make_result("factual", critical=1, found=0),
+            self._make_result("noise", target_decision="abstain"),
+        ]
+        agg = _aggregate(results)
+        assert agg["useful_recall"] == pytest.approx(0.5)
+        assert agg["sample_counts"]["useful_recall"] == 2
+
+    def test_injection_precision_counts_abstain_turn_nodes(self):
+        results = [
+            self._make_result("factual", injected=1, relevant=1, critical=1, found=1),
+            self._make_result(
+                "noise",
+                injected=3,
+                target_decision="abstain",
+                false_positive_turn=True,
+            ),
+        ]
+        assert _aggregate(results)["injection_precision"] == pytest.approx(0.25)
+
+    def test_forbidden_node_suppression_accuracy(self):
+        results = [
+            self._make_result("factual", forbidden=3, suppressed=3),
+            self._make_result("factual", forbidden=1, suppressed=0),
+        ]
+        agg = _aggregate(results)
+        assert agg["suppression_accuracy"] == pytest.approx(0.75)
+
+    def test_false_positive_turn_rate_uses_only_abstain_denominator(self):
+        results = [
+            self._make_result(
+                "noise", target_decision="abstain", false_positive_turn=True
+            ),
+            self._make_result("noise", target_decision="abstain"),
+            *[self._make_result("factual", critical=1, found=1) for _ in range(8)],
+        ]
+        agg = _aggregate(results)
+        assert agg["false_positive_turn_rate"] == pytest.approx(0.5)
+        assert agg["sample_counts"]["false_positive_turn_rate"] == 2
+
+    def test_wilson_interval_and_denominator_are_reported(self):
+        results = [
+            self._make_result("factual", injected=1, relevant=1),
+            self._make_result("factual", injected=1, relevant=0),
+        ]
+        agg = _aggregate(results)
+        low, high = agg["descriptive_wilson_intervals"]["injection_precision"]
+        assert low < 0.5 < high
+        assert agg["sample_counts"]["injection_precision"] == 2
+
+    def test_ask_qualify_injection_makes_full_turn_precision_unavailable(self):
+        results = [
+            self._make_result(
+                "conflict",
+                injected=1,
+                relevant=1,
+                target_decision="ask_qualify",
+            )
+        ]
+        agg = _aggregate(results)
+        assert agg["turn_precision"] is None
+        assert agg["unscorable_injected_turn_count"] == 1
+        assert agg["sample_counts"]["turn_precision"] == 0
+        assert agg["strict_label_turn_precision"] is None
 
     def test_no_labeled_non_noise_returns_none_for_recall(self):
-        results = [self._make_result("noise", None, suppression_correct=True)]
+        results = [self._make_result("noise", suppression_correct=True)]
         agg = _aggregate(results)
         assert agg["injection_recall"] is None
+
+    def test_legacy_aggregate_preserves_macro_average(self):
+        results = [
+            self._make_result("factual", critical=1, found=1),
+            self._make_result("factual", critical=2, found=1),
+        ]
+        aggregate = _aggregate(results, schema_mode="legacy_compat")
+        assert aggregate["injection_recall"] == pytest.approx(0.75)
+        assert "useful_recall" not in aggregate
+
+    def test_legacy_fp_does_not_count_unlisted_silent_turn_injection(self):
+        result = self._make_result(
+            "noise",
+            injected=1,
+            target_decision="abstain",
+            false_positive_turn=True,
+        )
+        result.schema_version = None
+        result.metrics["legacy_false_positive_present"] = False
+        aggregate = _aggregate([result], schema_mode="legacy_compat")
+        assert aggregate["false_positive_rate"] == 0.0

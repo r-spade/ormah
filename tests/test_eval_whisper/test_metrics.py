@@ -128,3 +128,46 @@ class TestComputePromptMetrics:
             injection_fired=True,
         )
         assert m["suppression_correct"] is False
+
+    def test_abstain_injection_is_a_false_positive_turn_without_forbidden_ids(self):
+        m = compute_prompt_metrics(
+            should_inject=[],
+            should_not_inject=[],
+            should_suppress=True,
+            injected_ids=["unexpected"],
+            injection_fired=True,
+            target_decision="abstain",
+        )
+        assert m["false_positive_turn"] is True
+        assert m["false_positive_present"] is True
+        assert m["legacy_false_positive_present"] is False
+
+    def test_contract_counters_are_explicit(self):
+        m = compute_prompt_metrics(
+            should_inject=["critical-a", "critical-b"],
+            should_not_inject=["forbidden-a", "forbidden-b"],
+            should_suppress=False,
+            injected_ids=["critical-a", "acceptable", "forbidden-a"],
+            injection_fired=True,
+            may_include=["acceptable"],
+        )
+        assert m["relevant_injected_count"] == 2
+        assert m["injected_count"] == 3
+        assert m["critical_found_count"] == 1
+        assert m["critical_count"] == 2
+        assert m["forbidden_suppressed_count"] == 1
+        assert m["forbidden_count"] == 2
+        assert m["useful_turn"] is False
+
+    def test_useful_turn_requires_all_critical_nodes_but_allows_acceptable_extras(self):
+        m = compute_prompt_metrics(
+            should_inject=["critical-a"],
+            should_not_inject=[],
+            should_suppress=False,
+            injected_ids=["critical-a", "acceptable"],
+            injection_fired=True,
+            may_include=["acceptable"],
+            target_decision="inject",
+        )
+        assert m["useful_turn"] is True
+        assert m["turn_helpful"] is True
