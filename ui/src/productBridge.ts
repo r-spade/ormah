@@ -323,18 +323,6 @@ export interface RemoteSnapshot {
   error: string | null;
 }
 
-export type TransferDirection =
-  | "in_sync"
-  | "cloud_newer"
-  | "device_newer"
-  | "diverged"
-  | "unknown";
-
-export interface TransferState {
-  direction: TransferDirection;
-  headline: string | null;
-}
-
 // Two intervals of the weekly restore-verification job. Inside that window an
 // unchecked upload is the normal resting state, not a problem, so it must not
 // paint the panel with a warning.
@@ -348,40 +336,6 @@ export function verificationIsOverdue(
   const verifiedAt = new Date(status.last_successful_verify_at).getTime();
   if (!Number.isFinite(verifiedAt)) return true;
   return now - verifiedAt > VERIFICATION_OVERDUE_AFTER_MS;
-}
-
-/**
- * Which way memory needs to move between this device and the cloud.
- *
- * The cloud copy is newer whenever the newest snapshot is not the one this
- * device uploaded — that is the only signal a second machine leaves behind.
- */
-export function transferState(
-  status: ProtectionStatus | null | undefined,
-  remote: RemoteSnapshot | null | undefined,
-): TransferState {
-  if (!remote || remote.error || !remote.snapshot_id) {
-    return { direction: "unknown", headline: null };
-  }
-  const cloudNewer = !remote.from_this_device;
-  const deviceNewer = status?.protection_state === "changes_pending";
-
-  if (cloudNewer && deviceNewer) {
-    return {
-      direction: "diverged",
-      headline: "Both have newer memory. Restoring replaces this device's changes.",
-    };
-  }
-  if (cloudNewer) {
-    return { direction: "cloud_newer", headline: "Another device has newer memory." };
-  }
-  if (deviceNewer) {
-    return {
-      direction: "device_newer",
-      headline: "This device has changes that are not backed up yet.",
-    };
-  }
-  return { direction: "in_sync", headline: "Up to date with the cloud." };
 }
 
 export type ProtectionActionKind =
@@ -424,14 +378,32 @@ function blockedBackup(reason: string): ProtectionAction {
   };
 }
 
-/** Push and pull, ordered and weighted by which side holds newer memory. */
-function transferActions(direction: TransferDirection): ProtectionAction[] {
+/**
+ * Push and pull, always offered together in a fixed order.
+ *
+ * Ormah deliberately does not guess which side holds newer memory. The only
+ * signal the cloud carries is who *uploaded* the newest snapshot, and a restore
+ * records nothing, so a device that has just pulled that very snapshot still
+ * looks behind. Weighting the buttons on that signal told a machine it was out
+ * of date immediately after it had caught up. The panel states each side's facts
+ * instead and lets the person decide which way to move.
+ *
+ * The one direction Ormah does know is local: unbacked-up changes on this
+ * device. That comes from local state, not from the cloud listing, so it is
+ * safe to lead with backup.
+ */
+function pushPullActions(
+  status: ProtectionStatus | null | undefined,
+): ProtectionAction[] {
+  const unsavedChanges = status?.protection_state === "changes_pending";
   const backup: ProtectionAction = {
     kind: "backup",
     label: BACKUP_LABEL,
-    variant: "secondary",
+    variant: unsavedChanges ? "primary" : "secondary",
     disabled: false,
-    reason: null,
+    reason: unsavedChanges
+      ? "Uploads the changes this device has made since its last backup."
+      : "Ormah backs up on a schedule; this captures changes since then straight away.",
   };
   const restore: ProtectionAction = {
     kind: "restore",
@@ -441,28 +413,7 @@ function transferActions(direction: TransferDirection): ProtectionAction[] {
     reason: "Replaces this device's memory. Ormah checks the backup and shows"
       + " what is inside before anything changes, and saves a local safety copy first.",
   };
-
-  switch (direction) {
-    case "cloud_newer":
-      return [{ ...restore, variant: "primary" }, backup];
-    case "device_newer":
-      return [{ ...backup, variant: "primary" }, restore];
-    // Neither side is safe to favour: pulling discards local changes and
-    // pushing supersedes the other machine. Make the user choose deliberately.
-    case "diverged":
-      return [
-        { ...backup, reason: "Uploads this device's changes. The other device's newer memory stays in the cloud." },
-        restore,
-      ];
-    default:
-      return [
-        {
-          ...backup,
-          reason: "Ormah backs up on a schedule; this captures changes since then straight away.",
-        },
-        restore,
-      ];
-  }
+  return [backup, restore];
 }
 
 /**
@@ -499,7 +450,6 @@ export function protectionActions(
     reason: null,
   }];
   const restorable = Boolean(remote?.snapshot_id);
-  const { direction } = transferState(status, remote);
   const restoreOnly: ProtectionAction[] = restorable
     ? [{
       kind: "restore",
@@ -527,7 +477,7 @@ export function protectionActions(
 
     case "protected":
     case "changes_pending":
-      return transferActions(direction);
+      return pushPullActions(status);
 
     case "verification_pending":
       // An unchecked upload inside the weekly check window is the normal
@@ -543,7 +493,7 @@ export function protectionActions(
             reason: null,
           }]
           : []),
-        ...transferActions(direction),
+        ...pushPullActions(status),
       ];
 
     case "offline":

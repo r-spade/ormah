@@ -9,7 +9,6 @@ import {
   protectionRepairAction,
   protectionPresentation,
   recoveryKitSectionVisible,
-  transferState,
   verificationIsOverdue,
   type ProtectionAction,
   type ProtectionActionKind,
@@ -275,48 +274,6 @@ function remote(overrides: Partial<RemoteSnapshot> = {}): RemoteSnapshot {
   };
 }
 
-describe("transferState", () => {
-  it("cannot judge direction without a readable cloud listing", () => {
-    expect(transferState(status({}), null).direction).toBe("unknown");
-    expect(transferState(status({}), remote({ error: "offline" })).direction).toBe("unknown");
-    expect(transferState(status({}), remote({ snapshot_id: null })).direction).toBe("unknown");
-  });
-
-  it("reads a snapshot this device did not upload as the other machine's work", () => {
-    const result = transferState(
-      status({ protection_state: "protected" }),
-      remote({ from_this_device: false }),
-    );
-
-    expect(result.direction).toBe("cloud_newer");
-    expect(result.headline).toContain("Another device");
-  });
-
-  it("names unbacked-up local changes", () => {
-    const result = transferState(status({ protection_state: "changes_pending" }), remote());
-
-    expect(result.direction).toBe("device_newer");
-    expect(result.headline).toContain("not backed up");
-  });
-
-  it("says plainly when both sides moved", () => {
-    const result = transferState(
-      status({ protection_state: "changes_pending" }),
-      remote({ from_this_device: false }),
-    );
-
-    expect(result.direction).toBe("diverged");
-    expect(result.headline).toContain("replaces this device's changes");
-  });
-
-  it("confirms agreement when the newest backup is this device's own", () => {
-    const result = transferState(status({ protection_state: "protected" }), remote());
-
-    expect(result.direction).toBe("in_sync");
-    expect(result.headline).toContain("Up to date");
-  });
-});
-
 describe("protectionActions", () => {
   const find = (
     actions: ProtectionAction[],
@@ -329,7 +286,10 @@ describe("protectionActions", () => {
     expect(actions.map((action) => action.kind)).toEqual(["signin"]);
   });
 
-  it("leads with restore when another device holds newer memory", () => {
+  it("does not read another device's upload as this device being behind", () => {
+    // A restore records nothing locally, so a machine that has just pulled this
+    // very snapshot still reports `from_this_device: false`. Urging it to
+    // restore again told it to redo the work it had only just finished.
     const actions = protectionActions(
       true,
       "protected",
@@ -337,9 +297,21 @@ describe("protectionActions", () => {
       remote({ from_this_device: false }),
     );
 
-    expect(actions.map((action) => action.kind)).toEqual(["restore", "backup"]);
-    expect(find(actions, "restore")?.variant).toBe("primary");
+    expect(find(actions, "restore")?.variant).toBe("secondary");
     expect(find(actions, "backup")?.variant).toBe("secondary");
+  });
+
+  it("keeps push and pull in one stable order whatever the cloud holds", () => {
+    const ours = protectionActions(true, "protected", status({}), remote());
+    const theirs = protectionActions(
+      true,
+      "protected",
+      status({}),
+      remote({ from_this_device: false }),
+    );
+
+    expect(ours.map((action) => action.kind)).toEqual(["backup", "restore"]);
+    expect(theirs.map((action) => action.kind)).toEqual(ours.map((action) => action.kind));
   });
 
   it("leads with backup when this device holds unprotected changes", () => {
@@ -354,9 +326,7 @@ describe("protectionActions", () => {
     expect(find(actions, "backup")?.variant).toBe("primary");
   });
 
-  it("refuses to favour either side once both have moved", () => {
-    // Pulling discards local changes and pushing supersedes the other machine,
-    // so neither may be styled as the obvious thing to click.
+  it("always says what restoring costs before it is chosen", () => {
     const actions = protectionActions(
       true,
       "changes_pending",
@@ -364,9 +334,8 @@ describe("protectionActions", () => {
       remote({ from_this_device: false }),
     );
 
-    expect(actions.every((action) => action.variant === "secondary")).toBe(true);
-    expect(find(actions, "backup")?.reason).toContain("stays in the cloud");
     expect(find(actions, "restore")?.reason).toContain("Replaces this device's memory");
+    expect(find(actions, "restore")?.reason).toContain("safety copy");
   });
 
   it("does not let a healthy store present backup as an outstanding task", () => {

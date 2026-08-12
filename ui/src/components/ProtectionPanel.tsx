@@ -25,7 +25,6 @@ import {
   productBridge,
   protectionActions,
   protectionCompletionSummary,
-  transferState,
   protectionPresentation,
   protectionReconnectDelay,
   protectionRepairAction,
@@ -772,8 +771,6 @@ export default function ProtectionPanel({
     [account?.signed_in, operation, remote, status],
   );
 
-  const transfer = useMemo(() => transferState(status, remote), [remote, status]);
-
   const runProtectionAction = useCallback(async (kind: ProtectionActionKind) => {
     switch (kind) {
       case "signin":
@@ -1081,10 +1078,6 @@ export default function ProtectionPanel({
                 {remote?.restore_tested_here && <span className="protection-proven">proven to restore</span>}
               </div>
             </section>
-          )}
-
-          {view === "summary" && !activeLabel && transfer.headline && (
-            <p className={`protection-direction direction-${transfer.direction}`}>{transfer.headline}</p>
           )}
 
           {view === "summary" && !activeLabel && (

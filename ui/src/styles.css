@@ -1443,17 +1443,6 @@ body.in-app .node-detail.tier-core {
   color: var(--text-muted);
 }
 
-.protection-direction {
-  margin: 0;
-  padding: 12px 0 0;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text);
-}
-
-.protection-direction.direction-in_sync { color: var(--node-self); }
-.protection-direction.direction-diverged { color: var(--text-bright); }
-
 .protection-action-reason {
   margin: 6px 0 0;
   color: var(--text-muted);
