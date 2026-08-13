@@ -28,6 +28,7 @@ import {
   protectionPresentation,
   protectionReconnectDelay,
   protectionRepairAction,
+  resolveCheckoutIntent,
   recoveryKitSectionVisible,
   type AccountStatus,
   type ProtectionActionKind,
@@ -555,11 +556,15 @@ export default function ProtectionPanel({
   }, [onClose]);
 
   const openCheckout = useCallback(async () => {
-    const intentId = operation?.protection_intent_id || status?.protection_intent_id;
-    if (!intentId) return;
     setBusy(true);
     setError(null);
     try {
+      const resolved = await resolveCheckoutIntent(
+        operation?.protection_intent_id || status?.protection_intent_id,
+        productBridge.createIntent,
+      );
+      const intentId = resolved.intentId;
+      if (resolved.created) setOperation(resolved.created);
       const handoff = await productBridge.openCheckout(intentId);
       if (handoff.status === "already_subscribed") {
         await bindAndContinue(intentId);
@@ -579,7 +584,15 @@ export default function ProtectionPanel({
   const checkPayment = useCallback(async (silent = false) => {
     if (checkoutCheckInFlight.current) return;
     const intentId = operation?.protection_intent_id || status?.protection_intent_id;
-    if (!intentId) return;
+    if (!intentId) {
+      setCheckoutPolling(false);
+      if (!silent) {
+        setError(
+          "The protection request is no longer available. Choose Subscribe with Stripe to start again.",
+        );
+      }
+      return;
+    }
     checkoutCheckInFlight.current = true;
     setBusy(true);
     setError(null);

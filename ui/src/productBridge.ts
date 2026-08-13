@@ -187,6 +187,27 @@ export interface BillingHandoff {
   opened: boolean;
 }
 
+export interface CheckoutIntentResolution {
+  intentId: string;
+  created: ProtectionOperation | null;
+}
+
+export async function resolveCheckoutIntent(
+  existingIntentId: string | null | undefined,
+  createIntent: () => Promise<ProtectionOperation>,
+): Promise<CheckoutIntentResolution> {
+  if (existingIntentId) return { intentId: existingIntentId, created: null };
+
+  const created = await createIntent();
+  if (created.reason_code) {
+    throw new Error(created.message || "Protection could not prepare Checkout.");
+  }
+  if (!created.protection_intent_id) {
+    throw new Error("Protection could not create a durable request for Checkout.");
+  }
+  return { intentId: created.protection_intent_id, created };
+}
+
 export interface LogoutResult {
   signed_in: false;
   revoked_remotely: boolean;

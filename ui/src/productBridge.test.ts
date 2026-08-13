@@ -9,6 +9,7 @@ import {
   protectionRepairAction,
   protectionPresentation,
   recoveryKitSectionVisible,
+  resolveCheckoutIntent,
   verificationIsOverdue,
   type ProtectionAction,
   type ProtectionActionKind,
@@ -16,6 +17,62 @@ import {
   type ProtectionState,
   type RemoteSnapshot,
 } from "./productBridge";
+
+describe("resolveCheckoutIntent", () => {
+  it("reuses a durable intent without creating another", async () => {
+    let calls = 0;
+    const result = await resolveCheckoutIntent("intent-existing", async () => {
+      calls += 1;
+      throw new Error("must not run");
+    });
+
+    expect(result).toEqual({ intentId: "intent-existing", created: null });
+    expect(calls).toBe(0);
+  });
+
+  it("recovers a lost transient intent before opening Checkout", async () => {
+    const created = {
+      operation_id: "operation",
+      kind: "enable" as const,
+      status: "completed" as const,
+      submitted_at: "2026-08-13T22:00:00Z",
+      started_at: null,
+      finished_at: null,
+      phase: "completed" as const,
+      protection_state: "subscription_required" as const,
+      reason_code: null,
+      message: null,
+      snapshot_id: null,
+      protection_intent_id: "intent-created",
+    };
+
+    await expect(resolveCheckoutIntent(null, async () => created)).resolves.toEqual({
+      intentId: "intent-created",
+      created,
+    });
+  });
+
+  it("surfaces a precise failure instead of silently doing nothing", async () => {
+    const missing = {
+      operation_id: "operation",
+      kind: "enable" as const,
+      status: "failed" as const,
+      submitted_at: "2026-08-13T22:00:00Z",
+      started_at: null,
+      finished_at: null,
+      phase: "failed" as const,
+      protection_state: "subscription_required" as const,
+      reason_code: null,
+      message: null,
+      snapshot_id: null,
+      protection_intent_id: null,
+    };
+
+    await expect(resolveCheckoutIntent(undefined, async () => missing)).rejects.toThrow(
+      "durable request for Checkout",
+    );
+  });
+});
 
 describe("protectionPresentation", () => {
   it.each<ProtectionState>([
