@@ -44,6 +44,7 @@ def test_init_schema_migrates_legacy_db_without_seq(tmp_path):
 
         cols = [r[1] for r in db.conn.execute("PRAGMA table_info(nodes)").fetchall()]
         assert "seq" in cols
+        assert "consolidated_into" in cols
         idx = db.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_nodes_seq'"
         ).fetchone()

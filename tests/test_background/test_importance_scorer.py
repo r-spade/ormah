@@ -211,6 +211,65 @@ def test_recency_decay(engine):
     assert recent_imp > old_imp
 
 
+def test_importance_keeps_cumulative_access_and_edge_signals(engine):
+    hub_id, _ = engine.remember(CreateNodeRequest(
+        content="A frequently used connected memory", type=NodeType.fact, title="Hub"
+    ))
+    neighbor_ids = []
+    for i in range(4):
+        nid, _ = engine.remember(CreateNodeRequest(
+            content=f"Connected supporting memory {i}", type=NodeType.fact, title=f"Neighbor {i}"
+        ))
+        neighbor_ids.append(nid)
+        engine.connect(ConnectRequest(source_id=hub_id, target_id=nid))
+
+    old_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    engine.db.conn.execute(
+        "UPDATE nodes SET access_count = 50, last_accessed = ?, importance = 0.0 WHERE id = ?",
+        (old_date, hub_id),
+    )
+    engine.db.conn.commit()
+    run_importance_scoring(engine)
+
+    importance = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (hub_id,)
+    ).fetchone()["importance"]
+    assert importance > 0.0
+
+
+def test_importance_recency_does_not_reuse_stability(engine):
+    first_id, _ = engine.remember(CreateNodeRequest(
+        content="Same age, short stability", type=NodeType.fact, title="Short stability"
+    ))
+    second_id, _ = engine.remember(CreateNodeRequest(
+        content="Same age, long stability", type=NodeType.fact, title="Long stability"
+    ))
+    old_date = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+    engine.db.conn.execute(
+        "UPDATE nodes SET access_count = 0, importance = 0.0, stability = ?, last_accessed = ? "
+        "WHERE id IN (?, ?)",
+        (1.0, old_date, first_id, second_id),
+    )
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = ? WHERE id = ?", (365.0, second_id)
+    )
+    engine.db.conn.commit()
+    engine.settings.importance_access_weight = 0.0
+    engine.settings.importance_edge_weight = 0.0
+    engine.settings.importance_recency_weight = 1.0
+
+    run_importance_scoring(engine)
+
+    first = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (first_id,)
+    ).fetchone()["importance"]
+    second = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (second_id,)
+    ).fetchone()["importance"]
+    assert first == pytest.approx(0.5, abs=0.01)
+    assert second == pytest.approx(first, abs=0.01)
+
+
 def test_batch_query_used(engine):
     """Edge count should be fetched with batch queries, not N per-node queries."""
     # Create a few nodes

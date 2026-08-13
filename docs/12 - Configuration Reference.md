@@ -181,7 +181,7 @@ Important note: current search applies tier as a multiplicative factor after con
 | `importance_access_reference` | `50` |
 | `importance_edge_reference` | `20` |
 | `importance_recency_half_life_days` | `14.0` |
-| `decay_importance_threshold` | `0.5` |
+| `decay_importance_threshold` | `0.5` (deprecated compatibility; no decay effect) |
 
 ## Whisper-Out and Nudge
 
@@ -233,11 +233,26 @@ Important note: current search applies tier as a multiplicative factor after con
 |---|---|
 | `core_memory_cap` | `50` |
 | `working_decay_days` | `14` |
-| `fsrs_initial_stability` | `1.0` |
+| `fsrs_initial_stability` | `5.814084815577761` |
 | `fsrs_decay_threshold` | `0.3` |
-| `fsrs_stability_growth` | `1.5` |
+| `fsrs_reinforcement_gain` | `0.5` |
+| `fsrs_reinforcement_saturation_exponent` | `0.5` |
+| `fsrs_reinforcement_spacing_cap` | `2.0` |
+| `fsrs_stability_growth` | `1.5` (deprecated compatibility; ignored) |
 | `fsrs_max_stability` | `365.0` |
 | `ingest_max_content_chars` | `100000` |
+
+`stability` retains Ormah's exponential meaning: `R = exp(-t / S)`, so `S`
+is the approximately 37% retrievability point. The default initial value
+`-7 / ln(0.3) ≈ 5.814` gives a seven-day unused working lease before the
+daily decay job observes the threshold. Reinforcement is bounded with
+`spacing = min(R^-0.2, 2.0)` and
+`S_new = min(S * (1 + gain * S^-saturation_exponent * spacing), 365)`;
+the constants are policy defaults, not fitted FSRS parameters. The old
+`fsrs_stability_growth` multiplier is retained only so existing configuration
+continues to parse and is not silently reinterpreted. The old
+`decay_importance_threshold` likewise remains parse-compatible but no longer
+gates working-to-archival decay.
 
 ## Agent-Backed Maintenance
 

@@ -7,6 +7,8 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
+from ormah.engine.lifecycle import DEFAULT_INITIAL_STABILITY
+
 
 _ENV_FILES = [
     Path.home() / ".config" / "ormah" / ".env",  # Fixed global config
@@ -87,9 +89,14 @@ class Settings(BaseSettings):
     working_decay_days: int = 14  # Deprecated: superseded by FSRS-based decay
 
     # FSRS spaced repetition decay
-    fsrs_initial_stability: float = 1.0    # days; starting stability for new nodes
+    fsrs_initial_stability: float = DEFAULT_INITIAL_STABILITY  # seven-day R=0.3 lease
     fsrs_decay_threshold: float = 0.3      # R below this = decay candidate
-    fsrs_stability_growth: float = 1.5     # base multiplier on access
+    # Deprecated compatibility setting. Reinforcement now uses the explicit
+    # additive gain below; this old multiplier is intentionally ignored.
+    fsrs_stability_growth: float = 1.5
+    fsrs_reinforcement_gain: float = 0.5
+    fsrs_reinforcement_saturation_exponent: float = 0.5
+    fsrs_reinforcement_spacing_cap: float = 2.0
     fsrs_max_stability: float = 365.0      # cap at 1 year
 
     # Search
@@ -151,7 +158,7 @@ class Settings(BaseSettings):
     # Importance: recency half-life (separate from search recency)
     importance_recency_half_life_days: float = 14.0
 
-    # Decay: skip nodes above this importance
+    # Deprecated compatibility setting; working-tier decay is retrievability-only.
     decay_importance_threshold: float = 0.5
 
     # Whisper-out (involuntary storage on compaction / session end)
@@ -561,11 +568,24 @@ class Settings(BaseSettings):
             raise ValueError(f"threshold must be 0–1, got {v}")
         return v
 
-    @field_validator("fsrs_initial_stability", "fsrs_stability_growth")
+    @field_validator(
+        "fsrs_initial_stability",
+        "fsrs_stability_growth",
+        "fsrs_reinforcement_gain",
+        "fsrs_reinforcement_saturation_exponent",
+        "fsrs_reinforcement_spacing_cap",
+    )
     @classmethod
     def _fsrs_positive(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"FSRS parameter must be > 0, got {v}")
+        return v
+
+    @field_validator("fsrs_reinforcement_spacing_cap")
+    @classmethod
+    def _fsrs_spacing_cap_at_least_one(cls, v: float) -> float:
+        if v < 1:
+            raise ValueError(f"fsrs_reinforcement_spacing_cap must be >= 1, got {v}")
         return v
 
     @field_validator("fsrs_max_stability")

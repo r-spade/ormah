@@ -56,8 +56,11 @@ class MemoryNode(BaseModel):
     access_count: int = 0
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
-    stability: float = Field(default=1.0, ge=0.0)  # FSRS: days until ~37% retrievability
-    last_review: datetime | None = None  # last stability update (distinct from last_accessed)
+    # The model default is a legacy parser/schema fallback. Production node
+    # creation supplies Settings.fsrs_initial_stability explicitly.
+    stability: float = Field(default=1.0, ge=0.0)  # days until ~37% retrievability
+    last_review: datetime | None = None  # last numeric stability update
+    consolidated_into: str | None = None  # explicit consolidation supersession provenance
     valid_until: datetime | None = None
     deleted_at: datetime | None = None  # tombstone stamp; ordering for sync merges uses this, never `updated`
     space: str | None = None

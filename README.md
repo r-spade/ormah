@@ -111,6 +111,8 @@ Whisper evaluates standing preferences through a separate applicability path. Th
 
 Whisper feedback can learn from transcript files after they stop changing: a local heuristic records clear usage for free, and an optional LLM judge can classify ambiguous turns into positive, negative, or uncertain retrieval signals.
 
+Lifecycle uses confirmed use rather than surfacing as its activity signal. Search results, UI results, graph neighbours, and bare whisper injection are observable but non-mutating; deliberate `recall_node` and source-qualified positive feedback (`explicit`, `implicit`, or `auto_llm_judge`) record use. Working memories decay to archival from retrievability alone and can return to working on confirmed use, except when explicitly superseded by consolidation. Ormah retains the exponential curve `R = exp(-t / S)`: `S` is the approximately 37% retrievability point, and the default `S ≈ 5.814` crosses `R = 0.3` after seven days. Reinforcement is bounded and cooled to one numeric stability update per node per 24 hours; these are FSRS-inspired policy defaults, not a full FSRS implementation or fitted FSRS parameters.
+
 Read more: [Whisper - Involuntary Recall](https://www.ormah.me/docs/how-ormah-works/whisper), [Search and Ranking](https://www.ormah.me/docs/how-ormah-works/search-and-ranking), [Affinity and Feedback](https://www.ormah.me/docs/operations/affinity-and-feedback)
 
 ### Memory Capture

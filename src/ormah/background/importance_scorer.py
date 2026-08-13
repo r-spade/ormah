@@ -7,6 +7,7 @@ import math
 from datetime import datetime, timezone
 
 from ormah.background.memory_lock import serialized_memory_job
+from ormah.engine.lifecycle import importance_recency
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,7 @@ def run_importance_scoring(engine) -> None:
 
     # Fetch everything upfront — avoids N+1 queries for importance lookups
     rows = conn.execute(
-        "SELECT id, access_count, last_accessed, "
-        "importance, stability, last_review FROM nodes"
+        "SELECT id, access_count, last_accessed, importance, created FROM nodes"
     ).fetchall()
     if not rows:
         return
@@ -75,13 +75,16 @@ def run_importance_scoring(engine) -> None:
         ec = edge_counts.get(nid, 0)
         edge_signal = min(1.0, math.log1p(ec) / math.log1p(ref_edge))
 
-        # Recency signal: FSRS retrievability (exp(-t/S))
+        # Importance recency is intentionally independent from lifecycle
+        # stability and uses confirmed-use/creation recency.
         try:
-            stability = r["stability"] if r["stability"] else 1.0
-            anchor_str = r["last_review"] or r["last_accessed"]
+            anchor_str = r["last_accessed"] or r["created"]
             anchor = datetime.fromisoformat(anchor_str)
             days_ago = max((now - anchor).total_seconds() / 86400, 0)
-            recency_signal = math.exp(-days_ago / stability)
+            recency_signal = importance_recency(
+                days_ago,
+                settings.importance_recency_half_life_days,
+            )
         except (ValueError, TypeError):
             recency_signal = 0.0
 

@@ -18,6 +18,14 @@ from typing import Any
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
+from ormah.engine.lifecycle import (
+    FSRS_BOOTSTRAP_META_KEY,
+    LIFECYCLE_MODEL_META_KEY,
+    LIFECYCLE_MODEL_VERSION,
+    bounded_stability_update,
+    elapsed_days,
+    safe_stability,
+)
 from ormah.engine.maintenance_signal import (
     MAINTENANCE_DUE_SIGNAL,
     is_maintenance_due_signal,
@@ -147,7 +155,7 @@ class MemoryEngine:
                     (str(_EMBEDDING_SCHEMA_VERSION),),
                 )
 
-        # One-time FSRS data migration: seed stability from access patterns
+        # One-time legacy bootstrap plus versioned lifecycle semantics.
         self._migrate_fsrs()
 
         self._ensure_self_node()
@@ -159,42 +167,58 @@ class MemoryEngine:
     def _migrate_fsrs(self) -> None:
         """Seed FSRS stability from access_count on first run, updating both DB and markdown."""
         fsrs_migrated = self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
+            "SELECT value FROM meta WHERE key = ?",
+            (FSRS_BOOTSTRAP_META_KEY,),
         ).fetchone()
-        if fsrs_migrated:
-            return
+        if not fsrs_migrated:
+            rows = self.db.conn.execute(
+                "SELECT id, access_count, last_accessed FROM nodes"
+            ).fetchall()
 
-        rows = self.db.conn.execute(
-            "SELECT id, access_count, last_accessed FROM nodes"
-        ).fetchall()
+            with self.db.transaction() as conn:
+                for r in rows:
+                    access_count = r["access_count"] or 0
+                    stability = min(30.0, access_count * 2.0) if access_count > 0 else 1.0
+                    last_review = r["last_accessed"]
 
-        with self.db.transaction() as conn:
-            for r in rows:
-                access_count = r["access_count"] or 0
-                stability = min(30.0, access_count * 2.0) if access_count > 0 else 1.0
-                last_review = r["last_accessed"]
+                    # This is the pre-existing one-time bootstrap for legacy
+                    # stores. It is not a rescaling of already-migrated values.
+                    conn.execute(
+                        "UPDATE nodes SET stability = ?, last_review = ? WHERE id = ?",
+                        (stability, last_review, r["id"]),
+                    )
 
-                # Update DB
+                    node = self.file_store.load(r["id"])
+                    if node is not None:
+                        node.stability = stability
+                        if last_review:
+                            try:
+                                node.last_review = datetime.fromisoformat(last_review)
+                            except (ValueError, TypeError):
+                                pass
+                        self.file_store.save(node)
+
                 conn.execute(
-                    "UPDATE nodes SET stability = ?, last_review = ? WHERE id = ?",
-                    (stability, last_review, r["id"]),
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')",
+                    (FSRS_BOOTSTRAP_META_KEY,),
                 )
+            logger.info("FSRS data migration complete: seeded %d nodes from access_count", len(rows))
 
-                # Update markdown file
-                node = self.file_store.load(r["id"])
-                if node is not None:
-                    node.stability = stability
-                    if last_review:
-                        try:
-                            node.last_review = datetime.fromisoformat(last_review)
-                        except (ValueError, TypeError):
-                            pass
-                    self.file_store.save(node)
-
-            conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
-            )
-        logger.info("FSRS data migration complete: seeded %d nodes from access_count", len(rows))
+        # The boolean remains for bootstrap compatibility. The integer version
+        # records the meaning of stored stability for future curve migrations.
+        with self.db.transaction() as conn:
+            version_row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (LIFECYCLE_MODEL_META_KEY,)
+            ).fetchone()
+            try:
+                stored_version = int(version_row["value"]) if version_row else 0
+            except (TypeError, ValueError):
+                stored_version = 0
+            if stored_version < LIFECYCLE_MODEL_VERSION:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                    (LIFECYCLE_MODEL_META_KEY, str(LIFECYCLE_MODEL_VERSION)),
+                )
 
     def _seed_initial_maintenance_grace_period(self) -> None:
         """Avoid firing agent-backed maintenance immediately on fresh installs."""
@@ -238,6 +262,7 @@ class MemoryEngine:
             tags=["self", "identity"],
             title="Self",
             content="The user's identity and personal information.",
+            stability=self.settings.fsrs_initial_stability,
         )
 
         path = self.file_store.save(node)
@@ -506,6 +531,7 @@ class MemoryEngine:
             title=title,
             content=req.content,
             confidence=req.confidence,
+            stability=self.settings.fsrs_initial_stability,
         )
 
         # Mark and promote identity nodes
@@ -642,8 +668,10 @@ class MemoryEngine:
 
         resolved_node_id = node["id"]
 
-        # Touch access
-        self._touch_access(resolved_node_id)
+        # Only the deliberately requested node is confirmed use. Neighbours
+        # remain surfaced context and must not receive lifecycle mutations.
+        self._record_confirmed_use(resolved_node_id)
+        node = self.graph.get_node(resolved_node_id) or node
 
         edges = self.graph.get_edges_for(resolved_node_id)
         neighbors = self.graph.get_neighbors(resolved_node_id, depth=1)
@@ -687,8 +715,9 @@ class MemoryEngine:
         Same logic as recall_search but returns raw dicts instead of formatted text.
         Used by the UI and any consumer that needs structured data.
 
-        When *touch_access* is False, access_count and last_accessed are not
-        updated — useful for context loading that shouldn't inflate access stats.
+        ``touch_access`` is retained as a compatibility parameter but is now
+        ignored: search-result surfacing never mutates lifecycle state. Use
+        ``recall_node`` or qualified positive feedback for confirmed use.
 
         *min_relevance* overrides the deliberate-recall floor
         (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
@@ -769,10 +798,6 @@ class MemoryEngine:
 
             if spread_activation:
                 results = self._spread_activation(results, limit)
-            if touch_access:
-                for r in results:
-                    if r.get("source") not in ("activated", "conflict"):
-                        self._touch_access(r["node"]["id"])
             return results
 
         # Fallback to FTS only
@@ -805,10 +830,6 @@ class MemoryEngine:
 
         if spread_activation:
             enriched = self._spread_activation(enriched, limit)
-        if touch_access:
-            for r in enriched:
-                if r.get("source") not in ("activated", "conflict"):
-                    self._touch_access(r["node"]["id"])
 
         return enriched
 
@@ -887,9 +908,6 @@ class MemoryEngine:
                     )
 
             results = self._spread_activation(results, limit)
-            for r in results:
-                if r.get("source") not in ("activated", "conflict"):
-                    self._touch_access(r["node"]["id"])
             whisper_log_ids = self._log_feedback_candidates(
                 query_for_log,
                 [
@@ -933,9 +951,6 @@ class MemoryEngine:
             )
 
         enriched = self._spread_activation(enriched, limit)
-        for r in enriched:
-            if r.get("source") not in ("activated", "conflict"):
-                self._touch_access(r["node"]["id"])
         whisper_log_ids = self._log_feedback_candidates(
             query_for_log,
             [
@@ -1012,6 +1027,22 @@ class MemoryEngine:
         )
 
         return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
+
+    @_serialized_memory_operation
+    def mark_consolidated(self, node_id: str, replacement_id: str) -> bool:
+        """Record explicit consolidation supersession on an original node."""
+        node = self.file_store.load(node_id)
+        if node is None:
+            return False
+        if node.consolidated_into == replacement_id and node.tier == Tier.archival:
+            return True
+
+        node.consolidated_into = replacement_id
+        node.tier = Tier.archival
+        node.touch_updated()
+        path = self.file_store.save(node)
+        self.builder.index_single(path)
+        return True
 
     @_serialized_memory_operation
     def delete_node(self, node_id: str) -> str | None:
@@ -1933,31 +1964,89 @@ class MemoryEngine:
             self_node.touch_updated()
             self.file_store.save(self_node)
 
-    def _touch_access(self, node_id: str) -> None:
-        """Update access stats and FSRS stability on both disk and DB."""
+    @_serialized_memory_operation
+    def _record_confirmed_use(self, node_id: str) -> bool:
+        """Record one confirmed use and apply the lifecycle policy atomically.
+
+        This is the only lifecycle entry point for deliberate node recall and
+        qualified positive feedback. It deliberately separates the confirmed-
+        use anchor (``last_accessed``) from the numeric stability timestamp
+        (``last_review``): repeated uses remain genuine access events while the
+        stability update is cooled down to once per 24 hours.
+        """
         node = self.file_store.load(node_id)
         if node is None:
-            return
+            return False
         now = datetime.now(timezone.utc)
 
-        # FSRS stability update
-        review_anchor = node.last_review or node.last_accessed
-        days_since = max((now - review_anchor).total_seconds() / 86400, 0.001)
-        retrievability = math.exp(-days_since / node.stability)
-        new_stability = node.stability * self.settings.fsrs_stability_growth * (retrievability ** -0.2)
-        node.stability = round(min(new_stability, self.settings.fsrs_max_stability), 2)
-        node.last_review = now
+        old_stability = safe_stability(
+            node.stability,
+            self.settings.fsrs_initial_stability,
+        )
+        review_anchor = node.last_review or node.last_accessed or node.created
+        days_since_review = elapsed_days(review_anchor, now)
+        cooldown_elapsed = node.last_review is None or days_since_review >= 1.0
 
-        # Standard access tracking
+        reinforced = old_stability
+        if cooldown_elapsed:
+            reinforced = bounded_stability_update(
+                old_stability,
+                days_since_review,
+                gain=self.settings.fsrs_reinforcement_gain,
+                saturation_exponent=self.settings.fsrs_reinforcement_saturation_exponent,
+                spacing_cap=self.settings.fsrs_reinforcement_spacing_cap,
+                max_stability=self.settings.fsrs_max_stability,
+                fallback=self.settings.fsrs_initial_stability,
+            )
+
+        promoting = (
+            node.tier == Tier.archival
+            and node.consolidated_into is None
+        )
+        final_stability = reinforced
+        if promoting and cooldown_elapsed:
+            # Reinforce from the old value first, then apply the initial lease
+            # floor. Flooring first would amplify a single old recall.
+            final_stability = min(
+                max(reinforced, self.settings.fsrs_initial_stability),
+                self.settings.fsrs_max_stability,
+            )
+
+        stability_changed = (
+            not math.isclose(final_stability, old_stability, rel_tol=0.0, abs_tol=1e-12)
+            or not math.isclose(node.stability, old_stability, rel_tol=0.0, abs_tol=1e-12)
+        )
+        if stability_changed:
+            node.stability = final_stability
+            node.last_review = now
+
+        if promoting:
+            node.tier = Tier.working
         node.last_accessed = now
         node.access_count += 1
 
+        # Match the repository's source-of-truth mutation convention: hold the
+        # engine/file lock, save markdown atomically, then stamp the derived
+        # SQLite row in the same serialized lifecycle operation.
         self.file_store.save(node)
         with self.db.transaction() as conn:
             conn.execute(
-                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, last_review = ? WHERE id = ?",
-                (node.access_count, node.last_accessed.isoformat(), node.stability, node.last_review.isoformat(), node_id),
+                """
+                UPDATE nodes
+                SET tier = ?, access_count = ?, last_accessed = ?,
+                    stability = ?, last_review = ?
+                WHERE id = ?
+                """,
+                (
+                    node.tier.value,
+                    node.access_count,
+                    node.last_accessed.isoformat(),
+                    node.stability,
+                    node.last_review.isoformat() if node.last_review else None,
+                    node_id,
+                ),
             )
+        return True
 
     # --- Private helpers ---
 
@@ -2495,6 +2584,7 @@ class MemoryEngine:
             return None, None, f"No whisper_log entry found for node {node_id}"
         return resolved_node_id, row, None
 
+    @_serialized_memory_operation
     def submit_feedback(
         self,
         node_id: str,
@@ -2608,6 +2698,9 @@ class MemoryEngine:
                     """,
                     (resolved_node_id,),
                 )
+
+        if signal > 0 and source in {"explicit", "implicit", "auto_llm_judge"}:
+            self._record_confirmed_use(resolved_node_id)
 
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
 

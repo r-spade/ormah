@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ormah.models.node import CreateNodeRequest
+from ormah.models.node import CreateNodeRequest, Tier
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +53,42 @@ def _insert_review_log(conn, node_id: str, session_id: str = "sess-abc") -> int:
 
 
 class TestSubmitFeedbackBasic:
+
+    def test_positive_feedback_is_confirmed_use_and_promotes_exact_node(self, engine):
+        node_id, _ = engine.remember(CreateNodeRequest(
+            content="A memory confirmed by feedback.",
+            title="Confirmed feedback",
+        ))
+        node = engine.file_store.load(node_id)
+        node.tier = Tier.archival
+        engine.file_store.save(node)
+        with engine.db.transaction() as conn:
+            conn.execute("UPDATE nodes SET tier = 'archival' WHERE id = ?", (node_id,))
+        whisper_log_id = _insert_whisper_log(engine.db.conn, node_id)
+
+        engine.submit_feedback(node_id, 1, "explicit", whisper_log_id=whisper_log_id)
+
+        updated = engine.file_store.load(node_id)
+        assert updated.tier == Tier.working
+        assert updated.access_count == 1
+
+    def test_negative_feedback_remains_affinity_only(self, engine):
+        node_id, _ = engine.remember(CreateNodeRequest(
+            content="A memory rejected for this prompt.",
+            title="Rejected feedback",
+        ))
+        node = engine.file_store.load(node_id)
+        node.tier = Tier.archival
+        engine.file_store.save(node)
+        with engine.db.transaction() as conn:
+            conn.execute("UPDATE nodes SET tier = 'archival' WHERE id = ?", (node_id,))
+        whisper_log_id = _insert_whisper_log(engine.db.conn, node_id)
+
+        engine.submit_feedback(node_id, -1, "explicit", whisper_log_id=whisper_log_id)
+
+        updated = engine.file_store.load(node_id)
+        assert updated.tier == Tier.archival
+        assert updated.access_count == 0
 
     def test_no_whisper_log_returns_error(self, engine):
         result = engine.submit_feedback("nonexistent-id", 1)

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-import math
 from datetime import datetime, timezone
 
 from ormah.background.memory_lock import serialized_memory_job
+from ormah.engine.lifecycle import retrievability, safe_stability
 from ormah.models.node import Tier, UpdateNodeRequest
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def run_decay(engine) -> None:
             )
 
         rows = engine.db.conn.execute(
-            "SELECT id, importance, stability, last_review, last_accessed "
+            "SELECT id, stability, last_accessed, created "
             "FROM nodes WHERE tier = 'working'"
         ).fetchall()
 
@@ -34,29 +34,31 @@ def run_decay(engine) -> None:
             return
 
         user_node_id = getattr(engine, "user_node_id", None)
-        importance_threshold = settings.decay_importance_threshold
         r_threshold = settings.fsrs_decay_threshold
 
         demoted = 0
         for row in rows:
             if row["id"] == user_node_id:
                 continue
-            # Skip high-importance nodes
-            node_importance = row["importance"] if row["importance"] is not None else 0.5
-            if node_importance >= importance_threshold:
-                continue
-
-            # Compute FSRS retrievability
-            stability = row["stability"] if row["stability"] else 1.0
-            anchor_str = row["last_review"] or row["last_accessed"]
+            # Decay follows confirmed-use/creation recency. Importance remains
+            # a ranking/display/core-cap signal, never a hidden immortality gate.
+            stability = safe_stability(
+                row["stability"],
+                settings.fsrs_initial_stability,
+            )
+            anchor_str = row["last_accessed"] or row["created"]
             try:
                 anchor = datetime.fromisoformat(anchor_str)
             except (ValueError, TypeError):
                 continue
             days_since = max((now - anchor).total_seconds() / 86400, 0.001)
-            retrievability = math.exp(-days_since / stability)
+            node_retrievability = retrievability(
+                days_since,
+                stability,
+                fallback=settings.fsrs_initial_stability,
+            )
 
-            if retrievability >= r_threshold:
+            if node_retrievability >= r_threshold:
                 continue
 
             result = engine.update_node(row["id"], UpdateNodeRequest(tier=Tier.archival))

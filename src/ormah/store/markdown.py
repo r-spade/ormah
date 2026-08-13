@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
+import logging
 
 import frontmatter
 
 from ormah.models.node import Connection, EdgeType, MemoryNode, NodeType, Tier
+
+logger = logging.getLogger(__name__)
 
 
 def parse_node(text: str) -> MemoryNode:
@@ -30,6 +34,16 @@ def parse_node(text: str) -> MemoryNode:
     deleted_at_raw = meta.get("deleted_at")
     deleted_at = _parse_dt(deleted_at_raw) if deleted_at_raw else None
 
+    raw_stability = meta.get("stability", 1.0)
+    try:
+        stability = float(raw_stability)
+    except (TypeError, ValueError):
+        stability = 1.0
+        logger.warning("Invalid legacy stability %r for node %s; using 1.0", raw_stability, meta.get("id"))
+    if not math.isfinite(stability) or stability <= 0:
+        logger.warning("Invalid legacy stability %r for node %s; using 1.0", raw_stability, meta.get("id"))
+        stability = 1.0
+
     return MemoryNode(
         id=meta["id"],
         type=NodeType(meta["type"]),
@@ -41,8 +55,9 @@ def parse_node(text: str) -> MemoryNode:
         access_count=meta.get("access_count", 0),
         confidence=meta.get("confidence", 1.0),
         importance=meta.get("importance", 0.5),
-        stability=meta.get("stability", 1.0),
+        stability=stability,
         last_review=_parse_dt(meta["last_review"]) if meta.get("last_review") else None,
+        consolidated_into=meta.get("consolidated_into"),
         valid_until=valid_until,
         deleted_at=deleted_at,
         space=meta.get("space"),
@@ -71,6 +86,8 @@ def serialize_node(node: MemoryNode) -> str:
 
     if node.last_review is not None:
         meta["last_review"] = _format_dt(node.last_review)
+    if node.consolidated_into is not None:
+        meta["consolidated_into"] = node.consolidated_into
     if node.valid_until is not None:
         meta["valid_until"] = _format_dt(node.valid_until)
     if node.deleted_at is not None:

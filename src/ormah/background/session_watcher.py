@@ -581,6 +581,14 @@ def _record_whisper_usage_signals(
                     confirmed_at=now_iso,
                 )
 
+    # The LLM judge writes its own observability and affinity rows above. A
+    # confident positive verdict is nevertheless confirmed use, so route only
+    # that lifecycle mutation through the engine's shared operation. Heuristic
+    # positives intentionally remain ranking/observability evidence only.
+    for record in judge_records:
+        if record["polarity"] == 1:
+            engine._record_confirmed_use(record["row"]["node_id"])
+
     return recorded
 
 

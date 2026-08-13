@@ -68,6 +68,23 @@ def test_recall_not_found(client):
     assert resp.status_code == 404
 
 
+def test_ui_search_does_not_record_confirmed_use(client):
+    created = client.post("/agent/remember", json={
+        "content": "UI search surfacing is not confirmed use.",
+        "type": "fact",
+        "title": "UI surfacing",
+    }).json()
+    node_id = created["node_id"]
+
+    response = client.get("/ui/search", params={"q": "UI surfacing"})
+    assert response.status_code == 200
+    assert any(node["id"] == node_id for node in response.json())
+
+    graph = client.get("/ui/graph").json()
+    node = next(node for node in graph["nodes"] if node["id"] == node_id)
+    assert node["access_count"] == 0
+
+
 def test_stats(client):
     resp = client.get("/stats")
     assert resp.status_code == 200

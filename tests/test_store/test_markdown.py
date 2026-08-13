@@ -1,5 +1,7 @@
 """Tests for markdown parsing and serialization."""
 
+import pytest
+
 from ormah.models.node import Connection, EdgeType, MemoryNode, NodeType, Tier
 from ormah.store.markdown import parse_node, serialize_node
 
@@ -16,6 +18,7 @@ def test_roundtrip():
         connections=[
             Connection(target="abc123", edge=EdgeType.supports, weight=0.9),
         ],
+        consolidated_into="replacement-123",
     )
 
     text = serialize_node(node)
@@ -32,6 +35,7 @@ def test_roundtrip():
     assert len(parsed.connections) == 1
     assert parsed.connections[0].target == "abc123"
     assert parsed.connections[0].edge == EdgeType.supports
+    assert parsed.consolidated_into == "replacement-123"
 
 
 def test_parse_minimal():
@@ -51,6 +55,20 @@ This is a simple fact."""
     assert node.tier == Tier.working  # default
     assert node.connections == []
     assert node.deleted_at is None  # legacy files without deleted_at parse fine
+
+
+@pytest.mark.parametrize("value", [None, 0, -1, "not-a-number", "nan"])
+def test_parse_invalid_legacy_stability_uses_compatibility_fallback(value):
+    text = f"""---
+id: invalid-stability-{str(value).replace(' ', '-')}
+type: fact
+created: 2026-01-01T00:00:00Z
+updated: 2026-01-01T00:00:00Z
+stability: {value if value is not None else 'null'}
+---
+Legacy node."""
+    node = parse_node(text)
+    assert node.stability == 1.0
 
 
 def test_deleted_at_roundtrip():

@@ -104,8 +104,6 @@ def _apply_consolidation(
         ConnectRequest,
         CreateNodeRequest,
         EdgeType,
-        Tier,
-        UpdateNodeRequest,
     )
 
     conn = engine.db.conn
@@ -174,7 +172,10 @@ def _apply_consolidation(
             ))
         except Exception:
             pass
-        engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+        # A generic derived_from edge is not supersession provenance. Record
+        # the explicit consolidation relationship so later confirmed use can
+        # remain recallable without automatically reviving the original.
+        engine.mark_consolidated(node_id, new_id)
 
     return new_id
 

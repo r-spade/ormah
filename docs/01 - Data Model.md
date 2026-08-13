@@ -30,17 +30,18 @@ connections: list[Connection]  # Outgoing edges to other nodes
 # Scoring
 confidence: float           # [0.0-1.0] How certain we are (default: 1.0)
 importance: float           # [0.0-1.0] Computed by importance_scorer job; see 05 - Background Jobs
-access_count: int           # Times this node has been accessed/recalled
+access_count: int           # Confirmed-use count (not search/result surfacing)
 
 # Temporal
 created: datetime           # When first stored (UTC)
 updated: datetime           # Last modification (UTC)
-last_accessed: datetime     # Last recall/search hit (UTC)
-last_review: datetime | None # Last FSRS review (spaced repetition)
+last_accessed: datetime     # Last confirmed use, or creation before first use
+last_review: datetime | None # Last numeric stability update; separate from last_accessed
 valid_until: datetime | None # Expiry date (set by mark_outdated)
 
 # FSRS (Spaced Repetition)
-stability: float            # Days until ~37% retrievability (default: 1.0)
+stability: float            # Days until ~37% retrievability (default: ~5.814)
+consolidated_into: str | None # Explicit consolidation supersession replacement ID
 ```
 
 ### Connection
@@ -95,9 +96,9 @@ graph LR
         A3[Superseded facts]
     end
 
-    W1 -->|"promote<br/>(manual)"| C1
+    W1 -->|"core promotion<br/>(existing rules)"| C1
     W1 -->|"decay<br/>(FSRS auto)"| A1
-    A1 -->|"promote<br/>(manual)"| W1
+    A1 -->|"confirmed use"| W1
 ```
 
 | Tier | Cap | Decay | Search Boost | Purpose |

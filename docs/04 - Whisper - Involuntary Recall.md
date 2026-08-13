@@ -98,7 +98,8 @@ The builder calls structured recall with:
 
 - `limit = whisper_max_nodes * whisper_candidate_pool_multiplier` (defaults `6 * 5 = 30`) — a deep candidate pool so the reranker and gate can rescue memories the bi-encoder under-ranked; the final injected set is still capped at `whisper_max_nodes`
 - `tiers = [core, working]`
-- `touch_access = False`
+- Lifecycle access tracking is non-mutating for whisper surfacing; the retained
+  `touch_access = False` compatibility argument is ignored by structured recall.
 
 ### 7. Thresholds and reranking
 

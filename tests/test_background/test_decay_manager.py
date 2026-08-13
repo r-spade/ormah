@@ -26,8 +26,8 @@ def _get_tier(engine, node_id: str) -> str:
     return row["tier"] if row else None
 
 
-def test_high_importance_node_not_decayed(engine):
-    """A stale node with high importance should not be demoted."""
+def test_high_importance_stale_node_still_decays(engine):
+    """Historical access/importance cannot make stale working nodes immortal."""
     node_id, _ = engine.remember(CreateNodeRequest(
         content="Important stale node",
         type=NodeType.fact,
@@ -37,13 +37,13 @@ def test_high_importance_node_not_decayed(engine):
 
     _make_stale(engine, node_id)
     engine.db.conn.execute(
-        "UPDATE nodes SET importance = 0.9 WHERE id = ?", (node_id,)
+        "UPDATE nodes SET access_count = 50, importance = 0.9 WHERE id = ?", (node_id,)
     )
     engine.db.conn.commit()
 
     run_decay(engine)
 
-    assert _get_tier(engine, node_id) == "working"
+    assert _get_tier(engine, node_id) == "archival"
 
 
 def test_low_importance_stale_node_decayed(engine):

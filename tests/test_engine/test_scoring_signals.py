@@ -365,12 +365,10 @@ class TestSpaceScoring:
 
 
 class TestSpreadingActivationAccessIsolation:
-    """Verify that _touch_access is only called for direct search matches,
-    not for nodes injected by spreading activation."""
+    """Verify that surfacing never records confirmed lifecycle use."""
 
-    def test_touch_access_skips_activated_nodes(self, engine):
-        """Spreading activation results (source=activated/conflict) must not
-        get their access_count bumped."""
+    def test_search_does_not_touch_direct_or_activated_nodes(self, engine):
+        """Neither direct results nor graph-added neighbours get access bumps."""
         # Create three nodes via the engine
         from ormah.models.node import CreateNodeRequest
 
@@ -437,18 +435,18 @@ class TestSpreadingActivationAccessIsolation:
             with patch.object(engine, "_spread_activation", side_effect=mock_spread):
                 engine.recall_search_structured("test query", limit=10)
 
-        # Verify: A and C should have access_count incremented
+        # Search results are observability events, not confirmed use.
         node_a_after = engine.file_store.load(id_a)
         node_c_after = engine.file_store.load(id_c)
-        assert node_a_after.access_count == initial_a + 1
-        assert node_c_after.access_count == initial_c + 1
+        assert node_a_after.access_count == initial_a
+        assert node_c_after.access_count == initial_c
 
         # B (activated neighbor) should NOT have access_count incremented
         node_b_after = engine.file_store.load(id_b)
         assert node_b_after.access_count == initial_b
 
-    def test_touch_access_skips_conflict_nodes(self, engine):
-        """Nodes with source=conflict should also be skipped."""
+    def test_search_does_not_touch_conflict_nodes(self, engine):
+        """Conflict expansion remains non-mutating lifecycle surfacing."""
         from ormah.models.node import CreateNodeRequest
 
         id_a, _ = engine.remember(CreateNodeRequest(

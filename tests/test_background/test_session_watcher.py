@@ -24,7 +24,7 @@ from ormah.background.session_watcher import (
     stop_session_watcher,
 )
 from ormah.engine.memory_engine import MemoryEngine
-from ormah.models.node import CreateNodeRequest
+from ormah.models.node import CreateNodeRequest, Tier
 from ormah.transcript.parser import parse_transcript
 
 _LLM_PATCH = "ormah.background.llm_client.llm_generate"
@@ -309,6 +309,7 @@ def test_record_whisper_usage_signal_promotes_clear_reference(engine, tmp_path):
     assert affinity["node_id"] == node_id
     assert affinity["signal"] == 1
     assert affinity["source"] == "auto_heuristic"
+    assert engine.file_store.load(node_id).access_count == 0
 
 
 def test_record_whisper_usage_signal_keeps_unreferenced_neutral(engine, tmp_path):
@@ -389,6 +390,11 @@ def test_llm_judge_promotes_used_verdict(engine, tmp_path):
         type="fact",
         title="Blue deployment rollback marker",
     ))
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    engine.file_store.save(node)
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET tier = 'archival' WHERE id = ?", (node_id,))
     whisper_log_id = _insert_injected_whisper_log(
         engine,
         node_id=node_id,
@@ -432,6 +438,9 @@ def test_llm_judge_promotes_used_verdict(engine, tmp_path):
     assert affinity is not None
     assert affinity["signal"] == 1
     assert affinity["source"] == "auto_llm_judge"
+    updated = engine.file_store.load(node_id)
+    assert updated.tier == Tier.working
+    assert updated.access_count == 1
 
 
 def test_llm_judge_falls_back_to_json_object_mode(engine, tmp_path):

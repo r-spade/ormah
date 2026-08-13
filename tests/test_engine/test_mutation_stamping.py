@@ -139,11 +139,11 @@ def test_mark_outdated_advances_updated(engine):
     assert _updated(engine.file_store, node_id) > PAST
 
 
-def test_engine_access_tracking_does_not_advance_updated(engine):
+def test_confirmed_use_does_not_advance_updated(engine):
     node_id = _create(engine, "Read often", "Frequently accessed fact.")
     _backdate(engine.file_store, node_id)
 
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
 
     node = engine.file_store.load(node_id)
     assert node.updated == PAST

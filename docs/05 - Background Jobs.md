@@ -124,9 +124,11 @@ It does not do embedding clustering or hierarchical clustering despite the name.
 ## Importance and Decay
 
 - `importance_scorer` computes a normalized multi-signal importance value
-- `decay_manager` uses FSRS-style retrievability and importance to decide whether to demote working memories
+- `decay_manager` demotes working memories from retrievability alone
 
-High-importance nodes are protected from decay.
+Importance remains useful for ranking, display, and core-cap prioritization,
+but it is not a hidden protection gate. A high-importance node that is no
+longer retrievable still becomes archival and remains deliberately recallable.
 
 ### Importance Scorer
 
@@ -134,7 +136,8 @@ High-importance nodes are protected from decay.
 
 1. **Access signal**: how often the node has been recalled, based on `access_count`
 2. **Edge signal**: how connected the node is in the graph, based on total edge count
-3. **Recency signal**: how retrievable the node currently is, using FSRS-style `exp(-days_ago / stability)`
+3. **Recency signal**: confirmed-use recency using its own configured half-life:
+   `exp(-ln(2) * age_days / importance_recency_half_life_days)`
 
 With the default configuration, those signals are weighted almost evenly:
 
@@ -149,9 +152,27 @@ Access and edge counts are log-normalized against reference values, then the wei
 
 The scorer runs every `120` minutes by default and only writes a new value when the change is meaningful.
 
-This score is not static. Recall and search hits update `access_count`, `last_accessed`, `last_review`, and `stability`, so a memory's importance changes over time as it is used, connected, or left untouched.
+This score is not static. Confirmed use updates `access_count` and
+`last_accessed`; search hits and whisper injection do not. Edge counts and
+confirmed-use recency continue to affect importance independently of lifecycle
+stability.
 
-Important current nuance: `importance_recency_half_life_days` exists in configuration, but the current scorer implementation uses FSRS stability for the recency term instead.
+### Lifecycle semantics
+
+Ormah retains the exponential, FSRS-inspired policy curve `R = exp(-t / S)`;
+`S` is the approximately 37% retrievability point, not the 90% point used by
+the power-law FSRS convention. The default initial stability is
+`-7 / ln(0.3) ≈ 5.814`, giving a seven-day mathematical crossing of the
+`R = 0.3` decay threshold. The scheduler may demote on its next daily run.
+
+Confirmed use is exactly deliberate `recall_node` or positive feedback from
+`explicit`, `implicit`, or `auto_llm_judge`. Broad recall, UI search, bare
+whisper injection, graph activation, neighbours, `auto_heuristic`, and all
+negative feedback are not confirmed use. Every confirmed use advances the
+use/decay anchor and count, while bounded reinforcement can increase numeric
+stability at most once per node per 24 hours. The gain, saturation exponent,
+spacing cap, and maximum are configurable policy defaults, not fitted FSRS
+parameters. `last_review` is only the last numeric stability update.
 
 ## Walkthrough Example
 
