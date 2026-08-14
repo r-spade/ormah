@@ -187,6 +187,22 @@ export interface BillingHandoff {
   opened: boolean;
 }
 
+export const CHECKOUT_CONFIRMATION_INTERVAL_MS = 3_000;
+export const CHECKOUT_CONFIRMATION_MAX_CHECKS = 100;
+export type CheckoutConfirmation = "idle" | "waiting" | "delayed";
+
+export function checkoutConfirmationIsDelayed(completedChecks: number): boolean {
+  return completedChecks >= CHECKOUT_CONFIRMATION_MAX_CHECKS;
+}
+
+export function checkoutConfirmationAfterCheck(
+  subscriptionActive: boolean,
+  explicitCheck: boolean,
+): CheckoutConfirmation {
+  if (subscriptionActive) return "idle";
+  return explicitCheck ? "delayed" : "waiting";
+}
+
 export interface CheckoutIntentResolution {
   intentId: string;
   created: ProtectionOperation | null;

@@ -19,6 +19,9 @@ import {
   X,
 } from "lucide-react";
 import {
+  CHECKOUT_CONFIRMATION_INTERVAL_MS,
+  checkoutConfirmationAfterCheck,
+  checkoutConfirmationIsDelayed,
   isDesktopApp,
   effectiveProtectionState,
   operationPhaseIsActive,
@@ -31,6 +34,7 @@ import {
   resolveCheckoutIntent,
   recoveryKitSectionVisible,
   type AccountStatus,
+  type CheckoutConfirmation,
   type ProtectionActionKind,
   type RemoteSnapshot,
   type BillingOffer,
@@ -213,7 +217,8 @@ export default function ProtectionPanel({
   const [loading, setLoading] = useState(false);
   const [refreshFailed, setRefreshFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [checkoutPolling, setCheckoutPolling] = useState(false);
+  const [checkoutConfirmation, setCheckoutConfirmation] =
+    useState<CheckoutConfirmation>("idle");
   const [confirmStop, setConfirmStop] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState<"save" | "print" | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
@@ -567,12 +572,13 @@ export default function ProtectionPanel({
       if (resolved.created) setOperation(resolved.created);
       const handoff = await productBridge.openCheckout(intentId);
       if (handoff.status === "already_subscribed") {
+        setCheckoutConfirmation("idle");
         await bindAndContinue(intentId);
       } else {
         if (!handoff.opened) {
           setError("Your subscription is still being processed. Check again shortly or manage it in Stripe.");
         }
-        setCheckoutPolling(true);
+        setCheckoutConfirmation("waiting");
       }
     } catch (err) {
       setError(errorMessage(err, "Checkout could not open."));
@@ -585,7 +591,7 @@ export default function ProtectionPanel({
     if (checkoutCheckInFlight.current) return;
     const intentId = operation?.protection_intent_id || status?.protection_intent_id;
     if (!intentId) {
-      setCheckoutPolling(false);
+      setCheckoutConfirmation("idle");
       if (!silent) {
         setError(
           "The protection request is no longer available. Choose Subscribe with Stripe to start again.",
@@ -594,44 +600,51 @@ export default function ProtectionPanel({
       return;
     }
     checkoutCheckInFlight.current = true;
-    setBusy(true);
-    setError(null);
+    if (!silent) {
+      setBusy(true);
+      setError(null);
+    }
     try {
       const bound = await productBridge.bindIntent(intentId);
       setOperation(bound);
-      if (bound.protection_state === "subscription_required" || bound.reason_code === "subscription_required") {
-        if (!silent) setError("Payment is not active yet. Stripe may still be processing it.");
+      if (
+        bound.protection_state === "subscription_required"
+        || bound.reason_code === "subscription_required"
+      ) {
+        setCheckoutConfirmation(checkoutConfirmationAfterCheck(false, !silent));
         return;
       }
-      setCheckoutPolling(false);
+      setCheckoutConfirmation(checkoutConfirmationAfterCheck(true, !silent));
       await bindAndContinue(intentId);
     } catch (err) {
-      setError(errorMessage(err, "Payment status is unavailable."));
+      if (!silent) setError(errorMessage(err, "Payment status is unavailable."));
     } finally {
       checkoutCheckInFlight.current = false;
-      setBusy(false);
+      if (!silent) setBusy(false);
     }
   }, [bindAndContinue, operation?.protection_intent_id, status?.protection_intent_id]);
 
   useEffect(() => {
-    if (!checkoutPolling) return;
+    if (checkoutConfirmation !== "waiting") return;
     let checks = 0;
     const poll = window.setInterval(() => {
       checks += 1;
-      if (checks >= 20) {
+      if (checkoutConfirmationIsDelayed(checks)) {
         window.clearInterval(poll);
-        setCheckoutPolling(false);
+        setCheckoutConfirmation("delayed");
         return;
       }
       void checkPayment(true);
-    }, 3000);
-    const onFocus = () => void checkPayment(false);
+    }, CHECKOUT_CONFIRMATION_INTERVAL_MS);
+    // Returning from the browser is an early hint, not proof that Stripe has
+    // finished. Keep the normal wait alive if the first focused check is early.
+    const onFocus = () => void checkPayment(true);
     window.addEventListener("focus", onFocus);
     return () => {
       window.clearInterval(poll);
       window.removeEventListener("focus", onFocus);
     };
-  }, [checkoutPolling, checkPayment]);
+  }, [checkoutConfirmation, checkPayment]);
 
   const runOperation = useCallback(async (action: "backup" | "verify" | "disable") => {
     setBusy(true);
@@ -968,6 +981,11 @@ export default function ProtectionPanel({
 
           {view === "checkout" && (
             <section className="protection-step">
+              <button className="step-back" onClick={() => {
+                setCheckoutConfirmation("idle");
+                setError(null);
+                setView("summary");
+              }}>Back to protection</button>
               <h3>Start cloud protection</h3>
               <p>Card details are handled by Stripe in your browser. Ormah never receives them.</p>
               {offer && (
@@ -980,13 +998,22 @@ export default function ProtectionPanel({
                 {busy ? <LoaderCircle className="spin" size={15} /> : <ExternalLink size={15} />}
                 Subscribe with Stripe
               </button>
-              {checkoutPolling && (
+              {checkoutConfirmation === "waiting" && (
                 <div className="checkout-waiting">
                   <LoaderCircle className="spin" size={15} /> Waiting for Stripe to confirm payment
                 </div>
               )}
-                <button className="protection-secondary" disabled={busy} onClick={() => void checkPayment(false)}>
-                <RefreshCw size={14} /> I've paid, check again
+              {checkoutConfirmation === "delayed" && (
+                <div className="checkout-delayed" role="status">
+                  Stripe is taking longer than usual. You will not be charged again by checking.
+                </div>
+              )}
+              <button
+                className="protection-secondary"
+                disabled={busy}
+                onClick={() => void checkPayment(false)}
+              >
+                <RefreshCw size={14} /> Check subscription status
               </button>
             </section>
           )}

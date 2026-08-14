@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CHECKOUT_CONFIRMATION_INTERVAL_MS,
+  CHECKOUT_CONFIRMATION_MAX_CHECKS,
+  checkoutConfirmationAfterCheck,
+  checkoutConfirmationIsDelayed,
   effectiveProtectionState,
   operationPhaseIsActive,
   protectionCompletionSummary,
@@ -17,6 +21,22 @@ import {
   type ProtectionState,
   type RemoteSnapshot,
 } from "./productBridge";
+
+describe("checkout confirmation", () => {
+  it("keeps waiting through normal delayed-payment confirmation", () => {
+    expect(CHECKOUT_CONFIRMATION_INTERVAL_MS).toBe(3_000);
+    expect(CHECKOUT_CONFIRMATION_MAX_CHECKS).toBe(100);
+    expect(checkoutConfirmationIsDelayed(20)).toBe(false);
+    expect(checkoutConfirmationIsDelayed(99)).toBe(false);
+    expect(checkoutConfirmationIsDelayed(100)).toBe(true);
+  });
+
+  it("does not stop waiting when the app regains focus before Stripe is ready", () => {
+    expect(checkoutConfirmationAfterCheck(false, false)).toBe("waiting");
+    expect(checkoutConfirmationAfterCheck(false, true)).toBe("delayed");
+    expect(checkoutConfirmationAfterCheck(true, false)).toBe("idle");
+  });
+});
 
 describe("resolveCheckoutIntent", () => {
   it("reuses a durable intent without creating another", async () => {

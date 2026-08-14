@@ -1473,6 +1473,16 @@ body.in-app .node-detail.tier-core {
   font-size: 11px;
 }
 
+.checkout-delayed {
+  margin-top: 12px;
+  padding: 10px;
+  border-left: 2px solid var(--accent);
+  background: rgba(217, 164, 106, 0.06);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .protection-facts {
   display: grid;
   gap: 11px;
