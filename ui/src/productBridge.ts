@@ -188,7 +188,7 @@ export interface BillingHandoff {
 }
 
 export const CHECKOUT_CONFIRMATION_INTERVAL_MS = 3_000;
-export const CHECKOUT_CONFIRMATION_MAX_CHECKS = 100;
+export const CHECKOUT_CONFIRMATION_MAX_CHECKS = 40;
 export type CheckoutConfirmation = "idle" | "waiting" | "delayed";
 
 export function checkoutConfirmationIsDelayed(completedChecks: number): boolean {
@@ -201,6 +201,16 @@ export function checkoutConfirmationAfterCheck(
 ): CheckoutConfirmation {
   if (subscriptionActive) return "idle";
   return explicitCheck ? "delayed" : "waiting";
+}
+
+export function protectionIntentNeedsReplacement(
+  operation: ProtectionOperation | null | undefined,
+  status?: ProtectionStatus | null,
+): boolean {
+  return operation?.reason_code === "intent_expired"
+    || operation?.reason_code === "intent_canceled"
+    || status?.protection_intent_status === "expired"
+    || status?.protection_intent_status === "canceled";
 }
 
 export interface CheckoutIntentResolution {

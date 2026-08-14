@@ -28,6 +28,7 @@ import {
   productBridge,
   protectionActions,
   protectionCompletionSummary,
+  protectionIntentNeedsReplacement,
   protectionPresentation,
   protectionReconnectDelay,
   protectionRepairAction,
@@ -564,8 +565,11 @@ export default function ProtectionPanel({
     setBusy(true);
     setError(null);
     try {
+      const replaceIntent = protectionIntentNeedsReplacement(operation, status);
       const resolved = await resolveCheckoutIntent(
-        operation?.protection_intent_id || status?.protection_intent_id,
+        replaceIntent
+          ? null
+          : operation?.protection_intent_id || status?.protection_intent_id,
         productBridge.createIntent,
       );
       const intentId = resolved.intentId;
@@ -585,7 +589,7 @@ export default function ProtectionPanel({
     } finally {
       setBusy(false);
     }
-  }, [bindAndContinue, operation?.protection_intent_id, status?.protection_intent_id]);
+  }, [bindAndContinue, operation, status]);
 
   const checkPayment = useCallback(async (silent = false) => {
     if (checkoutCheckInFlight.current) return;
@@ -607,6 +611,11 @@ export default function ProtectionPanel({
     try {
       const bound = await productBridge.bindIntent(intentId);
       setOperation(bound);
+      if (protectionIntentNeedsReplacement(bound)) {
+        setCheckoutConfirmation("idle");
+        await beginProtection();
+        return;
+      }
       if (
         bound.protection_state === "subscription_required"
         || bound.reason_code === "subscription_required"
@@ -622,7 +631,12 @@ export default function ProtectionPanel({
       checkoutCheckInFlight.current = false;
       if (!silent) setBusy(false);
     }
-  }, [bindAndContinue, operation?.protection_intent_id, status?.protection_intent_id]);
+  }, [
+    beginProtection,
+    bindAndContinue,
+    operation?.protection_intent_id,
+    status?.protection_intent_id,
+  ]);
 
   useEffect(() => {
     if (checkoutConfirmation !== "waiting") return;
@@ -761,8 +775,7 @@ export default function ProtectionPanel({
       return;
     }
     if (repairAction === "subscribe") {
-      setView("checkout");
-      if (!offer) productBridge.offer().then(setOffer).catch(() => undefined);
+      await beginProtection();
       return;
     }
     if (repairAction === "resume") {
@@ -785,7 +798,7 @@ export default function ProtectionPanel({
     }
     reconnectAttempt.current = 0;
     await refresh();
-  }, [beginProtection, offer, refresh, repairAction, runOperation, status]);
+  }, [beginProtection, refresh, repairAction, runOperation, status]);
 
   const actions = useMemo(
     () => protectionActions(
@@ -818,10 +831,9 @@ export default function ProtectionPanel({
         await runRepairAction();
         return;
       case "subscribe":
-        setView("checkout");
-        if (!offer) productBridge.offer().then(setOffer).catch(() => undefined);
+        await beginProtection();
     }
-  }, [beginProtection, offer, runOperation, runRepairAction]);
+  }, [beginProtection, runOperation, runRepairAction]);
 
   return (
     <aside className={`side-panel protection-panel ${open ? "open" : ""}`} aria-hidden={!open}>
