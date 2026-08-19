@@ -148,19 +148,21 @@ class HippocampusHandler(FileSystemEventHandler):
         watch_dir: Path,
         debounce_seconds: float,
         ignore_patterns: list[str] | None = None,
+        state: dict | None = None,
     ) -> None:
         self.engine = engine
         self.watch_dir = watch_dir
         self.debounce_seconds = debounce_seconds
         self.ignore_patterns = ignore_patterns or []
-        self._state = _load_state(watch_dir)
+        self._state = state if state is not None else _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
-        self._lock = Lock()
+        self._timer_lock = Lock()
+        self._ingest_lock = Lock()
 
     def _schedule_ingest(self, path: Path) -> None:
         """Schedule a debounced ingestion for the given file."""
         key = str(path)
-        with self._lock:
+        with self._timer_lock:
             if key in self._timers:
                 self._timers[key].cancel()
             timer = Timer(
@@ -174,9 +176,26 @@ class HippocampusHandler(FileSystemEventHandler):
 
     def _do_ingest(self, path: Path) -> None:
         """Actually ingest the file (called after debounce)."""
-        with self._lock:
+        with self._timer_lock:
             self._timers.pop(str(path), None)
-        _ingest_file(self.engine, path, self._state, self.watch_dir, self.ignore_patterns)
+        with self._ingest_lock:
+            _ingest_file(
+                self.engine,
+                path,
+                self._state,
+                self.watch_dir,
+                self.ignore_patterns,
+            )
+
+    def reconcile(self) -> int:
+        """Scan with the live handler's state, serialized against watcher events."""
+        with self._ingest_lock:
+            return _scan_directory(
+                self.engine,
+                self.watch_dir,
+                self.ignore_patterns,
+                state=self._state,
+            )
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".md"):
@@ -191,9 +210,12 @@ def _scan_directory(
     engine: MemoryEngine,
     watch_dir: Path,
     ignore_patterns: list[str] | None = None,
+    *,
+    state: dict | None = None,
 ) -> int:
     """Scan a directory for new/changed .md files. Returns count of files ingested."""
-    state = _load_state(watch_dir)
+    if state is None:
+        state = _load_state(watch_dir)
     ingested = 0
     for md_file in sorted(watch_dir.rglob("*.md")):
         if md_file.name == _STATE_FILENAME:
@@ -217,8 +239,9 @@ def _scan_directory(
 def start_hippocampus(engine: MemoryEngine) -> list[Observer]:
     """Start file watchers for all configured hippocampus directories.
 
-    Performs an initial catch-up scan of each directory, then starts
-    real-time watchers. Returns list of Observer instances for shutdown.
+    Performs an initial catch-up scan, starts each real-time watcher, then
+    reconciles once more to close the scan-to-watcher handoff gap. Returns
+    list of Observer instances for shutdown.
     """
     s = engine.settings
     if not s.hippocampus_enabled or not s.hippocampus_watch_dirs:
@@ -231,18 +254,53 @@ def start_hippocampus(engine: MemoryEngine) -> list[Observer]:
         watch_dir = Path(watch_dir).expanduser().resolve()
         watch_dir.mkdir(parents=True, exist_ok=True)
 
-        # Catch-up scan
-        ingested = _scan_directory(engine, watch_dir, ignore_patterns)
+        # Catch up files that predate watcher startup. The same state object is
+        # handed to the live handler so the post-start reconciliation and queued
+        # filesystem events share one hash-based exactly-once gate.
+        state = _load_state(watch_dir)
+        ingested = _scan_directory(
+            engine,
+            watch_dir,
+            ignore_patterns,
+            state=state,
+        )
         if ingested:
             logger.info("Hippocampus catch-up: ingested %d files from %s", ingested, watch_dir)
 
         # Start real-time watcher
-        handler = HippocampusHandler(engine, watch_dir, s.hippocampus_debounce_seconds, ignore_patterns)
+        handler = HippocampusHandler(
+            engine,
+            watch_dir,
+            s.hippocampus_debounce_seconds,
+            ignore_patterns,
+            state=state,
+        )
         observer = Observer()
         observer.schedule(handler, str(watch_dir), recursive=True)
         observer.start()
+
+        # Close the scan-to-watcher handoff gap. A file can appear after the
+        # catch-up scan but before the Observer thread has installed its OS watch.
+        # Reconcile after start while sharing the handler's state and ingest lock;
+        # if a queued event sees the same hash later, it becomes a no-op.
+        try:
+            reconciled = handler.reconcile()
+        except BaseException:
+            # Reconciliation is part of watcher startup. Do not leak this observer
+            # or any previously started directory watchers if startup cannot finish.
+            observer.stop()
+            observer.join(timeout=5)
+            stop_hippocampus(observers)
+            raise
+
         observers.append(observer)
         logger.info("Hippocampus watcher started on %s", watch_dir)
+        if reconciled:
+            logger.info(
+                "Hippocampus startup reconciliation: ingested %d files from %s",
+                reconciled,
+                watch_dir,
+            )
 
     return observers
 
