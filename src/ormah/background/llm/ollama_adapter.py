@@ -16,11 +16,22 @@ class OllamaAdapter(LLMAdapter):
         base_url: str = "http://localhost:11434",
         timeout: int = 60,
         num_predict: int = 4096,
+        num_ctx: int | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url
         self.timeout = timeout
         self.num_predict = num_predict
+        # INPUT window. num_predict bounds the OUTPUT only; leaving num_ctx unset inherits the
+        # server's default, which we neither control nor version. A default below the payload
+        # truncates the prompt SILENTLY -- the HTTP call still returns 200 with a plausible
+        # answer, so nothing surfaces.
+        #
+        # None means OMIT the key, NOT "substitute a default of our own": a number invented here
+        # would silently NARROW every caller that today leaves the operator's server/Modelfile
+        # setting in charge. Only the consolidation route opts in (#192), because it is the one
+        # route whose prompt carries full source content.
+        self.num_ctx = num_ctx
 
     def generate(
         self,
@@ -34,6 +45,8 @@ class OllamaAdapter(LLMAdapter):
         import httpx
 
         options: dict = {"num_predict": max_tokens or self.num_predict}
+        if self.num_ctx is not None:
+            options["num_ctx"] = self.num_ctx
         if temperature is not None:
             options["temperature"] = temperature
 

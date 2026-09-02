@@ -286,6 +286,16 @@ class Settings(BaseSettings):
     consolidation_min_cluster_size: int = 2
     consolidation_cluster_threshold: float = 0.6
     consolidation_max_cluster_nodes: int = 5
+    # Budget for the WHOLE consolidation prompt, in characters. It governs two things at once:
+    # the cluster split (a cluster that does not fit is split, never truncated -- #192) and the
+    # Ollama input window the consolidation route pins on its own adapter. They must be the same
+    # number: a budget the provider never promised to honor is fiction, and an oversized prompt
+    # is then truncated by the Ollama server instead, silently.
+    # Sized from measurement (5,923 nodes / 301 real consolidation events): the worst real event
+    # builds a 12,961-char prompt and the largest single node is 5,513 chars, so this keeps 1.85x
+    # headroom over the worst case observed. At any value >= 16000 none of those 301 events would
+    # have been split -- the split is a tail safety net, not the common path.
+    consolidation_max_prompt_chars: int = 24000
 
     # Claude-in-the-loop maintenance
     claude_maintenance_enabled: bool = False
@@ -533,6 +543,16 @@ class Settings(BaseSettings):
                 f"consolidation_max_cluster_nodes ({v}) must be >= "
                 f"consolidation_min_cluster_size ({min_size})"
             )
+        return v
+
+    @field_validator("consolidation_max_prompt_chars")
+    @classmethod
+    def _consolidation_max_prompt_chars_floor(cls, v: int) -> int:
+        # The prompt template alone costs ~2,440 chars. Below 4000 there is no room left for two
+        # sources of any useful size, so no cluster could ever be consolidated -- reject the
+        # impossible config up front rather than emitting a silent no-op every run.
+        if v < 4000:
+            raise ValueError(f"consolidation_max_prompt_chars must be >= 4000, got {v}")
         return v
 
     @field_validator("activation_decay")
