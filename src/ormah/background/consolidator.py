@@ -9,10 +9,18 @@ from ormah.background.memory_lock import serialized_memory_job
 
 logger = logging.getLogger(__name__)
 
+# A consolidated node is terminal for discovery: never a seed, never a member. Feeding a
+# summary back into consolidation writes a summary from summaries while the real sources sit
+# in archival, unread (#261). The predicate is applied to both queries below.
+_NOT_CONSOLIDATED = (
+    "NOT EXISTS (SELECT 1 FROM node_tags WHERE node_id = nodes.id AND tag = 'consolidated')"
+)
+
 
 def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     """Find clusters of similar working-tier nodes for consolidation.
 
+    Nodes tagged ``consolidated`` are terminal and are excluded as seed and as member (#261).
     Returns up to *limit* clusters, each a list of node dicts (max
     ``engine.settings.consolidation_max_cluster_nodes`` nodes).
     Does NOT call the LLM — pure similarity-based clustering.
@@ -37,7 +45,8 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
         return []
 
     rows = conn.execute(
-        "SELECT id, title, content, space FROM nodes WHERE tier = 'working'"
+        "SELECT id, title, content, space FROM nodes "
+        f"WHERE tier = 'working' AND {_NOT_CONSOLIDATED}"
     ).fetchall()
     if len(rows) < min_size:
         return []
@@ -75,7 +84,8 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
             if match["similarity"] < threshold:
                 continue
             m_row = conn.execute(
-                "SELECT id, title, content, space, tier FROM nodes WHERE id = ?",
+                "SELECT id, title, content, space, tier FROM nodes "
+                f"WHERE id = ? AND {_NOT_CONSOLIDATED}",
                 (mid,),
             ).fetchone()
             if m_row is None or m_row["tier"] != "working":
