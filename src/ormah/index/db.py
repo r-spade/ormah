@@ -145,6 +145,14 @@ class Database:
             if "reason" not in edge_cols:
                 conn.execute("ALTER TABLE edges ADD COLUMN reason TEXT")
 
+            # Add remapped_edges column to merge_history table if missing
+            merge_history_cols = [
+                row[1]
+                for row in conn.execute("PRAGMA table_info(merge_history)").fetchall()
+            ]
+            if "remapped_edges" not in merge_history_cols:
+                conn.execute("ALTER TABLE merge_history ADD COLUMN remapped_edges TEXT")
+
             # Add enrichment columns to nodes table if missing
             node_cols = [
                 row[1]

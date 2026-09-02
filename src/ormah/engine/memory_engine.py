@@ -1545,24 +1545,15 @@ class MemoryEngine:
         ).fetchall()
         original_edges = [dict(r) for r in edge_rows]
 
-        # Capture incoming edges for the kept node that aren't in its markdown.
-        # index_single calls _remove_node which wipes ALL edges (including
-        # incoming ones like self→kept "defines").  We need to restore these.
-        kept_incoming = self.db.conn.execute(
-            "SELECT source_id, target_id, edge_type, weight, created FROM edges "
-            "WHERE target_id = ? AND source_id != ?",
-            (kept.id, removed.id),
-        ).fetchall()
-        kept_incoming_edges = [dict(r) for r in kept_incoming]
-
         # Merge tags from removed into kept
         removed_tags = set(removed.tags) - set(kept.tags)
         if removed_tags:
             kept.tags.extend(sorted(removed_tags))
 
         # Save kept node, re-index, re-embed
-        # NOTE: index_single calls _remove_node internally which wipes edges,
-        # so we must remap edges and restore incoming edges AFTER this step.
+        # NOTE: index_single rebuilds the kept node's OWN edges, so the remap of the removed
+        # node's edges must still happen AFTER this step. Since #123 it no longer touches the
+        # edges pointing AT the kept node from any other node.
         kept.touch_updated()
         path = self.file_store.save(kept)
         self.builder.index_single(path)
@@ -1573,8 +1564,11 @@ class MemoryEngine:
             self.builder._remove_node(removed.id)
 
             # Remap edges: point removed→kept (skip self-loops and duplicates)
-            # Done AFTER index_single since that wipes and rebuilds edges for kept node.
+            # Done AFTER index_single since that rebuilds the kept node's OWN edges. Since #123
+            # it no longer touches the edges pointing AT the kept node from any other node, so
+            # those need no rescue.
             affected_node_ids: set[str] = set()
+            remapped_edges: list[dict] = []
             for edge in original_edges:
                 new_source = kept.id if edge["source_id"] == removed.id else edge["source_id"]
                 new_target = kept.id if edge["target_id"] == removed.id else edge["target_id"]
@@ -1582,6 +1576,15 @@ class MemoryEngine:
                 # Skip self-loops
                 if new_source == new_target:
                     continue
+
+                # Track which nodes need their markdown files updated. This must run even when
+                # the row itself is skipped below as a pre-existing duplicate: since #123
+                # index_single() no longer wipes the kept node's incoming edges, so a neighbour's
+                # edge into A can already exist before this loop runs, short-circuiting the
+                # "already exists" check below. Without recording it here, that neighbour's
+                # markdown would keep pointing at the soft-deleted removed node (#123).
+                if edge["source_id"] != removed.id:
+                    affected_node_ids.add(edge["source_id"])
 
                 # Skip if edge already exists in either direction
                 existing = conn.execute(
@@ -1598,24 +1601,15 @@ class MemoryEngine:
                     "VALUES (?, ?, ?, ?, ?)",
                     (new_source, new_target, edge["edge_type"], edge["weight"], edge["created"]),
                 )
-
-                # Track which nodes need their markdown files updated
-                if edge["source_id"] != removed.id:
-                    affected_node_ids.add(edge["source_id"])
-
-            # Restore incoming edges for the kept node that were wiped by index_single
-            for edge in kept_incoming_edges:
-                existing = conn.execute(
-                    "SELECT 1 FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
-                    (edge["source_id"], edge["target_id"], edge["edge_type"]),
-                ).fetchone()
-                if not existing:
-                    conn.execute(
-                        "INSERT INTO edges (source_id, target_id, edge_type, weight, created) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (edge["source_id"], edge["target_id"], edge["edge_type"],
-                         edge["weight"], edge["created"]),
-                    )
+                # Record only the rows this loop actually inserted, so undo_merge deletes
+                # exactly those and never a pre-existing edge it never created (#123).
+                remapped_edges.append(
+                    {
+                        "source_id": new_source,
+                        "target_id": new_target,
+                        "edge_type": edge["edge_type"],
+                    }
+                )
 
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
@@ -1635,7 +1629,7 @@ class MemoryEngine:
             conn.execute(
                 "INSERT INTO merge_history "
                 "(id, proposal_id, kept_node_id, removed_node_id, removed_node_snapshot, "
-                "original_edges, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "original_edges, remapped_edges, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     merge_id,
                     proposal_id,
@@ -1643,6 +1637,7 @@ class MemoryEngine:
                     removed.id,
                     json.dumps(snapshot),
                     json.dumps(original_edges),
+                    json.dumps(remapped_edges),
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -1654,12 +1649,44 @@ class MemoryEngine:
             neighbor = self.file_store.load(node_id)
             if neighbor is None:
                 continue
+            # Edge types the neighbour already declares toward kept, snapshotted before any
+            # mutation below. A retarget made later in this same loop must never be mistaken
+            # for a pre-existing declaration by a subsequent connection to removed (#123).
+            existing_kept_edges = {c.edge for c in neighbor.connections if c.target == kept.id}
+            # When the neighbour declares the same edge_type toward removed more than once,
+            # only the LAST declaration is retargeted. _index_file_edges writes edges with
+            # INSERT OR REPLACE on (source_id, target_id, edge_type), so the last markdown
+            # declaration is what becomes effective at reindex time — the retarget must keep
+            # that same winner, not the first one (#123).
+            last_removed_connection_by_edge: dict = {}
+            for c in neighbor.connections:
+                if c.target == removed.id:
+                    last_removed_connection_by_edge[c.edge] = c
+            new_connections: list = []
             updated = False
             for c in neighbor.connections:
                 if c.target == removed.id:
+                    if c.edge in existing_kept_edges:
+                        # Neighbour already declares this edge type toward kept: retargeting
+                        # would create a second (source, kept, edge_type) connection, which
+                        # collides at reindex time and silently clobbers the pre-existing
+                        # edge's weight (INSERT OR REPLACE, last one wins) (#123). Drop this
+                        # connection instead. Covers every connection to removed sharing that
+                        # edge_type, since the pre-existing declaration always wins.
+                        updated = True
+                        continue
+                    if last_removed_connection_by_edge[c.edge] is not c:
+                        # An earlier duplicate declaration of this edge_type toward removed:
+                        # the later one (retargeted below) is the effective one after
+                        # reindexing, so drop this one silently (#123).
+                        updated = True
+                        continue
                     c.target = kept.id
+                    existing_kept_edges.add(c.edge)
                     updated = True
+                new_connections.append(c)
             if updated:
+                neighbor.connections = new_connections
                 neighbor.touch_updated()
                 self.file_store.save(neighbor)
 
@@ -1710,15 +1737,34 @@ class MemoryEngine:
         # Delete remapped edges that were created during merge
         # (edges involving kept_id that originated from removed_id)
         original_edges = json.loads(row["original_edges"])
-        with self.db.transaction() as conn:
+
+        # remapped_edges records exactly which rows execute_merge inserted, so undo deletes
+        # only those and never a pre-existing edge the merge skipped (#123). Access it
+        # defensively via row.keys(): a stale connection without the column, or a row written
+        # before this column existed, must fall back to deriving the remapped key from
+        # original_edges — today's behaviour.
+        if "remapped_edges" in row.keys() and row["remapped_edges"] is not None:
+            edges_to_delete = json.loads(row["remapped_edges"])
+        else:
+            edges_to_delete = []
             for edge in original_edges:
                 remapped_source = row["kept_node_id"] if edge["source_id"] == row["removed_node_id"] else edge["source_id"]
                 remapped_target = row["kept_node_id"] if edge["target_id"] == row["removed_node_id"] else edge["target_id"]
                 if remapped_source == remapped_target:
                     continue
+                edges_to_delete.append(
+                    {
+                        "source_id": remapped_source,
+                        "target_id": remapped_target,
+                        "edge_type": edge["edge_type"],
+                    }
+                )
+
+        with self.db.transaction() as conn:
+            for edge in edges_to_delete:
                 conn.execute(
                     "DELETE FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
-                    (remapped_source, remapped_target, edge["edge_type"]),
+                    (edge["source_id"], edge["target_id"], edge["edge_type"]),
                 )
 
             # Restore original edges (check both endpoints still exist)

@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS merge_history (
     removed_node_id TEXT NOT NULL,
     removed_node_snapshot TEXT NOT NULL,  -- full MemoryNode JSON
     original_edges TEXT NOT NULL,         -- JSON array of edge dicts
+    remapped_edges TEXT,                  -- JSON array of edges execute_merge actually inserted
+                                           -- (source_id, target_id, edge_type); NULL for rows
+                                           -- written before this column existed
     merged_at TEXT NOT NULL,
     undone_at TEXT                        -- NULL until rollback
 );
