@@ -244,6 +244,26 @@ CREATE TABLE IF NOT EXISTS confirmed_use_claims (
     whisper_log_id INTEGER NOT NULL REFERENCES whisper_log(id) ON DELETE CASCADE,
     node_id        TEXT NOT NULL,
     claimed_at     TEXT NOT NULL,
+    -- Issue #272: the claim's outcome, which the latch alone could not express.
+    --   pending        the reinforcement has not landed yet — the sweeper retries these
+    --   applied        it landed; reinforced_at carries when
+    --   legacy_unknown written before this column existed; outcome unknowable
+    --   orphaned       the node is gone, so there is nothing left to reinforce
+    --
+    -- The DEFAULT is TERMINAL, and deliberately so. A pre-#272 binary running against
+    -- this database inserts (whisper_log_id, node_id, claimed_at) without naming this
+    -- column, and its mutator never marks anything applied. A 'pending' default would
+    -- leave that row eligible forever and the sweeper would re-reinforce it every
+    -- hour, compounding the reinforcement the old binary already performed. Two
+    -- binaries on one store is not hypothetical here — see issue #238 in CLAUDE.md.
+    -- Only the new _claim_confirmed_use writes 'pending', and it names the column.
+    state          TEXT NOT NULL DEFAULT 'legacy_unknown'
+                   CHECK (state IN ('pending', 'applied', 'legacy_unknown', 'orphaned')),
+    reinforced_at  TEXT,
+    -- When the sweeper last tried this claim. Without it, ORDER BY claimed_at ASC
+    -- LIMIT N lets N permanently-failing claims fill every batch forever and no new
+    -- claim is ever attempted.
+    last_attempt_at TEXT,
     PRIMARY KEY (whisper_log_id, node_id)
 );
 

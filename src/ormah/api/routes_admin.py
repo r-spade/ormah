@@ -28,6 +28,7 @@ _TASK_RUNNERS = {
     "memory_backup": ("ormah.backup", "run_auto_backup"),
     "cloud_backup": ("ormah.cloud.jobs", "run_cloud_backup"),
     "restore_verification": ("ormah.cloud.jobs", "run_restore_verification"),
+    "reinforcement_retry": ("ormah.background.reinforcement_retry", "run_reinforcement_retry"),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -43,6 +44,7 @@ _TASK_DESCRIPTIONS = {
     "memory_backup": "Creates a local backup of memory source files when one is due.",
     "cloud_backup": "Encrypts and uploads a due cloud backup without changing the sync head.",
     "restore_verification": "Downloads, decrypts, rebuilds, and searches the latest cloud backup.",
+    "reinforcement_retry": "Re-applies confirmed-use reinforcements whose claim committed but whose write never landed.",
 }
 
 # Order for sleep cycle (full maintenance pass)
@@ -55,6 +57,7 @@ _SLEEP_CYCLE_ORDER = [
     "auto_cluster",
     "consolidator",
     "decay_manager",
+    "reinforcement_retry",
     "memory_backup",
 ]
 

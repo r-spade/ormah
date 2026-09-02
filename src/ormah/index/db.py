@@ -182,6 +182,66 @@ class Database:
             # (which skips the block above) still gets the index.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq)")
 
+            # Issue #272: confirmed_use_claims gains an outcome. Rows written before
+            # this column existed become 'legacy_unknown', NOT 'applied'.
+            #
+            # Stamping them as successes was this plan's first draft, and the council
+            # (Codex, HIGH) refuted it: the premise of this task is that some claims
+            # committed and then lost their reinforcement, those rows are exactly the
+            # ones the defect produced, and the old schema cannot tell them apart from
+            # the successes. Calling them applied would hide the data loss forever.
+            # Calling them pending is no better — the overwhelming majority DID apply,
+            # and re-running them would be mass over-reinforcement of an at-most-once
+            # latch. 'legacy_unknown' is terminal for the sweeper and honest about why.
+            claim_cols = [
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(confirmed_use_claims)"
+                ).fetchall()
+            ]
+            if claim_cols and "reinforced_at" not in claim_cols:
+                conn.execute(
+                    "ALTER TABLE confirmed_use_claims ADD COLUMN reinforced_at TEXT"
+                )
+            if claim_cols and "last_attempt_at" not in claim_cols:
+                conn.execute(
+                    "ALTER TABLE confirmed_use_claims ADD COLUMN last_attempt_at TEXT"
+                )
+            if claim_cols and "state" not in claim_cols:
+                # Counted BEFORE the ALTER, because after it every row already reads
+                # legacy_unknown and there is nothing left to distinguish.
+                legacy = conn.execute(
+                    "SELECT COUNT(*) FROM confirmed_use_claims"
+                ).fetchone()[0]
+                # The column lands plain: ADD COLUMN cannot carry the CHECK. Fresh
+                # databases get the constraint from schema.sql; migrated ones rely on
+                # the writers, which only ever set the four listed values.
+                #
+                # The DEFAULT does double duty. It backfills every existing row to
+                # legacy_unknown in one statement — no UPDATE needed — and it is the
+                # same terminal default schema.sql carries, so an old binary writing
+                # into this migrated database lands terminal too.
+                conn.execute(
+                    "ALTER TABLE confirmed_use_claims "
+                    "ADD COLUMN state TEXT NOT NULL DEFAULT 'legacy_unknown'"
+                )
+                # Measured, not guessed: the size of the historical gap is logged so it
+                # can be reasoned about instead of assumed away.
+                logger.info(
+                    "confirmed_use_claims: %d pre-#272 claim(s) marked legacy_unknown "
+                    "(outcome not recoverable from the old schema)",
+                    legacy,
+                )
+
+            # Partial index: the sweeper only ever selects the pending rows, which are a
+            # vanishing fraction of the table. Keyed on the same expression the sweeper
+            # orders by, so the batch scan stays index-only.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claims_pending "
+                "ON confirmed_use_claims(COALESCE(last_attempt_at, claimed_at)) "
+                "WHERE state = 'pending'"
+            )
+
             # Create new feedback/logging tables if missing
             existing_tables = {
                 row[0]

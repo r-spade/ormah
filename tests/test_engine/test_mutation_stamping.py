@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType
 from ormah.store.markdown import parse_node
+from tests.test_engine.test_confirmed_use_contract import _reinforce
 
 PAST = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
@@ -143,7 +144,7 @@ def test_engine_access_tracking_does_not_advance_updated(engine):
     node_id = _create(engine, "Read often", "Frequently accessed fact.")
     _backdate(engine.file_store, node_id)
 
-    engine._record_confirmed_use(node_id)
+    _reinforce(engine, node_id)
 
     node = engine.file_store.load(node_id)
     assert node.updated == PAST

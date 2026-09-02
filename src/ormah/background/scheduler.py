@@ -157,6 +157,17 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.reinforcement_retry import run_reinforcement_retry
+
+    scheduler.add_job(
+        tracked(tracker, "reinforcement_retry", run_reinforcement_retry, engine),
+        "interval",
+        minutes=s.reinforcement_retry_interval_minutes,
+        id="reinforcement_retry",
+        name="Reinforcement retry",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     scheduler.start()
     logger.info("Background scheduler started with %d jobs", len(scheduler.get_jobs()))
     return scheduler, tracker

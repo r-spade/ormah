@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     conflict_check_all_spaces: bool = False
     duplicate_check_interval_minutes: int = 1440
     auto_cluster_interval_minutes: int = 60
+    reinforcement_retry_interval_minutes: int = 60
 
     # Hippocampus (file watching & auto-ingestion)
     hippocampus_watch_dirs: list[Path] = []
@@ -378,6 +379,7 @@ class Settings(BaseSettings):
         "conflict_check_interval_minutes",
         "duplicate_check_interval_minutes",
         "auto_cluster_interval_minutes",
+        "reinforcement_retry_interval_minutes",
     )
     @classmethod
     def _interval_minutes_positive(cls, v: int) -> int:

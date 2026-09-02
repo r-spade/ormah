@@ -16,7 +16,8 @@ from threading import Event, Lock, Thread, Timer
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from ormah.engine.memory_engine import MemoryEngine
+from ormah import signal_strength
+from ormah.engine.memory_engine import HEURISTIC_CONFIRM_FLOOR, MemoryEngine
 from ormah.text.tokens import distinctive_tokens
 from ormah.transcript.parser import (
     TranscriptResult,
@@ -37,8 +38,8 @@ class IngestResult(Enum):
 
 _STATE_FILENAME = ".session_watcher_state"
 MAX_RECONCILE_RETRIES = 3
-_HEURISTIC_SOURCE = "transcript_watcher_heuristic"
-_LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
+_HEURISTIC_SOURCE = signal_strength.HEURISTIC_SOURCE
+_LLM_JUDGE_SOURCE = signal_strength.LLM_JUDGE_SOURCE
 _HEURISTIC_AFFINITY_SOURCE = "auto_heuristic"
 _LLM_JUDGE_AFFINITY_SOURCE = "auto_llm_judge"
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
@@ -116,13 +117,13 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     node_id = row["node_id"]
     short_id = node_id[:8] if node_id else ""
     if short_id and short_id.lower() in response_text.lower():
-        return True, 1.0, {"match": "node_id", "short_id": short_id}
+        return True, signal_strength.VERBATIM_NODE_ID, {"match": "node_id", "short_id": short_id}
 
     title = row["title"] or ""
     title_tokens = distinctive_tokens(title, extra_stop_words={"memory", "ormah"})
     title_norm = _normalise_text(title)
     if len(title_tokens) >= 2 and len(title_norm) >= 12 and title_norm in response_norm:
-        return True, 0.95, {"match": "title", "title": title}
+        return True, signal_strength.VERBATIM_TITLE, {"match": "title", "title": title}
 
     content = row["content"] or ""
     for sentence in re.split(r"[\n.!?]+", content):
@@ -132,7 +133,10 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
         sentence_tokens = distinctive_tokens(sentence, extra_stop_words={"memory", "ormah"})
         sentence_norm = _normalise_text(sentence)
         if len(sentence_tokens) >= 4 and sentence_norm in response_norm:
-            return True, 0.9, {"match": "sentence", "text": sentence[:160]}
+            return True, signal_strength.VERBATIM_SENTENCE, {
+                "match": "sentence",
+                "text": sentence[:160],
+            }
 
     node_tokens = distinctive_tokens(
         f"{title} {content}",
@@ -143,11 +147,17 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     overlap = sorted(candidate_tokens & response_tokens)
     denominator = min(len(candidate_tokens), 12)
     overlap_ratio = (len(overlap) / denominator) if denominator else 0.0
-    if len(overlap) >= 4 and overlap_ratio >= 0.5:
-        return True, min(0.85, 0.45 + overlap_ratio), {
+    if len(overlap) >= 4 and overlap_ratio >= signal_strength.OVERLAP_GATE:
+        # Round ONCE, then use that same value for both the strength and the evidence.
+        # The #218 backfill recomputes strength from evidence, so a strength derived
+        # from a more precise ratio than the one recorded makes the recompute perturb
+        # a correct row instead of confirming it. The gate above still reads the raw
+        # ratio, so which responses count as referenced is unchanged.
+        recorded_ratio = round(overlap_ratio, 3)
+        return True, signal_strength.token_overlap_strength(recorded_ratio), {
             "match": "token_overlap",
             "overlap": overlap[:12],
-            "overlap_ratio": round(overlap_ratio, 3),
+            "overlap_ratio": recorded_ratio,
         }
 
     return False, 0.0, {
@@ -439,7 +449,12 @@ def _record_whisper_usage_signals(
                 SELECT 1 FROM signals s
                 WHERE s.whisper_log_id = wl.id
                   AND s.source = ?
-            ) AS has_llm_judge
+            ) AS has_llm_judge,
+            EXISTS (
+                SELECT 1 FROM confirmed_use_claims c
+                WHERE c.whisper_log_id = wl.id
+                  AND c.node_id = wl.node_id
+            ) AS already_confirmed
         FROM whisper_log wl
         LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
         JOIN nodes n ON n.id = wl.node_id
@@ -473,11 +488,15 @@ def _record_whisper_usage_signals(
         has_heuristic = heuristic_polarity is not None
         has_llm_judge = bool(row["has_llm_judge"])
 
-        referenced = False
+        confirms = False
         if not has_heuristic:
             referenced, strength, evidence = _node_usage_evidence(row, response)
             signal_type = "whisper_referenced" if referenced else "whisper_unreferenced"
             polarity = 1 if referenced else 0
+            # Issue #272: whether THIS hit will take the claim in the transaction below.
+            # Not the same question as `referenced`: a token_overlap hit is referenced
+            # but sits under the floor, so it confirms nothing.
+            confirms = referenced and strength >= HEURISTIC_CONFIRM_FLOOR
             heuristic_records.append({
                 "row": row,
                 "signal_type": signal_type,
@@ -489,12 +508,20 @@ def _record_whisper_usage_signals(
                     "response_chars": len(response),
                 },
             })
-        else:
-            referenced = int(heuristic_polarity) == 1
 
-        if llm_judge_enabled and not has_llm_judge and not referenced:
+        # Issue #272: suppress the judge only for an event that is already settled —
+        # not for any heuristic sighting. A below-floor hit keeps the judge, which is
+        # the only route left that can still confirm it.
+        #
+        # already_confirmed covers the two cases `confirms` cannot: a re-ingest, where
+        # the strength is not in scope at all, and a positive submit_feedback through
+        # MCP, which has_llm_judge is structurally blind to because it only sees this
+        # watcher's own signal source (#220 contract 13a).
+        settled = confirms or bool(row["already_confirmed"])
+        if llm_judge_enabled and not has_llm_judge and not settled:
             llm_groups.setdefault((prompt_text, response), []).append(row)
 
+    heuristic_confirmed_ids: list[tuple[int, str]] = []
     with engine.db.transaction() as conn:
         for record in heuristic_records:
             row = record["row"]
@@ -517,6 +544,40 @@ def _record_whisper_usage_signals(
                     source=_HEURISTIC_AFFINITY_SOURCE,
                     confirmed_at=now_iso,
                 )
+                # Issue #272: the same at-most-once claim the judge block takes. The
+                # engine gates it on HEURISTIC_CONFIRM_FLOOR, so a token_overlap hit
+                # records its evidence here and confirms nothing.
+                #
+                # _insert_affinity MUST stay above this call: the claim helper reads
+                # changes(), so nothing may sit between its INSERT and that read.
+                if engine._claim_confirmed_use(
+                    conn,
+                    row["id"],
+                    row["node_id"],
+                    signal=1,
+                    source=_HEURISTIC_AFFINITY_SOURCE,
+                    strength=record["strength"],
+                ):
+                    heuristic_confirmed_ids.append((row["id"], row["node_id"]))
+
+    # Issue #272: reinforcement runs after the transaction commits — _record_confirmed_use
+    # does file I/O, and calling it inside would hold the process-wide write lock across
+    # N markdown saves and take db_lock before memory_lock, inverting the order every
+    # serialized writer uses.
+    #
+    # This is deliberately NOT the judge's loop below: the `if not llm_groups: return`
+    # that follows means the judge's loop never runs when there is nothing to judge —
+    # which, since a confirming heuristic hit now suppresses the judge, is exactly the
+    # case this loop exists for.
+    #
+    # Isolated per node: the signals and claims are already committed, so letting one
+    # failure escape would abandon every later node with its claim taken and nothing to
+    # retry it. At-most-once means a miss is logged, never raised.
+    for whisper_log_id, node_id in heuristic_confirmed_ids:
+        try:
+            engine._record_confirmed_use(node_id, whisper_log_id=whisper_log_id)
+        except Exception:
+            logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 
     if not llm_groups:
         return recorded
@@ -546,7 +607,9 @@ def _record_whisper_usage_signals(
                 "row": row,
                 "signal_type": signal_type,
                 "polarity": polarity,
-                "strength": confidence,
+                "strength": signal_strength.judge_strength(
+                    confidence, min_confidence, polarity
+                ),
                 "evidence": {
                     "detector": _LLM_JUDGE_SOURCE,
                     "verdict": verdict,
@@ -558,7 +621,7 @@ def _record_whisper_usage_signals(
                 },
             })
 
-    confirmed_node_ids: list[str] = []
+    confirmed_node_ids: list[tuple[int, str]] = []
     with engine.db.transaction() as conn:
         for record in judge_records:
             row = record["row"]
@@ -581,6 +644,35 @@ def _record_whisper_usage_signals(
                     source=_LLM_JUDGE_AFFINITY_SOURCE,
                     confirmed_at=now_iso,
                 )
+                # Issue #272: affinity is keyed unique on (node_id, whisper_log_id) and
+                # _insert_affinity is ON CONFLICT DO NOTHING, so for an event the
+                # heuristic block already wrote a +1 for, the INSERT above is a no-op.
+                # Before this task that could not happen — a positive hit never reached
+                # the judge — but Step 4 is what sends weak hits here, so without this
+                # UPDATE an `irrelevant` verdict would be recorded in signals and
+                # silently ignored by retrieval, which would keep consuming the +1.
+                #
+                # Same shape _submit_feedback_locked uses for explicit feedback
+                # (memory_engine.py:2869-2877): INSERT ... DO NOTHING, then an UPDATE
+                # scoped by source. Scoped to auto_heuristic ONLY — the judge outranks
+                # the heuristic, and explicit feedback outranks the judge.
+                conn.execute(
+                    """
+                    UPDATE affinity
+                    SET signal = ?, source = ?, confirmed_at = ?
+                    WHERE node_id = ?
+                      AND whisper_log_id = ?
+                      AND source = ?
+                    """,
+                    (
+                        record["polarity"],
+                        _LLM_JUDGE_AFFINITY_SOURCE,
+                        now_iso,
+                        row["node_id"],
+                        row["id"],
+                        _HEURISTIC_AFFINITY_SOURCE,
+                    ),
+                )
             # Issue #220: the same at-most-once claim submit_feedback takes, not a
             # parallel polarity check. has_llm_judge only sees this watcher's own
             # signal source, so it is blind to feedback submitted through MCP — the
@@ -594,8 +686,9 @@ def _record_whisper_usage_signals(
                 row["node_id"],
                 signal=record["polarity"],
                 source=_LLM_JUDGE_AFFINITY_SOURCE,
+                strength=record["strength"],
             ):
-                confirmed_node_ids.append(row["node_id"])
+                confirmed_node_ids.append((row["id"], row["node_id"]))
 
     # Issue #220: reinforcement runs after the transaction commits. db.transaction()
     # holds a process-level lock for its whole body and _record_confirmed_use writes
@@ -608,9 +701,9 @@ def _record_whisper_usage_signals(
     # node, and leave both has_llm_judge set and the claims taken — nothing would ever
     # retry them. Failures here are logged, never raised. This is the at-most-once
     # contract.
-    for node_id in confirmed_node_ids:
+    for whisper_log_id, node_id in confirmed_node_ids:
         try:
-            engine._record_confirmed_use(node_id)
+            engine._record_confirmed_use(node_id, whisper_log_id=whisper_log_id)
         except Exception:
             logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 

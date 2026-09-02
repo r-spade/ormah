@@ -7,12 +7,18 @@ rotted, and vice versa.
 
 from __future__ import annotations
 
+import json
+import sqlite3
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ormah import lifecycle
 from ormah.api.routes_ui import router as ui_router
 from ormah.config import Settings
 from ormah.engine.memory_engine import MemoryEngine
@@ -32,6 +38,29 @@ def _snapshot(engine, node_id):
         "file": tuple(getattr(node, f) for f in LIFECYCLE_FIELDS),
         "db": tuple(row[f] for f in LIFECYCLE_FIELDS),
     }
+
+
+def _snapshot_stores_agree(snapshot):
+    """True if a _snapshot's `file` and `db` halves carry the same VALUES.
+
+    `_snapshot`'s `file` tuple carries parsed datetime objects (MemoryNode's
+    last_accessed/last_review are typed datetime); its `db` tuple carries the
+    raw TEXT sqlite3 returns for the same columns. A plain `file == db` tuple
+    comparison therefore never matches, even when the two stores fully agree —
+    proven by executing it: both sides print the identical instant, one as a
+    datetime, one as its isoformat string. Only used where the two are compared
+    directly against each other; every other _snapshot comparison in this file
+    is same-shape-vs-same-shape and is unaffected.
+    """
+    file_vals, db_vals = snapshot["file"], snapshot["db"]
+
+    def _dt(value):
+        return datetime.fromisoformat(value) if isinstance(value, str) else value
+
+    return all(
+        _dt(f) == _dt(d)
+        for f, d in zip(file_vals, db_vals, strict=True)
+    )
 
 
 def _make_nodes(engine, count=2):
@@ -164,8 +193,18 @@ def test_concurrent_confirmed_use_does_not_lose_increments(engine):
     target = ids[0]
     before = engine.file_store.load(target).access_count
 
-    threads = [threading.Thread(target=engine._record_confirmed_use, args=(target,))
-               for _ in range(8)]
+    # Issue #272: each thread needs its OWN claimed event — the mutator is now
+    # at-most-once per (whisper_log_id, node_id), so 8 threads sharing one claim
+    # would only reinforce once. Claimed up front, sequentially, since claiming
+    # must happen inside its own transaction before the mutator runs.
+    log_ids = [_claim_fresh_event(engine, target) for _ in range(8)]
+    threads = [
+        threading.Thread(
+            target=engine._record_confirmed_use,
+            kwargs={"node_id": target, "whisper_log_id": log_id},
+        )
+        for log_id in log_ids
+    ]
     for t in threads:
         t.start()
     for t in threads:
@@ -196,6 +235,55 @@ def _seed_whisper_log(engine, node_id, prompt="what about caching?"):
     ).fetchone()
     assert row is not None, "no whisper_log row was created — check the surface used"
     return row["id"]
+
+
+def _claim_fresh_event(engine, node_id):
+    """Insert a whisper_log row for node_id and take its confirmed-use claim.
+
+    Issue #272 made whisper_log_id a required keyword on _record_confirmed_use:
+    every real caller reaches it only after _claim_confirmed_use has taken a claim
+    inside its own transaction, so a direct call needs the same shape. Bypasses
+    recall_search (unlike _seed_whisper_log above) so cooldown/stamping tests that
+    call the mutator many times on one node get one fresh, independently-claimable
+    event per call rather than depending on search surfacing the same node again.
+    """
+    with engine.db.transaction() as conn:
+        cursor = conn.execute(
+            "INSERT INTO whisper_log "
+            "(session_id, prompt_hash, prompt_vec, node_id, score, was_injected, logged_at) "
+            "VALUES ('test-direct-claim', ?, X'00', ?, 1.0, 1, datetime('now'))",
+            (uuid.uuid4().hex, node_id),
+        )
+        whisper_log_id = cursor.lastrowid
+        engine._claim_confirmed_use(
+            conn, whisper_log_id, node_id, signal=1, source="explicit", strength=1.0,
+        )
+        # _claim_confirmed_use's INSERT stamps claimed_at with SQL datetime('now'),
+        # which truncates to whole seconds. The mutator's clock is claimed_at, so a
+        # test that calls _reinforce several times faster than 1 second apart (the
+        # cooldown tests do) would see identical or barely-advancing timestamps —
+        # and near an exact cooldown-day boundary, that truncation alone can flip
+        # `reinforcement_due`. Overwritten here with a microsecond-precision Python
+        # timestamp, the same precision _age_for_fsrs already relies on for the
+        # same reason.
+        conn.execute(
+            "UPDATE confirmed_use_claims SET claimed_at = ? "
+            "WHERE whisper_log_id = ? AND node_id = ?",
+            (datetime.now(timezone.utc).isoformat(), whisper_log_id, node_id),
+        )
+    return whisper_log_id
+
+
+def _reinforce(engine, node_id):
+    """Claim a fresh event for node_id and reinforce it in one step.
+
+    The direct replacement for the pre-#272 `engine._record_confirmed_use(node_id)`
+    call shape, used by tests that exercise the mutator's lifecycle arithmetic
+    (cooldown, stamping) rather than the claiming path itself.
+    """
+    engine._record_confirmed_use(
+        node_id, whisper_log_id=_claim_fresh_event(engine, node_id)
+    )
 
 
 def test_recall_node_confirms_only_the_requested_node(engine):
@@ -245,7 +333,12 @@ def test_qualified_positive_feedback_confirms_use(engine, source):
 
 
 def test_auto_heuristic_positive_does_not_confirm(engine):
-    """Contract 9: auto_heuristic is excluded pending #218 — fail-closed."""
+    """Contract 9: submit_feedback(auto_heuristic) is below the #272 evidence floor.
+
+    Not an exclusion by source any more — auto_heuristic IS in the allowlist since
+    #272. feedback_strength maps it to UNKNOWN (0.40), under HEURISTIC_CONFIRM_FLOOR,
+    because a submit_feedback call carries no evidence of a verbatim match.
+    """
     ids = _make_nodes(engine, count=1)
     target = ids[0]
     log_id = _seed_whisper_log(engine, target)
@@ -254,6 +347,46 @@ def test_auto_heuristic_positive_does_not_confirm(engine):
     engine.submit_feedback(target, signal=1, source="auto_heuristic", whisper_log_id=log_id)
 
     assert _snapshot(engine, target) == before, "auto_heuristic must not confirm use"
+
+
+@pytest.mark.parametrize("strength,should_confirm", [
+    (0.80, True),    # exactly the floor — inclusive
+    (0.7999, False), # just below
+    (0.98, True),    # node_id
+    (0.40, False),   # token_overlap floor
+])
+def test_heuristic_claim_respects_the_evidence_floor(engine, strength, should_confirm):
+    """#272 D1/D2: the floor lives in the claim helper, not in its callers."""
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    with engine.db.transaction() as conn:
+        claimed = engine._claim_confirmed_use(
+            conn, log_id, target,
+            signal=1, source="auto_heuristic", strength=strength,
+        )
+
+    assert claimed is should_confirm
+
+
+def test_the_floor_does_not_gate_the_other_sources(engine):
+    """#272 D2: the floor is scoped to auto_heuristic only.
+
+    explicit is 1.00 on the ladder, so a low strength reaching this helper would
+    mean the caller computed it wrong — but gating it here would silently drop a
+    real confirmation instead of surfacing that bug.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    with engine.db.transaction() as conn:
+        claimed = engine._claim_confirmed_use(
+            conn, log_id, target, signal=1, source="explicit", strength=0.0,
+        )
+
+    assert claimed is True, "the floor must not apply to non-heuristic sources"
 
 
 @pytest.mark.parametrize("source", ["explicit", "implicit", "auto_llm_judge", "auto_heuristic"])
@@ -706,3 +839,901 @@ def test_recall_search_structured_rejects_positional_tuning_args(engine):
     assert isinstance(engine.recall_search_structured(
         "caching architecture", limit=4, min_relevance=0.0, spread_activation=False,
     ), list)
+
+
+# --- Task 4: backfill the rows the defect already wrote (#272) -------------
+
+def _seed_heuristic_signal(
+    engine, node_id, whisper_log_id, strength, match="node_id", overlap_ratio=None
+):
+    """Write a positive heuristic signal row as the pre-#272 code would have.
+
+    ``strength`` only fills the cosmetic ``signals.strength`` column, which the
+    backfill deliberately ignores — it recomputes from ``evidence`` instead
+    (issue #272). ``overlap_ratio``, when given, is written into ``evidence``
+    and is what actually drives that recompute for a token_overlap row via
+    ``strength_from_evidence``. Defaults to omitted so existing callers keep
+    their current evidence shape unchanged.
+    """
+    evidence = {"match": match}
+    if overlap_ratio is not None:
+        evidence["overlap_ratio"] = overlap_ratio
+    engine.db.conn.execute(
+        """
+        INSERT INTO signals
+            (whisper_log_id, node_id, signal_type, polarity, strength, source,
+             session_id, surface, space, prompt_hash, evidence, created)
+        VALUES (?, ?, 'whisper_referenced', 1, ?, 'transcript_watcher_heuristic',
+                's1', 'transcript', 'myproject', 'h', ?, datetime('now'))
+        """,
+        (whisper_log_id, node_id, strength, json.dumps(evidence)),
+    )
+    engine.db.conn.commit()
+
+
+def test_backfill_claims_and_reinforces_historical_verbatim_rows(engine):
+    """#272 D4: the rows the defect already wrote are repaired at boot."""
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+
+    before = _snapshot(engine, target)
+    engine._migrate_heuristic_confirmed_use()
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ? AND node_id = ?",
+        (log_id, target),
+    ).fetchone()
+    assert claim is not None, "the backfill claimed nothing"
+    assert _snapshot(engine, target) != before, "the backfill claimed but did not reinforce"
+
+
+def test_backfill_is_idempotent(engine):
+    """#272 D4: a second boot must not reinforce the same event again."""
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+
+    engine._migrate_heuristic_confirmed_use()
+    after_first = _snapshot(engine, target)
+
+    engine._migrate_heuristic_confirmed_use()
+
+    assert _snapshot(engine, target) == after_first, "the backfill reinforced twice"
+
+
+@pytest.mark.parametrize("strength,match,overlap_ratio", [
+    (0.40, "token_overlap", 0.5),      # ratio <= OVERLAP_GATE recomputes to the floor itself
+    (0.7799, "token_overlap", 8.7428), # asymptotic near-supremum, still strictly under 0.80
+])
+def test_backfill_skips_rows_below_the_floor(engine, strength, match, overlap_ratio):
+    """#272 D4: the backfill uses the same floor as the live path.
+
+    The seeded ``strength`` only fills the cosmetic ``signals.strength`` column,
+    which the backfill ignores by design — it recomputes from ``evidence`` via
+    ``strength_from_evidence``. ``overlap_ratio`` is what actually drives that
+    recompute, so the two cases genuinely land at different points on the
+    token_overlap band (0.40 and ~0.7799) instead of both silently falling
+    back to the same OVERLAP_FLOOR default.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(
+        engine, target, log_id, strength=strength, match=match, overlap_ratio=overlap_ratio
+    )
+
+    before = _snapshot(engine, target)
+    engine._migrate_heuristic_confirmed_use()
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (log_id,)
+    ).fetchone()
+    assert claim is None, "a below-floor row was backfilled"
+    assert _snapshot(engine, target) == before
+
+
+def test_backfill_skips_a_never_injected_event(engine):
+    """#272 D4: was_injected = 1 is the provenance test the claim helper enforces.
+
+    A memory the agent never saw cannot have been used, however the signal reads.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+    engine.db.conn.execute("UPDATE whisper_log SET was_injected = 0 WHERE id = ?", (log_id,))
+    engine.db.conn.commit()
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+
+    before = _snapshot(engine, target)
+    engine._migrate_heuristic_confirmed_use()
+
+    assert _snapshot(engine, target) == before, "a non-injected event was backfilled"
+
+
+def test_backfill_skips_an_already_claimed_event(engine):
+    """#272 D4: an event confirmed through another caller must not reinforce twice."""
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+    engine.submit_feedback(target, signal=1, source="explicit", whisper_log_id=log_id)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+
+    after_feedback = _snapshot(engine, target)
+    engine._migrate_heuristic_confirmed_use()
+
+    assert _snapshot(engine, target) == after_feedback, "an already-claimed event reinforced again"
+
+
+def test_backfill_cutoff_advances_to_the_highest_processed_id(engine):
+    """#272 D4: the cutoff advances by processed id, never to MAX(id).
+
+    Same defence-in-depth _migrate_signal_strength documents: a row committed by
+    another writer between the SELECT and the stamp must not be skipped forever.
+    A below-floor row is still 'processed' — it was examined and rejected.
+    """
+    strong, weak = _make_nodes(engine, count=2)
+    strong_log = _seed_whisper_log(engine, strong, prompt="caching strong")
+    _seed_heuristic_signal(engine, strong, strong_log, strength=0.98)
+    # Seeded LAST and below the floor: the cutoff must still clear it, or the scan
+    # window would grow forever on a store whose newest rows are all token_overlap.
+    weak_log = _seed_whisper_log(engine, weak, prompt="caching weak")
+    _seed_heuristic_signal(engine, weak, weak_log, strength=0.40, match="token_overlap")
+
+    highest = engine.db.conn.execute(
+        "SELECT MAX(id) AS m FROM signals WHERE source = 'transcript_watcher_heuristic'"
+    ).fetchone()["m"]
+
+    engine._migrate_heuristic_confirmed_use()
+
+    cutoff = engine._meta_int("heuristic_confirmed_use_cutoff")
+    assert cutoff == highest, (
+        f"cutoff {cutoff} stopped short of the last processed id {highest} — "
+        "a below-floor row was examined but not counted as processed"
+    )
+    assert engine._meta_int("heuristic_confirmed_use_version") == 1
+
+
+def test_backfill_skips_a_signal_whose_node_is_not_the_events_node(engine):
+    """#272, council R1 (Codex HIGH): the claim helper does not check event/node ownership.
+
+    It inserts the node id it is handed after testing only was_injected. The live
+    path reads both ids off one whisper_log row so they always agree; the backfill
+    reads them from different tables, so a legacy or hand-repaired signal could
+    reinforce a node the agent never saw for that event.
+    """
+    victim, other = _make_nodes(engine, count=2)
+    log_id = _seed_whisper_log(engine, victim)
+    # The event belongs to `victim`, but the signal names `other`.
+    _seed_heuristic_signal(engine, other, log_id, strength=0.98)
+
+    before_other = _snapshot(engine, other)
+    engine._migrate_heuristic_confirmed_use()
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ? AND node_id = ?",
+        (log_id, other),
+    ).fetchone()
+    assert claim is None, "a signal claimed an event that belonged to a different node"
+    assert _snapshot(engine, other) == before_other
+
+
+def test_backfill_cutoff_clears_every_kind_of_ineligible_tail(engine):
+    """#272, council R1+R3 (Codex): no eligibility predicate may live in the WHERE.
+
+    Three shapes, because the defect reappeared in three disguises across the review:
+      - polarity 0            -> excluded by a WHERE predicate (round 1)
+      - was_injected = 0      -> excluded by a WHERE predicate (round 1)
+      - whisper_log_id NULL   -> excluded by an INNER JOIN (round 3). The column is
+                                 nullable and ON DELETE SET NULL, so whisper_log_cleanup
+                                 orphans rows routinely — this is the common case, not
+                                 an exotic one.
+    Any of them at the high-id tail must still advance the cutoff, or every boot
+    rescans a growing tail forever.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    not_injected_log = _seed_whisper_log(engine, target, prompt="caching not injected")
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET was_injected = 0 WHERE id = ?", (not_injected_log,)
+    )
+
+    def _tail(whisper_log_id, polarity):
+        engine.db.conn.execute(
+            """
+            INSERT INTO signals
+                (whisper_log_id, node_id, signal_type, polarity, strength, source,
+                 session_id, surface, space, prompt_hash, evidence, created)
+            VALUES (?, ?, 'whisper_referenced', ?, 0.98, 'transcript_watcher_heuristic',
+                    's1', 'transcript', 'myproject', 'h', ?, datetime('now'))
+            """,
+            (whisper_log_id, target, polarity, json.dumps({"match": "node_id"})),
+        )
+
+    _tail(log_id, 0)                # polarity 0
+    _tail(not_injected_log, 1)      # was_injected = 0
+    _tail(None, 1)                  # orphaned: no whisper_log parent at all
+    engine.db.conn.commit()
+
+    highest = engine.db.conn.execute(
+        "SELECT MAX(id) AS m FROM signals WHERE source = 'transcript_watcher_heuristic'"
+    ).fetchone()["m"]
+
+    engine._migrate_heuristic_confirmed_use()
+
+    assert engine._meta_int("heuristic_confirmed_use_cutoff") == highest, (
+        "an ineligible trailing row pinned the cutoff — the scan window will grow forever"
+    )
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM confirmed_use_claims"
+    ).fetchone()["n"] == 0, "an ineligible row was claimed"
+
+
+def test_backfill_runs_from_startup_and_ignores_stale_stored_strength(engine):
+    """#272, council R1+R2 (Cursor) + the final-plan run: call site AND recompute.
+
+    This test USED to pin the migration order, back when eligibility read
+    `signals.strength`. It no longer can: eligibility is recomputed from `evidence`,
+    so both assertions hold whichever order the two migrations run in. That is the
+    point — the order stopped being load-bearing, and a test claiming to prove an
+    order it can no longer falsify would be worse than no test.
+
+    What it pins now, both of which are real:
+      - `startup()` actually calls the backfill (swap the call out and the verbatim
+        assertion goes red);
+      - the stored column does not decide anything. Both seeds carry a strength that
+        contradicts their evidence, and the outcome follows the evidence:
+          * token_overlap stored at a stale 1.0 (above the floor) -> recomputes to
+            ~0.55 -> must NOT claim;
+          * node_id stored at a stale 0.50 (below the floor) -> recomputes to 0.98
+            -> must claim.
+        An implementation that reads `row["strength"]` turns BOTH red.
+
+    The inter-transaction window itself is covered by
+    test_backfill_ignores_a_stale_row_written_after_the_ladder_committed, which a
+    sequential startup() test cannot express.
+    """
+    overlap_node, verbatim_node = _make_nodes(engine, count=2)
+    overlap_log = _seed_whisper_log(engine, overlap_node, prompt="caching overlap")
+    verbatim_log = _seed_whisper_log(engine, verbatim_node, prompt="caching verbatim")
+
+    _seed_heuristic_signal(
+        engine, overlap_node, overlap_log, strength=1.0, match="token_overlap",
+    )
+    engine.db.conn.execute(
+        "UPDATE signals SET evidence = ? WHERE whisper_log_id = ?",
+        (json.dumps({"match": "token_overlap", "overlap_ratio": 1.0}), overlap_log),
+    )
+    _seed_heuristic_signal(engine, verbatim_node, verbatim_log, strength=0.50)
+
+    # Force both migrations to re-run on the next startup.
+    engine.db.conn.execute(
+        "DELETE FROM meta WHERE key IN "
+        "('heuristic_confirmed_use_version', 'heuristic_confirmed_use_cutoff', "
+        "'signal_strength_ladder_version', 'signal_strength_ladder_cutoff')"
+    )
+    engine.db.conn.commit()
+
+    engine.startup()
+
+    verbatim_claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (verbatim_log,)
+    ).fetchone()
+    assert verbatim_claim is not None, (
+        "startup() never ran the backfill, or eligibility read the stale stored 0.50 "
+        "instead of recomputing 0.98 from evidence.match = node_id"
+    )
+
+    overlap_claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (overlap_log,)
+    ).fetchone()
+    assert overlap_claim is None, (
+        "a stale DEFAULT-1.0 token_overlap row confirmed — eligibility trusted the stored "
+        "column instead of recomputing from evidence"
+    )
+
+
+def test_backfill_ignores_a_stale_row_written_after_the_ladder_committed(engine):
+    """#272, final-plan council (Codex HIGH + Cursor MEDIUM, converging independently).
+
+    The falsifier for the inter-transaction window. `_migrate_signal_strength` and this
+    backfill commit SEPARATELY, so an old binary — the second unmanaged process of #238
+    — can write a pre-ladder row carrying the schema default of 1.0 *after* the ladder
+    has committed and *before* this SELECT begins. Ordering the two calls cannot close
+    that window, and a sequential startup() test cannot expose it.
+
+    Simulated exactly: run the ladder to completion, THEN insert the stale row, THEN run
+    only the backfill. An implementation that reads `signals.strength` claims it, and the
+    claim is a monotonic latch with a markdown write already on disk — no undo.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target, prompt="caching stale window")
+
+    # The ladder runs first and commits — exactly as startup() orders it.
+    engine._migrate_signal_strength()
+
+    # The window: an old binary commits a token_overlap row at the schema default of
+    # 1.0, which the ladder has already finished and will not revisit this boot.
+    _seed_heuristic_signal(
+        engine, target, log_id, strength=1.0, match="token_overlap",
+    )
+    engine.db.conn.execute(
+        "UPDATE signals SET evidence = ? WHERE whisper_log_id = ?",
+        (json.dumps({"match": "token_overlap", "overlap_ratio": 1.0}), log_id),
+    )
+    engine.db.conn.commit()
+
+    before = _snapshot(engine, target)
+    engine._migrate_heuristic_confirmed_use()
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (log_id,)
+    ).fetchone()
+    assert claim is None, (
+        "a stale DEFAULT-1.0 row written in the window between the two migrations took "
+        "an irreversible claim — eligibility must recompute from evidence, not read the column"
+    )
+    assert _snapshot(engine, target) == before
+
+    # The cutoff still advanced past it: ineligible is not unprocessed.
+    assert engine._meta_int("heuristic_confirmed_use_cutoff") == engine.db.conn.execute(
+        "SELECT MAX(id) AS m FROM signals WHERE source = 'transcript_watcher_heuristic'"
+    ).fetchone()["m"]
+
+
+def test_backfill_isolates_one_nodes_failure(engine):
+    """#272 D4: one unreadable node must not cost every later node its repair."""
+    first, second = _make_nodes(engine, count=2)
+    for node_id in (first, second):
+        log_id = _seed_whisper_log(engine, node_id, prompt=f"caching {node_id}")
+        _seed_heuristic_signal(engine, node_id, log_id, strength=0.98)
+
+    before_second = _snapshot(engine, second)
+    real = engine._record_confirmed_use
+
+    def flaky(node_id, *, whisper_log_id):
+        if node_id == first:
+            raise ZeroDivisionError("simulated mutator failure")
+        return real(node_id, whisper_log_id=whisper_log_id)
+
+    with patch.object(engine, "_record_confirmed_use", side_effect=flaky):
+        engine._migrate_heuristic_confirmed_use()
+
+    assert _snapshot(engine, second) != before_second, "node 2 lost its backfill"
+
+
+def test_backfill_does_not_advance_last_accessed_to_boot_time(engine):
+    """Council #272 finding 1: a historical use must not be recorded as use now.
+
+    last_accessed sits BETWEEN the signal's logged_at and boot time, so with the
+    truthful clock max(claimed_at, last_accessed) keeps it; with the buggy boot
+    clock the claim wins and drags it to now — which is exactly the RED.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+    event_time = datetime.now(timezone.utc) - timedelta(days=10)
+    anchor_time = datetime.now(timezone.utc) - timedelta(days=2)
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET logged_at = ? WHERE id = ?",
+        (event_time.isoformat(), log_id),
+    )
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ? WHERE id = ?",
+        (anchor_time.isoformat(), target),
+    )
+    engine.db.conn.commit()
+
+    engine._migrate_heuristic_confirmed_use()
+
+    row = engine.db.conn.execute(
+        "SELECT last_accessed FROM nodes WHERE id = ?", (target,)
+    ).fetchone()
+    assert datetime.fromisoformat(row["last_accessed"]) == anchor_time, (
+        "backfilling a 10-day-old signal moved last_accessed to boot time — "
+        "the claim must carry the event's clock, not the wall clock"
+    )
+
+
+def test_backfill_claim_carries_the_events_time_normalized(engine):
+    """Council #272 finding 1: claimed_at = logged_at, in datetime('now') shape.
+
+    The space-format assertion is the sweeper's contract: reinforcement_retry
+    compares claimed_at lexicographically against datetime('now', ...), where
+    'T' (0x54) sorts above ' ' (0x20).
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET logged_at = '2026-08-15T12:00:00.123456+00:00' "
+        "WHERE id = ?",
+        (log_id,),
+    )
+    engine.db.conn.commit()
+
+    engine._migrate_heuristic_confirmed_use()
+
+    row = _claim_row(engine, log_id, target)
+    assert row is not None, "the backfill claimed nothing"
+    assert row["claimed_at"] == "2026-08-15 12:00:00", (
+        f"claimed_at is {row['claimed_at']!r}: the backfill must stamp the "
+        "event's logged_at, normalized to SQLite's space-format UTC"
+    )
+
+
+def test_backfill_survives_a_malformed_logged_at(engine):
+    """Guard, not RED: a malformed logged_at falls back to the boot clock.
+
+    datetime('not-a-timestamp') is NULL and claimed_at is NOT NULL — without the
+    COALESCE the INSERT raises IntegrityError and the whole backfill transaction
+    dies at boot. Falling back keeps today's behavior for that one row instead of
+    losing the signal forever (the cutoff advances regardless).
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET logged_at = 'not-a-timestamp' WHERE id = ?",
+        (log_id,),
+    )
+    engine.db.conn.commit()
+
+    engine._migrate_heuristic_confirmed_use()
+
+    row = _claim_row(engine, log_id, target)
+    assert row is not None, "a malformed logged_at must not cost the claim"
+    assert "T" not in row["claimed_at"]
+    stamped = datetime.fromisoformat(row["claimed_at"]).replace(tzinfo=timezone.utc)
+    assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 60
+
+
+def test_live_claim_still_stamps_now(engine):
+    """Guard, not RED: the historical clock is backfill-only (decision 2026-08-28).
+
+    A live claim's skew from its event is minutes; its sources' semantics
+    (explicit/implicit/judge) are out of this fix's scope.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET logged_at = ? WHERE id = ?",
+        ((datetime.now(timezone.utc) - timedelta(days=10)).isoformat(), log_id),
+    )
+    engine.db.conn.commit()
+
+    _take_claim(engine, log_id, target)
+
+    row = _claim_row(engine, log_id, target)
+    assert "T" not in row["claimed_at"]
+    stamped = datetime.fromisoformat(row["claimed_at"]).replace(tzinfo=timezone.utc)
+    assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 60, (
+        "a live claim must keep the wall clock even when its event is old"
+    )
+
+
+# --- Task 5: durable reinforcement (#220 debt) ------------------------------
+
+
+def _claim_row(engine, log_id, node_id):
+    return engine.db.conn.execute(
+        "SELECT claimed_at, state, reinforced_at FROM confirmed_use_claims "
+        "WHERE whisper_log_id = ? AND node_id = ?",
+        (log_id, node_id),
+    ).fetchone()
+
+
+def _take_claim(engine, log_id, node_id):
+    with engine.db.transaction() as conn:
+        engine._claim_confirmed_use(
+            conn, log_id, node_id, signal=1, source="explicit", strength=1.0,
+        )
+
+
+def _age_for_fsrs(engine, log_id, node_id, node_days=3, claim_days=1):
+    """Push the node's last_accessed and the claim's claimed_at into the past.
+
+    Without this the FSRS assertions are vacuous. _make_nodes seeds last_accessed
+    from datetime.now(), and a claim taken milliseconds later gives days_since ~= 0
+    — so `now = claimed_at` and `now = datetime.now()` produce the SAME stability to
+    any tolerance, and the test would pass with the bug fully present.
+
+    Two different ages are required, not one. days_since is `now - last_accessed`
+    clamped at 0, so ageing only the claim would leave both variants clamped to 0
+    and still indistinguishable. With last_accessed 3 days back and claimed_at 1 day
+    back, the claimed_at clock yields days_since = 1 and the wall clock yields
+    days_since = 3 — a gap the assertions can see.
+
+    Both ages are kept UNDER the spacing-factor's saturation point, not just apart
+    from each other. spacing_factor caps at fsrs_spacing_cap (2.0) once
+    0.2 * days_since / stability reaches log(2) ~= 3.47 days at the default
+    stability = 1.0 seeded by _make_nodes — verified by executing
+    reinforced_stability(1.0, days, ...): 10 and 20 days both round to the SAME
+    2.0, indistinguishable regardless of which clock produced them, while 1 and 3
+    days round to 1.61 and 1.91. Widening the gap without checking the cap would
+    silently recreate the same vacuous test this helper exists to prevent.
+
+    The nodes row is the source the mutator reads, so ageing the row is enough; the
+    markdown is overwritten from it on the next write.
+    """
+    node_at = datetime.now(timezone.utc) - timedelta(days=node_days)
+    claim_at = datetime.now(timezone.utc) - timedelta(days=claim_days)
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "UPDATE nodes SET last_accessed = ? WHERE id = ?",
+            (node_at.isoformat(), node_id),
+        )
+        conn.execute(
+            "UPDATE confirmed_use_claims SET claimed_at = ? "
+            "WHERE whisper_log_id = ? AND node_id = ?",
+            (claim_at.strftime("%Y-%m-%d %H:%M:%S"), log_id, node_id),
+        )
+
+
+def _as_utc(claimed_at):
+    """The mutator's clock: claimed_at, as SQLite wrote it, made tz-aware.
+
+    datetime('now') emits 'YYYY-MM-DD HH:MM:SS' in UTC with no offset, so the
+    conversion is a fromisoformat plus an explicit tzinfo — never an astimezone,
+    which would treat the naive value as local time and shift it.
+    """
+    return datetime.fromisoformat(claimed_at).replace(tzinfo=timezone.utc)
+
+
+def _expected_reinforced_stability(engine, base_row, claimed_at):
+    """ONE application of the growth formula, mirroring the mutator step for step.
+
+    Recomputed rather than hardcoded: a literal would still pass if the mutator
+    stopped calling reinforced_stability at all. It mirrors the mutator exactly —
+    same gate, same anchor expression, same clock — so if the two ever diverge the
+    test fails instead of quietly asserting a different formula.
+    """
+    now = _as_utc(claimed_at)
+    last_review = (
+        datetime.fromisoformat(base_row["last_review"])
+        if base_row["last_review"]
+        else None
+    )
+    last_accessed = (
+        datetime.fromisoformat(base_row["last_accessed"])
+        if base_row["last_accessed"]
+        else None
+    )
+    if not lifecycle.reinforcement_due(
+        last_review, now, engine.settings.fsrs_reinforcement_cooldown_days
+    ):
+        return base_row["stability"]
+
+    anchor = last_accessed or last_review
+    days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+    return lifecycle.reinforced_stability(
+        base_row["stability"],
+        days_since,
+        growth_factor=engine.settings.fsrs_growth_factor,
+        growth_exponent=engine.settings.fsrs_growth_exponent,
+        spacing_cap=engine.settings.fsrs_spacing_cap,
+        max_stability=engine.settings.fsrs_max_stability,
+        initial_stability=engine.settings.fsrs_initial_stability,
+    )
+
+
+def test_mutator_failure_leaves_no_residue(engine, monkeypatch):
+    """#272 D5-1: a failed save rolls back the claim state AND the nodes row."""
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _take_claim(engine, log_id, target)
+
+    before = _snapshot(engine, target)
+
+    def boom(node):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(engine.file_store, "save", boom)
+    with pytest.raises(OSError):
+        engine._record_confirmed_use(target, whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) == before, "the failed mutator left a partial write"
+    assert _claim_row(engine, log_id, target)["state"] == "pending", (
+        "the claim left 'pending' even though nothing was applied"
+    )
+
+
+def test_failed_commit_does_not_inflate_the_counter(engine, monkeypatch):
+    """#272 D5-2: the convergence claim, tested at the one place it can break.
+
+    os.replace cannot be rolled back and COMMIT runs after the transaction body, so a
+    failing COMMIT leaves the markdown one step ahead of the nodes row. Because the new
+    values are computed FROM the nodes row and the clock comes FROM claimed_at, the
+    retry recomputes the same target and overwrites the phantom — it must not add a
+    second increment, nor a second stability step, on top of it.
+
+    The failure is injected through Database.transaction, NOT through conn.execute.
+    Council round 1 (Codex, MEDIUM, 1.0) proved by execution that patching the
+    connection raises AttributeError: 'sqlite3.Connection' object attribute 'execute'
+    is read-only, so the earlier draft of this test could never have run. Raising after
+    the with-body returns is behaviourally identical to a failing COMMIT: file_store.save
+    has already run and os.replace is irreversible, and the real transaction's
+    except-clause issues the ROLLBACK that discards the row and the claim.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _take_claim(engine, log_id, target)
+    # Required, not decorative: without it claimed_at and the wall clock are
+    # milliseconds apart and every FSRS assertion below passes with the bug present.
+    _age_for_fsrs(engine, log_id, target)
+
+    base_row = engine.db.conn.execute(
+        "SELECT access_count, stability, last_accessed, last_review FROM nodes "
+        "WHERE id = ?",
+        (target,),
+    ).fetchone()
+    baseline, baseline_stability = base_row["access_count"], base_row["stability"]
+    # The whole row is kept, not just two fields: _expected_reinforced_stability
+    # mirrors the mutator, which reads last_accessed and last_review from it too.
+    # Asserting against a value derived from what _make_nodes actually seeded, rather
+    # than from an assumption about it, is what keeps this from passing for the wrong
+    # reason if the fixture changes.
+
+    real_transaction = type(engine.db).transaction
+
+    @contextmanager
+    def commit_fails(self):
+        with real_transaction(self) as conn:
+            yield conn
+            raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(type(engine.db), "transaction", commit_fails)
+    with pytest.raises(sqlite3.OperationalError):
+        engine._record_confirmed_use(target, whisper_log_id=log_id)
+    monkeypatch.undo()
+
+    # The markdown ran ahead; the row and the claim did not.
+    phantom = engine.file_store.load(target)
+    assert phantom.access_count == baseline + 1
+    assert engine.db.conn.execute(
+        "SELECT access_count FROM nodes WHERE id = ?", (target,)
+    ).fetchone()["access_count"] == baseline
+    assert _claim_row(engine, log_id, target)["state"] == "pending"
+
+    engine._record_confirmed_use(target, whisper_log_id=log_id)
+
+    after = _snapshot(engine, target)
+    assert _snapshot_stores_agree(after), "the stores did not converge"
+    final = engine.db.conn.execute(
+        "SELECT access_count, stability, last_accessed FROM nodes WHERE id = ?",
+        (target,),
+    ).fetchone()
+    assert final["access_count"] == baseline + 1, (
+        "one event produced more than one increment"
+    )
+
+    # The FSRS half of convergence: the retry must land on the SAME stability the
+    # phantom did, which is only true because the clock came from claimed_at. With
+    # datetime.now() the two attempts feed different days_since to
+    # reinforced_stability and this equality fails — that is the bug this pins.
+    assert final["stability"] == pytest.approx(phantom.stability), (
+        "the retry recomputed a different FSRS target than the failed attempt"
+    )
+    assert final["stability"] != pytest.approx(baseline_stability), (
+        "stability never moved, so the equality above proves nothing"
+    )
+
+    # And it is ONE application of the growth formula, not two compounded.
+    claimed_at = _claim_row(engine, log_id, target)["claimed_at"]
+    expected = _expected_reinforced_stability(engine, base_row, claimed_at)
+    assert final["stability"] == pytest.approx(expected), (
+        "stability compounded across the failed attempt and the retry"
+    )
+
+    # The assertion that actually kills the bug. With the wall clock the mutator would
+    # feed days_since = (now - last_accessed) = 3 days instead of the claim's 1, so
+    # this value must NOT be reachable. Computed, not hardcoded, so it tracks whatever
+    # the settings say.
+    wall_clock_target = lifecycle.reinforced_stability(
+        baseline_stability,
+        max(
+            (
+                datetime.now(timezone.utc)
+                - datetime.fromisoformat(base_row["last_accessed"])
+            ).total_seconds()
+            / 86400,
+            0.0,
+        ),
+        growth_factor=engine.settings.fsrs_growth_factor,
+        growth_exponent=engine.settings.fsrs_growth_exponent,
+        spacing_cap=engine.settings.fsrs_spacing_cap,
+        max_stability=engine.settings.fsrs_max_stability,
+        initial_stability=engine.settings.fsrs_initial_stability,
+    )
+    assert wall_clock_target != pytest.approx(expected), (
+        "the two clocks agree, so this test cannot tell them apart — widen the ages "
+        "in _age_for_fsrs"
+    )
+    assert final["stability"] != pytest.approx(wall_clock_target), (
+        "the mutator used datetime.now() instead of the claim's claimed_at"
+    )
+
+    assert final["last_accessed"] == _as_utc(claimed_at).isoformat(), (
+        "last_accessed records the retry's clock instead of when the memory was used"
+    )
+
+
+def test_happy_path_agrees_across_claim_row_and_markdown(engine):
+    """#272 D5-9: on success all three carry the same values."""
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _take_claim(engine, log_id, target)
+
+    before = _snapshot(engine, target)
+    engine._record_confirmed_use(target, whisper_log_id=log_id)
+    after = _snapshot(engine, target)
+
+    assert after != before, "nothing was reinforced"
+    assert _snapshot_stores_agree(after), "markdown and database disagree"
+    row = _claim_row(engine, log_id, target)
+    assert row["state"] == "applied"
+    assert row["reinforced_at"] is not None
+
+
+def test_mutator_is_at_most_once_on_an_applied_claim(engine):
+    """#272 D5-4: a second call on an applied claim is a no-op."""
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _take_claim(engine, log_id, target)
+    engine._record_confirmed_use(target, whisper_log_id=log_id)
+
+    after_first = _snapshot(engine, target)
+    engine._record_confirmed_use(target, whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) == after_first, "the second call reinforced again"
+
+
+def test_a_failed_latch_never_loads_the_file(engine, monkeypatch):
+    """Council #272 finding 2: the load belongs inside the transaction, after
+    the latch. Observable consequence — and this test's RED: when the claim is
+    already applied, the mutator must return before any file I/O. Today the
+    load runs unconditionally before the transaction even opens.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _take_claim(engine, log_id, target)
+    engine._record_confirmed_use(target, whisper_log_id=log_id)  # applies the claim
+
+    calls = []
+    real_load = engine.file_store.load
+    monkeypatch.setattr(
+        engine.file_store, "load",
+        lambda node_id: calls.append(node_id) or real_load(node_id),
+    )
+
+    engine._record_confirmed_use(target, whisper_log_id=log_id)  # latch fails
+
+    assert calls == [], (
+        "the mutator loaded the markdown for a claim it then refused to apply — "
+        "the load must sit inside the transaction, after the at-most-once latch"
+    )
+
+
+def test_missing_node_ends_orphaned_not_applied(engine):
+    """#272 D5-7: a deleted node is terminal, and is not recorded as a success.
+
+    The claim is inserted directly for a node_id that has no markdown file. Only
+    whisper_log_id carries a foreign key (PRAGMA foreign_keys=ON), so a claim can
+    legitimately outlive its node — which is exactly the state being tested.
+
+    'applied' would be a lie of the same kind the legacy migration refuses to write,
+    so the assertion pins the distinction, not merely "it stopped being pending".
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    with engine.db.transaction() as conn:
+        # `state` named explicitly: the DEFAULT is terminal (Step 3), and a claim that
+        # starts terminal would reach 'orphaned' by never being touched at all.
+        conn.execute(
+            "INSERT INTO confirmed_use_claims "
+            "(whisper_log_id, node_id, claimed_at, state) "
+            "VALUES (?, 'ghost-node', datetime('now'), 'pending')",
+            (log_id,),
+        )
+
+    engine._record_confirmed_use("ghost-node", whisper_log_id=log_id)
+
+    row = _claim_row(engine, log_id, "ghost-node")
+    assert row["state"] == "orphaned", (
+        "a claim for a deleted node must be orphaned, never pending (retried forever) "
+        "nor applied (a reinforcement that never happened)"
+    )
+    assert row["reinforced_at"] is None
+
+
+def test_a_claim_written_without_state_is_not_swept(engine):
+    """#272 D5-10: an old binary's INSERT must land terminal, not pending.
+
+    Council round 1 (Codex, HIGH, 0.99) found this. The pre-#272 _claim_confirmed_use
+    inserts (whisper_log_id, node_id, claimed_at) without naming `state`, so it takes
+    whatever the column DEFAULT gives. That binary's _record_confirmed_use has no idea
+    the column exists and never marks the row applied — so if the DEFAULT were
+    'pending', the row would sit there forever and the new sweeper would reinforce it
+    again every hour, on top of the reinforcement the old binary already did.
+
+    This is not hypothetical: CLAUDE.md documents issue #238, where `make server`
+    starts a second, launchd-unmanaged process against the same store. Two binaries on
+    one database is a state this project has already been in.
+
+    The DEFAULT is therefore terminal ('legacy_unknown') and only the new code inserts
+    'pending' explicitly. This test writes the OLD statement verbatim.
+    """
+    node_id = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, node_id)
+
+    with engine.db.transaction() as conn:
+        # Verbatim the pre-#272 statement: the column list omits `state`.
+        conn.execute(
+            "INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (log_id, node_id),
+        )
+
+    row = _claim_row(engine, log_id, node_id)
+    assert row["state"] == "legacy_unknown", (
+        "an old binary's claim landed in a state the sweeper will retry forever"
+    )
+
+
+def test_the_new_claim_path_writes_pending(engine):
+    """#272 D5-10b: the guard above must not disable the feature it protects.
+
+    If _claim_confirmed_use stopped naming `state`, every new claim would inherit the
+    terminal DEFAULT and nothing would ever be swept — the durability this whole task
+    adds would be silently off, and every other test here would still pass because
+    they exercise the mutator directly. This is the test that fails in that case.
+    """
+    node_id = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, node_id)
+    _take_claim(engine, log_id, node_id)
+
+    assert _claim_row(engine, log_id, node_id)["state"] == "pending", (
+        "a fresh claim is not pending, so the sweeper can never pick it up"
+    )
+
+
+def test_migration_marks_preexisting_claims_legacy_unknown(tmp_path):
+    """#272 D5-8b: pre-#272 claims are neither swept nor recorded as successes.
+
+    Council round 1 (Codex, HIGH) killed the first draft, which stamped them
+    reinforced. The premise of this task is that SOME of those claims lost their
+    reinforcement; the old schema cannot tell which, so calling them applied would
+    hide exactly the data loss the task exists to repair. 'pending' is equally wrong
+    — the majority did apply, and re-running them is mass over-reinforcement of an
+    at-most-once latch. The assertion pins the third state, not "not pending".
+    """
+    from ormah.index.db import Database
+
+    db = Database(tmp_path / "m.db")
+    db.init_schema()
+    db.conn.executescript(
+        """
+        DROP TABLE confirmed_use_claims;
+        CREATE TABLE confirmed_use_claims (
+            whisper_log_id INTEGER NOT NULL,
+            node_id        TEXT NOT NULL,
+            claimed_at     TEXT NOT NULL,
+            PRIMARY KEY (whisper_log_id, node_id)
+        );
+        INSERT INTO confirmed_use_claims VALUES (1, 'n1', '2026-01-01 00:00:00');
+        """
+    )
+
+    db._migrate()
+
+    row = db.conn.execute(
+        "SELECT state, reinforced_at FROM confirmed_use_claims"
+    ).fetchone()
+    assert row["state"] == "legacy_unknown", (
+        "a pre-existing claim was classified, but its outcome is not knowable"
+    )
+    assert row["reinforced_at"] is None, (
+        "reinforced_at asserts a reinforcement happened — it did not, or is unknown"
+    )
