@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from ormah.background.memory_lock import serialized_memory_job
+from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +95,18 @@ def _apply_consolidation(
     title: str,
     content: str,
     node_type: str,
+    *,
+    epoch: int | None = None,
 ) -> str:
     """Create a consolidated node, link originals, and demote them to archival.
 
-    Returns the new node's ID.
+    Returns the new node's ID. When *epoch* is given the whole operation is one
+    exclusive apply step (#240): a restore landing mid-consolidation must not be
+    able to observe the new node without the originals demoted, or vice versa.
+    ``apply_maintenance_results`` passes no epoch — it already holds L_mem.
     """
+    from contextlib import nullcontext
+
     from ormah.models.node import (
         ConnectRequest,
         CreateNodeRequest,
@@ -108,79 +115,91 @@ def _apply_consolidation(
         UpdateNodeRequest,
     )
 
-    conn = engine.db.conn
-    placeholders = ",".join("?" * len(node_ids))
+    guard = engine.memory_operation_at(epoch) if epoch is not None else nullcontext()
+    with guard:
+        conn = engine.db.conn
+        placeholders = ",".join("?" * len(node_ids))
 
-    # Fetch cluster nodes for space determination and identity transfer
-    cluster_rows = conn.execute(
-        f"SELECT id, space FROM nodes WHERE id IN ({placeholders})",
-        node_ids,
-    ).fetchall()
-    cluster = [dict(r) for r in cluster_rows]
+        # Fetch cluster nodes for space determination and identity transfer
+        cluster_rows = conn.execute(
+            f"SELECT id, space FROM nodes WHERE id IN ({placeholders})",
+            node_ids,
+        ).fetchall()
+        cluster = [dict(r) for r in cluster_rows]
 
-    # Determine space by majority vote
-    space_counts: dict[str | None, int] = {}
-    for node in cluster:
-        sp = node.get("space")
-        space_counts[sp] = space_counts.get(sp, 0) + 1
-    space = max(space_counts, key=space_counts.get)  # type: ignore[arg-type]
+        # Determine space by majority vote
+        space_counts: dict[str | None, int] = {}
+        for node in cluster:
+            sp = node.get("space")
+            space_counts[sp] = space_counts.get(sp, 0) + 1
+        space = max(space_counts, key=space_counts.get)  # type: ignore[arg-type]
 
-    # Create consolidated node
-    req = CreateNodeRequest(
-        content=content,
-        type=node_type,
-        title=title,
-        space=space,
-        tags=["consolidated"],
-    )
-    new_id, _ = engine.remember(req, agent_id="consolidator")
+        # Create consolidated node
+        req = CreateNodeRequest(
+            content=content,
+            type=node_type,
+            title=title,
+            space=space,
+            tags=["consolidated"],
+        )
+        new_id, _ = engine.remember(req, agent_id="consolidator")
 
-    # Transfer identity edges
-    if engine.user_node_id:
-        has_identity = conn.execute(
-            f"SELECT 1 FROM edges WHERE source_id = ? AND edge_type = 'defines' "
-            f"AND target_id IN ({placeholders}) LIMIT 1",
-            [engine.user_node_id] + node_ids,
-        ).fetchone()
-        if has_identity:
+        # Transfer identity edges
+        if engine.user_node_id:
+            has_identity = conn.execute(
+                f"SELECT 1 FROM edges WHERE source_id = ? AND edge_type = 'defines' "
+                f"AND target_id IN ({placeholders}) LIMIT 1",
+                [engine.user_node_id] + node_ids,
+            ).fetchone()
+            if has_identity:
+                try:
+                    engine.connect(ConnectRequest(
+                        source_id=engine.user_node_id,
+                        target_id=new_id,
+                        edge=EdgeType.defines,
+                        weight=1.0,
+                    ))
+                except Exception:
+                    pass
+                new_node = engine.file_store.load(new_id)
+                if new_node and "about_self" not in new_node.tags:
+                    new_node.tags.append("about_self")
+                    new_node.touch_updated()
+                    engine.file_store.save(new_node)
+                    with engine.db.transaction() as tx_conn:
+                        tx_conn.execute(
+                            "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, 'about_self')",
+                            (new_id,),
+                        )
+
+        # Create derived_from edges and demote originals to archival
+        for node_id in node_ids:
             try:
                 engine.connect(ConnectRequest(
-                    source_id=engine.user_node_id,
-                    target_id=new_id,
-                    edge=EdgeType.defines,
+                    source_id=new_id,
+                    target_id=node_id,
+                    edge=EdgeType.derived_from,
                     weight=1.0,
                 ))
             except Exception:
                 pass
-            new_node = engine.file_store.load(new_id)
-            if new_node and "about_self" not in new_node.tags:
-                new_node.tags.append("about_self")
-                new_node.touch_updated()
-                engine.file_store.save(new_node)
-                with engine.db.transaction() as tx_conn:
-                    tx_conn.execute(
-                        "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, 'about_self')",
-                        (new_id,),
-                    )
+            # Revalidate before demoting: node_ids was snapshotted before the LLM call,
+            # so a foreground promotion may have landed since. Skip the item, do not abort
+            # the run — one node changing invalidates that node, not the whole cluster (#240).
+            current = conn.execute(
+                "SELECT tier FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            if current is None or current["tier"] != "working":
+                logger.debug(
+                    "Consolidation left %s alone: tier changed since the snapshot", node_id[:8])
+                continue
+            engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
 
-    # Create derived_from edges and demote originals to archival
-    for node_id in node_ids:
-        try:
-            engine.connect(ConnectRequest(
-                source_id=new_id,
-                target_id=node_id,
-                edge=EdgeType.derived_from,
-                weight=1.0,
-            ))
-        except Exception:
-            pass
-        engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
-
-    return new_id
+        return new_id
 
 
-@serialized_memory_job
-def run_consolidation(engine) -> None:
+@restore_aware_job
+def run_consolidation(engine, epoch: int) -> None:
     """Find clusters of similar working memories and consolidate via LLM."""
     settings = engine.settings
     if not settings.llm_enabled:
@@ -195,8 +214,10 @@ def run_consolidation(engine) -> None:
     consolidated_count = 0
     for cluster in clusters:
         try:
-            _consolidate_cluster(engine, cluster)
+            _consolidate_cluster(engine, cluster, epoch)
             consolidated_count += 1
+        except RestoredUnderfoot:
+            raise
         except Exception as e:
             logger.warning("Failed to consolidate cluster: %s", e)
 
@@ -204,7 +225,7 @@ def run_consolidation(engine) -> None:
         logger.info("Consolidated %d cluster(s)", consolidated_count)
 
 
-def _consolidate_cluster(engine, cluster: list[dict]) -> None:
+def _consolidate_cluster(engine, cluster: list[dict], epoch: int) -> None:
     """Consolidate a single cluster using LLM summarization."""
     from ormah.background.llm_client import extract_json, llm_generate
 
@@ -260,4 +281,4 @@ Return a JSON object:
         return
 
     node_ids = [n["id"] for n in cluster]
-    _apply_consolidation(engine, node_ids, title, summary, node_type)
+    _apply_consolidation(engine, node_ids, title, summary, node_type, epoch=epoch)

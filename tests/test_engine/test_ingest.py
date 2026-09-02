@@ -173,3 +173,98 @@ class TestIngestTruncation:
         prompt = captured_prompt["prompt"]
         marker_count = prompt.count(marker)
         assert marker_count == 500
+
+
+def test_extraction_runs_unlocked_and_dedup_stores_under_one_acquisition(engine):
+    """The change, stated structurally: the LLM extraction stops holding L_mem, and the
+    dedup check moves inside the same acquisition as the write it guards (#240)."""
+    from tests.test_background.lock_probe import install_probe
+
+    fake_llm_response = json.dumps({
+        "memories": [{
+            "content": "The team standardized on FastAPI for every new backend service",
+            "type": "fact",
+            "title": "FastAPI standard",
+            "tags": [],
+            "about_self": False,
+        }]
+    })
+
+    probe = install_probe(engine)
+    lock_held_during_extract = []
+    lock_held_during_dedup = []
+
+    real_extract = engine._extract_memories_llm
+    real_is_duplicate = engine._is_duplicate_memory
+
+    def watched_extract(content):
+        lock_held_during_extract.append(probe.held)
+        return real_extract(content)
+
+    def watched_is_duplicate(content):
+        lock_held_during_dedup.append(probe.held)
+        return real_is_duplicate(content)
+
+    engine._extract_memories_llm = watched_extract
+    engine._is_duplicate_memory = watched_is_duplicate
+
+    with patch(_LLM_PATCH, return_value=fake_llm_response):
+        created = engine.ingest_conversation(
+            content="A long enough conversation about backend architecture." * 5)
+
+    assert created, "nothing was ingested — the fixture stopped exercising the store path"
+    assert lock_held_during_extract == [False], "L_mem was held across the LLM extraction"
+    assert lock_held_during_dedup, "the dedup check never ran"
+    assert all(lock_held_during_dedup), "the dedup check ran outside the lock that guards the write"
+
+
+def test_concurrent_ingests_of_the_same_content_create_one_node(engine):
+    """Two ingests racing on the same content must still produce one node (#240).
+
+    The barrier sits in the *extraction* phase, which this change makes unlocked, so both
+    threads finish extracting before either reaches its apply step. That is the window the
+    in-lock dedup revalidation has to close.
+    """
+    import threading
+
+    fake_llm_response = json.dumps({
+        "memories": [{
+            "content": "The team standardized on FastAPI for every new backend service",
+            "type": "fact",
+            "title": "FastAPI standard",
+            "tags": [],
+            "about_self": False,
+        }]
+    })
+
+    barrier = threading.Barrier(2)
+    real_extract = engine._extract_memories_llm
+
+    def synced_extract(content):
+        result = real_extract(content)
+        barrier.wait(timeout=10.0)  # both threads leave extraction together
+        return result
+
+    engine._extract_memories_llm = synced_extract
+    errors: list[BaseException] = []
+
+    def run():
+        try:
+            with patch(_LLM_PATCH, return_value=fake_llm_response):
+                engine.ingest_conversation(
+                    content="A long enough conversation about backend architecture." * 5)
+        except BaseException as exc:  # noqa: BLE001 — the test asserts on what was raised
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20.0)
+
+    assert not errors, f"an ingest raised: {errors}"
+    assert not any(t.is_alive() for t in threads)
+    rows = engine.db.conn.execute(
+        "SELECT COUNT(*) AS c FROM nodes WHERE title = 'FastAPI standard'"
+    ).fetchone()
+    assert rows["c"] == 1

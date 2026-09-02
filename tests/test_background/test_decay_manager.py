@@ -444,3 +444,97 @@ def test_zero_stability_decays_on_the_configured_initial_stability(engine, monke
     run_decay(engine)
 
     assert _get_tier(engine, node_id) == "working"
+
+
+def test_decay_takes_the_lock_once_per_demoted_node_not_once_per_run(engine):
+    """The default-install bug: no LLM anywhere, yet L_mem is held for the whole run."""
+    from tests.test_background.lock_probe import install_probe
+
+    ids = []
+    for i in range(3):
+        nid, _ = engine.remember(CreateNodeRequest(
+            content=f"stale node {i}", type=NodeType.fact, tier=Tier.working,
+            title=f"stale {i}"))
+        _make_stale(engine, nid)
+        ids.append(nid)
+
+    probe = install_probe(engine)
+    run_decay(engine)
+
+    assert all(_get_tier(engine, nid) == "archival" for nid in ids)
+    # Before the fix: exactly 1, whatever the node count. After: one per demotion.
+    assert probe.acquisitions >= 3
+
+
+def test_decay_does_not_demote_a_node_promoted_after_the_snapshot(engine):
+    """#257's canary, written here: revalidate tier inside the apply step.
+
+    Decay snapshots the node as a stale 'working' candidate. Between that snapshot
+    and the locked apply step, a foreground promotion refreshes it. Without
+    per-apply-step revalidation the demotion would land anyway and silently undo
+    the promotion.
+
+    The hook point matters: it must land the promotion between the unlocked outer
+    scan and the locked `_still_decays` re-check — not between `_still_decays` and
+    `update_node`, which are both inside the same `memory_operation_at(epoch)` and
+    so can never observe an interleaved write (every engine mutator takes the same
+    lock). `lifecycle.retrievability` runs in the outer scan, once per candidate
+    row, which makes it the right seam: patching it fires exactly once, before
+    that node's locked apply step, and does not touch `_still_decays` or
+    `update_node` — the code under test.
+    """
+    from ormah import lifecycle
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="about to be promoted", type=NodeType.fact, tier=Tier.working,
+        title="promoted"))
+    _make_stale(engine, node_id)
+
+    real_retrievability = lifecycle.retrievability
+    promoted = {"done": False}
+
+    def promote_then_compute(days_since, stability, **kwargs):
+        """Stand in for a concurrent foreground promotion landing right after the
+        outer scan snapshots this node as a stale candidate."""
+        if not promoted["done"]:
+            promoted["done"] = True
+            fresh = datetime.now(timezone.utc).isoformat()
+            engine.db.conn.execute(
+                "UPDATE nodes SET last_accessed = ?, last_review = ?, tier = 'working' "
+                "WHERE id = ?", (fresh, fresh, node_id))
+            engine.db.conn.commit()
+        return real_retrievability(days_since, stability, **kwargs)
+
+    lifecycle.retrievability = promote_then_compute
+    try:
+        run_decay(engine)
+    finally:
+        lifecycle.retrievability = real_retrievability
+
+    assert _get_tier(engine, node_id) == "working"
+
+
+def test_decay_aborts_the_run_when_a_restore_lands_mid_run(engine):
+    """Abort, do not skip: the whole snapshot is stale, and nothing may be written."""
+    ids = []
+    for i in range(3):
+        nid, _ = engine.remember(CreateNodeRequest(
+            content=f"stale {i}", type=NodeType.fact, tier=Tier.working, title=f"s{i}"))
+        _make_stale(engine, nid)
+        ids.append(nid)
+
+    real_update = engine.update_node
+    demotions = {"count": 0}
+
+    def bump_after_first(nid, req, *args, **kwargs):
+        result = real_update(nid, req, *args, **kwargs)
+        demotions["count"] += 1
+        if demotions["count"] == 1:
+            engine._restore_epoch += 1
+        return result
+
+    engine.update_node = bump_after_first
+    run_decay(engine)  # returns cleanly, does not raise
+
+    assert demotions["count"] == 1
+    assert sum(_get_tier(engine, nid) == "archival" for nid in ids) == 1

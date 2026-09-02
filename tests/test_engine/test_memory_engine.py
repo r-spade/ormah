@@ -695,3 +695,84 @@ def test_memory_restore_lock_excludes_live_remember(engine):
     thread.join(timeout=2)
     assert finished.is_set()
     assert engine.file_store.load(result[0]) is not None
+
+
+def test_a_restore_mid_run_aborts_every_job_without_partial_writes(engine):
+    """#210 acceptance criterion, exercised across the real scheduler entry points."""
+    import json
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+
+    from ormah.background.auto_linker import run_auto_linker
+    from ormah.background.decay_manager import run_decay
+    from ormah.models.node import CreateNodeRequest, NodeType, Tier
+
+    # remember() auto-links similar nodes at creation time; disable that for the
+    # second node below so it stays unlinked to `stale_id` -- otherwise
+    # auto_linker would find zero candidates and its bump would never fire,
+    # making the epoch_before + 2 guard below vacuous rather than a real check.
+    stale_id, _ = engine.remember(CreateNodeRequest(
+        content="a stale working node", type=NodeType.fact, tier=Tier.working,
+        title="stale"))
+    real_auto_link = engine._auto_link_node
+    engine._auto_link_node = lambda node: []
+    engine.remember(CreateNodeRequest(
+        content="a stale working node", type=NodeType.fact, title="stale twin"))
+    engine._auto_link_node = real_auto_link
+    # A bare SQL `datetime('now', '-30 days')` literal produces a naive,
+    # space-separated string; decay_manager's anchor parse still succeeds on it
+    # (fromisoformat accepts the space), but the later `now - anchor` then mixes
+    # a tz-aware `now` with a naive anchor, raises TypeError, and the node is
+    # silently skipped -- vacuous for this test. Use the same tz-aware ISO
+    # string tests/test_background/test_decay_manager.py's _make_stale uses.
+    stale_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ? WHERE id = ?", (stale_date, stale_id))
+    engine.db.conn.commit()
+
+    edges_before = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+    epoch_before = engine.restore_epoch
+
+    # The bump must land AFTER the job read its entry epoch, never before the call:
+    # restore_aware_job reads engine.restore_epoch at call time, so a pre-call bump would
+    # simply hand the job the new value and there would be no mismatch to detect. Each job
+    # below gets the bump at the point where a real restore would land in its own run.
+    from ormah import lifecycle
+
+    real_retrievability = lifecycle.retrievability
+    bumped = {"done": False}
+
+    def bump_then_compute(days_since, stability, **kwargs):
+        """decay's seam: fires once per candidate in the unlocked outer scan."""
+        if not bumped["done"]:
+            bumped["done"] = True
+            engine._restore_epoch += 1
+        return real_retrievability(days_since, stability, **kwargs)
+
+    lifecycle.retrievability = bump_then_compute
+    try:
+        run_decay(engine)  # returns cleanly
+    finally:
+        lifecycle.retrievability = real_retrievability
+
+    row = engine.db.conn.execute(
+        "SELECT tier FROM nodes WHERE id = ?", (stale_id,)).fetchone()
+    assert row["tier"] == "working"  # not demoted
+
+    engine.settings.llm_provider = "ollama"
+
+    def bump_then_link(*args, **kwargs):
+        """auto_linker's seam: the unlocked LLM call, right before its apply step."""
+        engine._restore_epoch += 1
+        return json.dumps({"relationship": "supports", "reason": "x"})
+
+    with patch("ormah.background.llm_client.llm_generate", side_effect=bump_then_link):
+        run_auto_linker(engine)  # also returns cleanly
+
+    # Guard against silent vacuousness: both assertions hold trivially if neither job ever
+    # reached an apply step. Each bump lives inside that job's own seam, so an epoch that
+    # moved twice is proof both jobs actually got there.
+    assert engine.restore_epoch == epoch_before + 2, \
+        "a job never reached its apply step — the fixture stopped exercising it"
+    edges_after = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+    assert edges_after == edges_before

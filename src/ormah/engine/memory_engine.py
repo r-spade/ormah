@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ormah import lifecycle
+from ormah.background.memory_lock import RestoredUnderfoot
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -101,6 +102,7 @@ class MemoryEngine:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._memory_operation_lock = threading.RLock()
+        self._restore_epoch = 0
         self.file_store = FileStore(settings.nodes_dir, self._memory_operation_lock)
         self.db = Database(settings.db_path)
         self.db.init_schema()
@@ -550,6 +552,28 @@ class MemoryEngine:
         """Exclude a live graph mutation while a full restore is swapping files."""
 
         with self._memory_operation_lock:
+            yield
+
+    @property
+    def restore_epoch(self) -> int:
+        """Monotonic counter; every completed full restore bumps it."""
+        return self._restore_epoch
+
+    @contextmanager
+    def memory_operation_at(self, epoch: int):
+        """One exclusive apply step, valid only if no restore landed since *epoch*.
+
+        The epoch check happens *inside* ``L_mem`` on purpose: a loose ``if``
+        before the mutation would let a restore land between the check and the
+        write, and a write landing between the file swap and
+        ``rebuild_index()`` is silently overwritten, not corrupted (spec §2).
+        """
+
+        with self._memory_operation_lock:
+            if self._restore_epoch != epoch:
+                raise RestoredUnderfoot(
+                    f"restore epoch moved {epoch} -> {self._restore_epoch}"
+                )
             yield
 
     @_serialized_memory_operation
@@ -1328,6 +1352,11 @@ class MemoryEngine:
     @_serialized_memory_operation
     def reload_restored_graph(self) -> int:
         """Reload file, identity, and search state after a full memory restore."""
+
+        # Bump first: this method is exclusive under L_mem, and the file swap has
+        # already happened. Any job that computed against the pre-swap graph must
+        # abort even if the rebuild below raises.
+        self._restore_epoch += 1
 
         self.file_store = FileStore(self.settings.nodes_dir, self._memory_operation_lock)
         self.builder = IndexBuilder(self.db, self.file_store)
@@ -2401,7 +2430,6 @@ class MemoryEngine:
 
     # --- Conversation ingestion ---
 
-    @_serialized_memory_operation
     def ingest_conversation(
         self,
         content: str,
@@ -2438,12 +2466,6 @@ class MemoryEngine:
             if not mem_content:
                 continue
 
-            # Dedup: check if a very similar memory already exists (skip in dry_run)
-            if not dry_run and self._is_duplicate_memory(mem_content):
-                logger.debug("Skipping duplicate: %s", mem.get("title", mem_content[:40]))
-                skipped += 1
-                continue
-
             try:
                 node_type = NodeType(mem.get("type", "fact"))
             except ValueError:
@@ -2467,16 +2489,26 @@ class MemoryEngine:
                 })
                 continue
 
-            req = CreateNodeRequest(
-                content=mem_content,
-                type=node_type,
-                title=mem_title,
-                tags=tags,
-                space=space,
-                about_self=mem.get("about_self", False),
-                confidence=confidence,
-            )
-            node_id, _ = self.remember(req, agent_id=agent_id or "ingester")
+            # Dedup check and store must be one exclusive step: extraction ran
+            # unlocked, so another concurrent ingest could have written the same
+            # content since. Re-checking outside this lock would race the same
+            # way the old whole-call lock accidentally prevented (#240).
+            with self.memory_operation():
+                if self._is_duplicate_memory(mem_content):
+                    logger.debug("Skipping duplicate: %s", mem.get("title", mem_content[:40]))
+                    skipped += 1
+                    continue
+
+                req = CreateNodeRequest(
+                    content=mem_content,
+                    type=node_type,
+                    title=mem_title,
+                    tags=tags,
+                    space=space,
+                    about_self=mem.get("about_self", False),
+                    confidence=confidence,
+                )
+                node_id, _ = self.remember(req, agent_id=agent_id or "ingester")
             created.append({
                 "node_id": node_id,
                 "title": mem_title,

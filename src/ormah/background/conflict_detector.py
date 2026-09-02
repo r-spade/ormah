@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_conflict_type
-from ormah.background.memory_lock import serialized_memory_job
+from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
 from ormah.models.node import Connection, EdgeType
 
 logger = logging.getLogger(__name__)
@@ -213,8 +213,8 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
         return []
 
 
-@serialized_memory_job
-def run_conflict_detection(engine) -> None:
+@restore_aware_job
+def run_conflict_detection(engine, epoch: int) -> None:
     """Find potentially contradicting nodes and create edges."""
     try:
         settings = engine.settings
@@ -243,29 +243,30 @@ def run_conflict_detection(engine) -> None:
             now = datetime.now(timezone.utc).isoformat()
             conflict_type = llm_result.get("type", "tension")
 
-            with engine.db.transaction() as db_conn:
-                if conflict_type == "evolution":
-                    evolved = llm_result.get("evolved_node", "b")
-                    if evolved == "a":
-                        newer_id, older_id = node_a["id"], node_b["id"]
-                    else:
-                        newer_id, older_id = node_b["id"], node_a["id"]
+            with engine.memory_operation_at(epoch):
+                with engine.db.transaction() as db_conn:
+                    if conflict_type == "evolution":
+                        evolved = llm_result.get("evolved_node", "b")
+                        if evolved == "a":
+                            newer_id, older_id = node_a["id"], node_b["id"]
+                        else:
+                            newer_id, older_id = node_b["id"], node_a["id"]
 
-                    db_conn.execute(
-                        "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
-                        "VALUES (?, ?, 'evolved_from', 0.9, ?, ?)",
-                        (newer_id, older_id, now, explanation),
-                    )
-                    edge_type_str = "evolved_from"
-                    source_id, target_id = newer_id, older_id
-                else:
-                    db_conn.execute(
-                        "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
-                        "VALUES (?, ?, 'contradicts', 0.9, ?, ?)",
-                        (node_a["id"], node_b["id"], now, explanation),
-                    )
-                    edge_type_str = "contradicts"
-                    source_id, target_id = node_a["id"], node_b["id"]
+                        db_conn.execute(
+                            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+                            "VALUES (?, ?, 'evolved_from', 0.9, ?, ?)",
+                            (newer_id, older_id, now, explanation),
+                        )
+                        edge_type_str = "evolved_from"
+                        source_id, target_id = newer_id, older_id
+                    else:
+                        db_conn.execute(
+                            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+                            "VALUES (?, ?, 'contradicts', 0.9, ?, ?)",
+                            (node_a["id"], node_b["id"], now, explanation),
+                        )
+                        edge_type_str = "contradicts"
+                        source_id, target_id = node_a["id"], node_b["id"]
 
             md_conn = Connection(
                 target=target_id,
@@ -277,18 +278,22 @@ def run_conflict_detection(engine) -> None:
 
         # Persist new connections to markdown files
         for nid, new_connections in dirty_nodes.items():
-            try:
-                mem_node = engine.file_store.load(nid)
-                if mem_node is None:
-                    continue
-                mem_node.connections.extend(new_connections)
-                mem_node.touch_updated()
-                engine.file_store.save(mem_node)
-            except Exception as e:
-                logger.debug("Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)
+            with engine.memory_operation_at(epoch):
+                try:
+                    mem_node = engine.file_store.load(nid)
+                    if mem_node is None:
+                        continue
+                    mem_node.connections.extend(new_connections)
+                    mem_node.touch_updated()
+                    engine.file_store.save(mem_node)
+                except Exception as e:
+                    logger.debug(
+                        "Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)
 
         if edges_created:
             logger.info("Conflict detector created %d edges", edges_created)
 
+    except RestoredUnderfoot:
+        raise
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)

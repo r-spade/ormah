@@ -6,7 +6,7 @@ import logging
 import math
 from datetime import datetime, timezone
 
-from ormah.background.memory_lock import serialized_memory_job
+from ormah.background.memory_lock import restore_aware_job
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +29,29 @@ def _recency_signal(days_ago: float, half_life_days: float) -> float:
     return math.exp(-math.log(2) * days_ago / half_life_days)
 
 
-def _commit_updates_chunked(db, updates, chunk_size: int = 100) -> None:
+def _commit_updates_chunked(db, updates, chunk_size: int = 100, *, engine=None, epoch=None) -> None:
     """Apply (importance, node_id) updates in bounded write transactions so a
-    full-store batch never holds the write lock long enough to stall foreground writes."""
+    full-store batch never holds the write lock long enough to stall foreground writes.
+
+    When *engine* and *epoch* are given, each chunk also takes L_mem for itself and
+    revalidates the restore epoch (#240) — the care this function already took for
+    L_db, extended to the lock that was being held for the whole run.
+    """
+    from contextlib import nullcontext
+
     for i in range(0, len(updates), chunk_size):
-        with db.transaction() as conn:
-            for importance_val, nid in updates[i : i + chunk_size]:
-                conn.execute(
-                    "UPDATE nodes SET importance = ? WHERE id = ?",
-                    (importance_val, nid),
-                )
+        guard = engine.memory_operation_at(epoch) if engine is not None else nullcontext()
+        with guard:
+            with db.transaction() as conn:
+                for importance_val, nid in updates[i : i + chunk_size]:
+                    conn.execute(
+                        "UPDATE nodes SET importance = ? WHERE id = ?",
+                        (importance_val, nid),
+                    )
 
 
-@serialized_memory_job
-def run_importance_scoring(engine) -> None:
+@restore_aware_job
+def run_importance_scoring(engine, epoch: int) -> None:
     """Iterate all nodes, compute weighted importance, persist changes."""
     settings = engine.settings
     conn = engine.db.conn
@@ -127,15 +136,16 @@ def run_importance_scoring(engine) -> None:
         updates.append((round(importance, 4), nid))
 
         # Update markdown file
-        node = engine.file_store.load(nid)
-        if node is not None:
-            node.importance = round(importance, 4)
-            node.touch_updated()
-            engine.file_store.save(node)
+        with engine.memory_operation_at(epoch):
+            node = engine.file_store.load(nid)
+            if node is not None:
+                node.importance = round(importance, 4)
+                node.touch_updated()
+                engine.file_store.save(node)
 
         updated += 1
 
     if updates:
-        _commit_updates_chunked(engine.db, updates)
+        _commit_updates_chunked(engine.db, updates, engine=engine, epoch=epoch)
     if updated:
         logger.info("Importance scorer: updated %d/%d nodes", updated, len(rows))

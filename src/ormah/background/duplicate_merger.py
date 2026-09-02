@@ -7,7 +7,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from ormah.background.memory_lock import serialized_memory_job
+from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
 
 logger = logging.getLogger(__name__)
 
@@ -239,8 +239,8 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
         return []
 
 
-@serialized_memory_job
-def run_duplicate_detection(engine) -> None:
+@restore_aware_job
+def run_duplicate_detection(engine, epoch: int) -> None:
     """Find near-duplicate nodes and create merge proposals.
 
     Uses a multi-signal approach: embedding similarity (primary),
@@ -336,19 +336,41 @@ def run_duplicate_detection(engine) -> None:
                 reason += f" (score={score:.3f}, embed={embedding_sim:.2f}, title={title_sim:.2f}, token={token_sim:.2f})"
 
                 # Auto-merge for high-confidence duplicates
+                merged = False
                 if score >= engine.settings.auto_merge_threshold:
-                    try:
-                        result = engine.execute_merge(
-                            node["id"], match["id"],
-                            merged_content=merged_content,
-                            merged_title=merged_title,
-                        )
-                        logger.info("Auto-merged: %s", result)
-                        proposals_created += 1
+                    with engine.memory_operation_at(epoch):
+                        # Revalidate: merged_content was written by the LLM from the content
+                        # snapshotted before the call. Applying it over an edit made since would
+                        # silently discard that edit. Skip the pair; the next run re-checks it
+                        # against the new content (#240).
+                        fresh = engine.db.conn.execute(
+                            "SELECT id, content FROM nodes WHERE id IN (?, ?)",
+                            (node["id"], match["id"]),
+                        ).fetchall()
+                        current = {r["id"]: r["content"] for r in fresh}
+                        if (
+                            current.get(node["id"]) != node["content"]
+                            or current.get(match["id"]) != other["content"]
+                        ):
+                            logger.debug(
+                                "Auto-merge skipped %s / %s: content changed since the snapshot",
+                                node["id"][:8], match["id"][:8])
+                            continue
+                        try:
+                            result = engine.execute_merge(
+                                node["id"], match["id"],
+                                merged_content=merged_content,
+                                merged_title=merged_title,
+                            )
+                            logger.info("Auto-merged: %s", result)
+                            proposals_created += 1
+                            merged = True
+                        except Exception as e:
+                            logger.warning("Auto-merge failed for %s / %s: %s",
+                                           node["id"][:8], match["id"][:8], e)
+                            merged = False
+                    if merged:
                         continue
-                    except Exception as e:
-                        logger.warning("Auto-merge failed for %s / %s: %s",
-                                       node["id"][:8], match["id"][:8], e)
 
                 # Check no existing merge proposal
                 existing = engine.db.conn.execute(
@@ -369,21 +391,25 @@ def run_duplicate_detection(engine) -> None:
                     )
 
                 proposal_id = str(uuid.uuid4())
-                with engine.db.transaction() as conn:
-                    conn.execute(
-                        "INSERT INTO proposals (id, type, status, source_nodes, proposed_action, reason, created) "
-                        "VALUES (?, 'merge', 'pending', ?, ?, ?, ?)",
-                        (
-                            proposal_id,
-                            json.dumps([node["id"], match["id"]]),
-                            proposed_action,
-                            reason,
-                            datetime.now(timezone.utc).isoformat(),
-                        ),
-                    )
+                with engine.memory_operation_at(epoch):
+                    with engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT INTO proposals (id, type, status, source_nodes, "
+                            "proposed_action, reason, created) "
+                            "VALUES (?, 'merge', 'pending', ?, ?, ?, ?)",
+                            (
+                                proposal_id,
+                                json.dumps([node["id"], match["id"]]),
+                                proposed_action,
+                                reason,
+                                datetime.now(timezone.utc).isoformat(),
+                            ),
+                        )
                 proposals_created += 1
         if proposals_created:
             logger.info("Duplicate merger created %d proposals/auto-merges", proposals_created)
 
+    except RestoredUnderfoot:
+        raise
     except Exception as e:
         logger.warning("Duplicate detection failed: %s", e)

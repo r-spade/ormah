@@ -283,3 +283,63 @@ def test_project_scoped_nodes_skipped_by_default(engine):
 
     # LLM should never be called since project-scoped nodes are skipped
     mock_llm.assert_not_called()
+
+
+def test_conflict_detection_does_not_hold_the_lock_across_the_llm_call(engine):
+    """Same bug as auto_linker: the LLM runs under L_mem today (#240)."""
+    import json
+    from unittest.mock import patch
+
+    from tests.test_background.lock_probe import install_probe
+
+    id_a, id_b = _create_pair(engine, node_type=NodeType.fact)
+    engine.settings.llm_provider = "ollama"
+
+    probe = install_probe(engine)
+    lock_held_at_call: list[bool] = []
+
+    def fake_llm(*args, **kwargs):
+        lock_held_at_call.append(probe.held)
+        return json.dumps({
+            "same_subject": True, "conflict": True, "type": "tension",
+            "explanation": "they disagree",
+        })
+
+    with patch("ormah.background.llm_client.llm_generate", side_effect=fake_llm):
+        from ormah.background.conflict_detector import run_conflict_detection
+        run_conflict_detection(engine)
+
+    assert lock_held_at_call, "the fake LLM was never called — the fixture stopped exercising the job"
+    assert not any(lock_held_at_call)
+
+
+def test_conflict_detection_aborts_when_a_restore_lands_mid_run(engine):
+    import json
+    from unittest.mock import patch
+
+    id_a, id_b = _create_pair(engine, node_type=NodeType.fact)
+    engine.settings.llm_provider = "ollama"
+
+    edges_before = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+    epoch_before = engine.restore_epoch
+
+    # The bump must land AFTER the job read its entry epoch: restore_aware_job reads
+    # engine.restore_epoch at call time, so bumping before the call would hand the job the
+    # new value and leave no mismatch to detect. Inside the fake LLM is where a real restore
+    # lands — between the unlocked LLM call and the apply step that follows it.
+    def fake_llm(*args, **kwargs):
+        engine._restore_epoch += 1
+        return json.dumps({
+            "same_subject": True, "conflict": True, "type": "tension",
+            "explanation": "they disagree",
+        })
+
+    with patch("ormah.background.llm_client.llm_generate", side_effect=fake_llm):
+        from ormah.background.conflict_detector import run_conflict_detection
+        run_conflict_detection(engine)  # returns cleanly
+
+    assert engine.restore_epoch > epoch_before, \
+        "the fake LLM was never called — the fixture stopped exercising the job"
+
+    edges_after = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+    assert edges_after == edges_before

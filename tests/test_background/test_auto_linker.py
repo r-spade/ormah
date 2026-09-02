@@ -411,3 +411,107 @@ def test_checked_pairs_invalidated_on_update(engine):
         run_auto_linker(engine)
 
     assert mock_llm.call_count >= 1  # LLM was called again for this pair
+
+
+def test_lock_is_not_held_across_the_llm_call(engine):
+    """The bug, stated as an assertion (#240)."""
+    from tests.test_background.lock_probe import install_probe
+
+    _create_pair(engine)
+    _create_pair(engine, title_a="Ruby language", content_a="Ruby is a programming language.",
+                 title_b="Ruby lang", content_b="Ruby is a popular programming language.")
+
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+
+    probe = install_probe(engine)
+    lock_held_at_call: list[bool] = []
+
+    def fake_llm(*args, **kwargs):
+        lock_held_at_call.append(probe.held)
+        return json.dumps({"relationship": "supports", "reason": "same topic"})
+
+    with patch(_LLM_PATCH, side_effect=fake_llm):
+        from ormah.background.auto_linker import run_auto_linker
+        run_auto_linker(engine)
+
+    assert lock_held_at_call, "the fake LLM was never called — the fixture stopped exercising the job"
+    assert not any(lock_held_at_call)
+    assert probe.acquisitions >= len(lock_held_at_call)
+
+
+def test_a_foreground_write_completes_while_the_job_is_inside_the_llm(engine):
+    """The 25-minute symptom. No sleeps: the fake LLM blocks until the write lands."""
+    import threading
+
+    _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+
+    job_is_inside_llm = threading.Event()
+    foreground_write_done = threading.Event()
+    llm_saw_the_write = []
+
+    def blocking_llm(*args, **kwargs):
+        job_is_inside_llm.set()
+        # Record the wait's outcome instead of asserting on it. An assert raised here
+        # would be swallowed by run_auto_linker's own blanket `except Exception`, which
+        # then releases L_mem — the writer would unblock, both outer assertions would
+        # still read true, and a reintroduced whole-run lock would show up as a ~10s
+        # slow pass instead of a red test. Carrying the value out makes it a hard failure.
+        llm_saw_the_write.append(foreground_write_done.wait(timeout=10.0))
+        return json.dumps({"relationship": "supports", "reason": "same topic"})
+
+    def foreground_write():
+        assert job_is_inside_llm.wait(timeout=10.0)
+        engine.remember(CreateNodeRequest(
+            content="a user memory written while the linker is thinking",
+            type=NodeType.fact, title="foreground"))
+        foreground_write_done.set()
+
+    writer = threading.Thread(target=foreground_write, daemon=True)
+    writer.start()
+
+    with patch(_LLM_PATCH, side_effect=blocking_llm):
+        from ormah.background.auto_linker import run_auto_linker
+        job_thread = threading.Thread(target=run_auto_linker, args=(engine,), daemon=True)
+        job_thread.start()
+        job_thread.join(timeout=20.0)
+
+    writer.join(timeout=5.0)
+    assert llm_saw_the_write, "the fake LLM was never called — the fixture stopped exercising the job"
+    assert all(llm_saw_the_write), "L_mem was held across the LLM call"
+    assert foreground_write_done.is_set()
+    assert not job_thread.is_alive()
+
+
+def test_auto_linker_aborts_when_a_restore_lands_mid_run(engine):
+    """Abort the run, and leave nothing written after the bump."""
+    _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+
+    # The bump must land AFTER the job read its entry epoch, not before: restore_aware_job
+    # reads engine.restore_epoch at call time, so bumping first would just hand the job the
+    # new value and there would be no mismatch to detect. Bumping inside the fake LLM puts
+    # it exactly where a real restore lands — between the unlocked LLM call and the apply
+    # step that follows it.
+    def fake_llm(*args, **kwargs):
+        engine._restore_epoch += 1
+        return json.dumps({"relationship": "supports", "reason": "same topic"})
+
+    edges_before = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+    epoch_before = engine.restore_epoch
+
+    with patch(_LLM_PATCH, side_effect=fake_llm):
+        from ormah.background.auto_linker import run_auto_linker
+        run_auto_linker(engine)  # returns cleanly, no raise
+
+    assert engine.restore_epoch > epoch_before, \
+        "the fake LLM was never called — the fixture stopped exercising the job"
+
+    edges_after = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+    assert edges_after == edges_before

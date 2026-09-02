@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
-from ormah.background.memory_lock import serialized_memory_job
+from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
 
 logger = logging.getLogger(__name__)
 
 
-@serialized_memory_job
-def run_auto_cluster(engine) -> None:
+@restore_aware_job
+def run_auto_cluster(engine, epoch: int) -> None:
     """Assign unassigned nodes to spaces based on their connections."""
     try:
         unassigned = engine.db.conn.execute(
@@ -46,8 +46,18 @@ def run_auto_cluster(engine) -> None:
             updates.append((most_common, node_id))
 
             # Update markdown file
-            node = engine.file_store.load(node_id)
-            if node:
+            with engine.memory_operation_at(epoch):
+                node = engine.file_store.load(node_id)
+                if node is None:
+                    continue
+                # Revalidate: the candidate query said this node had no space, but that was
+                # read outside the lock. A space assigned since is the user's, not ours (#240).
+                if node.space:
+                    logger.debug(
+                        "Auto-cluster left %s alone: a space was assigned since the scan",
+                        node_id[:8])
+                    updates.pop()
+                    continue
                 node.space = most_common
                 node.touch_updated()
                 engine.file_store.save(node)
@@ -57,13 +67,16 @@ def run_auto_cluster(engine) -> None:
         if updates:
             chunk_size = 100
             for i in range(0, len(updates), chunk_size):
-                with engine.db.transaction() as conn:
-                    for space_val, node_id in updates[i : i + chunk_size]:
-                        conn.execute(
-                            "UPDATE nodes SET space = ? WHERE id = ?", (space_val, node_id)
-                        )
+                with engine.memory_operation_at(epoch):
+                    with engine.db.transaction() as conn:
+                        for space_val, node_id in updates[i : i + chunk_size]:
+                            conn.execute(
+                                "UPDATE nodes SET space = ? WHERE id = ?", (space_val, node_id)
+                            )
         if assigned:
             logger.info("Auto-cluster assigned %d nodes to spaces", assigned)
 
+    except RestoredUnderfoot:
+        raise
     except Exception as e:
         logger.warning("Auto-cluster failed: %s", e)

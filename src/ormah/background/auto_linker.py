@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_link_type
-from ormah.background.memory_lock import serialized_memory_job
+from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
 
 logger = logging.getLogger(__name__)
 
@@ -273,48 +273,59 @@ def _apply_edge(
     edge_type: str,
     reason: str,
     similarity: float = 0.0,
+    *,
+    epoch: int | None = None,
 ) -> None:
     """Record a link decision: write to auto_link_checked and optionally create an edge.
 
     ``edge_type="none"`` records the pair as checked without creating an edge.
+
+    *epoch* is the caller's restore epoch. Background jobs pass it so the whole
+    apply step is exclusive and aborts if a restore landed (#240);
+    ``apply_maintenance_results`` passes nothing because it already holds L_mem.
     """
+    from contextlib import nullcontext
+
     from ormah.models.node import Connection, EdgeType
 
     pair = tuple(sorted([node_a_id, node_b_id]))
     now = datetime.now(timezone.utc).isoformat()
 
-    with engine.db.transaction() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO auto_link_checked (node_a, node_b, result, checked_at) "
-            "VALUES (?, ?, ?, ?)",
-            (*pair, edge_type, now),
-        )
-
-        if edge_type not in ("none", "error"):
+    guard = engine.memory_operation_at(epoch) if epoch is not None else nullcontext()
+    with guard:
+        with engine.db.transaction() as conn:
             conn.execute(
-                "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (node_a_id, node_b_id, edge_type, round(similarity, 3), now, reason),
+                "INSERT OR IGNORE INTO auto_link_checked (node_a, node_b, result, checked_at) "
+                "VALUES (?, ?, ?, ?)",
+                (*pair, edge_type, now),
             )
 
-    if edge_type not in ("none", "error"):
-        try:
-            mem_node = engine.file_store.load(node_a_id)
-            if mem_node is not None:
-                md_conn = Connection(
-                    target=node_b_id,
-                    edge=EdgeType(edge_type),
-                    weight=round(similarity, 2),
+            if edge_type not in ("none", "error"):
+                conn.execute(
+                    "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (node_a_id, node_b_id, edge_type, round(similarity, 3), now, reason),
                 )
-                mem_node.connections.append(md_conn)
-                mem_node.touch_updated()
-                engine.file_store.save(mem_node)
-        except Exception as e:
-            logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
+
+        if edge_type not in ("none", "error"):
+            try:
+                mem_node = engine.file_store.load(node_a_id)
+                if mem_node is not None:
+                    md_conn = Connection(
+                        target=node_b_id,
+                        edge=EdgeType(edge_type),
+                        weight=round(similarity, 2),
+                    )
+                    mem_node.connections.append(md_conn)
+                    mem_node.touch_updated()
+                    engine.file_store.save(mem_node)
+            except Exception as e:
+                logger.debug("Failed to persist connection to markdown for %s: %s",
+                             node_a_id[:8], e)
 
 
-@serialized_memory_job
-def run_auto_linker(engine) -> None:
+@restore_aware_job
+def run_auto_linker(engine, epoch: int) -> None:
     """Incrementally link nodes with seq above the watermark; advance only past
     fully-resolved nodes."""
     try:
@@ -402,7 +413,7 @@ def run_auto_linker(engine) -> None:
                     relationship = llm_result["relationship"]  # may be 'error' (invalid output)
                     _apply_edge(
                         engine, node["id"], match["id"], relationship,
-                        llm_result.get("reason", ""), similarity,
+                        llm_result.get("reason", ""), similarity, epoch=epoch,
                     )
                     # 'error' (poison content) is recorded in auto_link_checked by _apply_edge
                     # and the node still counts as resolved → watermark advances (council v2 crit#2).
@@ -414,9 +425,12 @@ def run_auto_linker(engine) -> None:
             last_complete = node["seq"]
 
         if last_complete is not None:
-            _set_watermark(engine, last_complete)
+            with engine.memory_operation_at(epoch):
+                _set_watermark(engine, last_complete)
         if created:
             logger.info("Auto-linker created %d edges", created)
 
+    except RestoredUnderfoot:
+        raise
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)

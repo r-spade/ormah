@@ -531,3 +531,49 @@ def test_importance_recency_is_independent_of_stability(engine):
     assert low_imp == pytest.approx(high_imp), (
         f"stability must not affect importance recency: {low_imp} vs {high_imp}"
     )
+
+
+def test_importance_scoring_takes_the_lock_per_node_and_per_chunk(engine):
+    """No LLM in this job at all — the hold is pure whole-run retention."""
+    from tests.test_background.lock_probe import install_probe
+
+    for i in range(4):
+        nid, _ = engine.remember(CreateNodeRequest(
+            content=f"node {i} with enough content to score", type=NodeType.fact,
+            title=f"node {i}"))
+        engine.db.conn.execute(
+            "UPDATE nodes SET access_count = ?, importance = 0.0 WHERE id = ?", (i * 5, nid))
+    engine.db.conn.commit()
+
+    probe = install_probe(engine)
+    run_importance_scoring(engine)
+
+    # Before the fix: exactly 1 for any node count.
+    assert probe.acquisitions >= 4
+
+
+def test_importance_scoring_aborts_when_a_restore_lands_mid_run(engine):
+    from ormah.background.memory_lock import RestoredUnderfoot  # noqa: F401  (documents intent)
+
+    for i in range(4):
+        nid, _ = engine.remember(CreateNodeRequest(
+            content=f"node {i} with enough content to score", type=NodeType.fact,
+            title=f"node {i}"))
+        engine.db.conn.execute(
+            "UPDATE nodes SET access_count = ?, importance = 0.0 WHERE id = ?", (i * 5, nid))
+    engine.db.conn.commit()
+
+    real_save = engine.file_store.save
+    saves = {"count": 0}
+
+    def bump_after_first(node):
+        path = real_save(node)
+        saves["count"] += 1
+        if saves["count"] == 1:
+            engine._restore_epoch += 1
+        return path
+
+    engine.file_store.save = bump_after_first
+    run_importance_scoring(engine)  # returns cleanly
+
+    assert saves["count"] == 1
