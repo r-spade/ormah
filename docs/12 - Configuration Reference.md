@@ -295,6 +295,7 @@ backup taken before the upgrade.
 | `claude_maintenance_enabled` | `false` |
 | `claude_maintenance_interval_hours` | `24` |
 | `claude_maintenance_batch_size` | `25` |
+| `claude_maintenance_cluster_max_chars` | `24000` |
 
 ## Code Anchor
 

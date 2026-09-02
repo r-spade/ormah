@@ -37,7 +37,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
         return []
 
     rows = conn.execute(
-        "SELECT id, title, content, space FROM nodes WHERE tier = 'working'"
+        "SELECT id, title, content, space, type FROM nodes WHERE tier = 'working'"
     ).fetchall()
     if len(rows) < min_size:
         return []
@@ -75,7 +75,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
             if match["similarity"] < threshold:
                 continue
             m_row = conn.execute(
-                "SELECT id, title, content, space, tier FROM nodes WHERE id = ?",
+                "SELECT id, title, content, space, tier, type FROM nodes WHERE id = ?",
                 (mid,),
             ).fetchone()
             if m_row is None or m_row["tier"] != "working":

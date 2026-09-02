@@ -265,3 +265,50 @@ async def test_dispatch_polls_until_phase2_apply_completes(monkeypatch):
 
     assert '"status": "applied"' in text
     assert '"edges": 1' in text
+
+
+def _batches_with_cluster(content: str) -> dict:
+    node = {
+        "id": "n1",
+        "title": "Long node",
+        "type": "fact",
+        "space": "testproject",
+        "content": content,
+    }
+    other = dict(node, id="n2", title="Other node")
+    return {
+        "summary": "1 cluster(s)",
+        "link_candidates": [],
+        "conflict_candidates": [],
+        "merge_candidates": [],
+        "consolidation_clusters": [[node, other]],
+    }
+
+
+def test_formatter_emits_full_cluster_content():
+    """The agent must see the whole source, not the first 200 chars."""
+    content = "x" * 600
+    text = mcp_adapter._format_maintenance_batches(_batches_with_cluster(content))
+
+    assert content in text, "cluster content was truncated before reaching the agent"
+
+
+def test_formatter_still_truncates_screening_pairs():
+    """Screening stays a screening view — 300 chars, unchanged."""
+    long_content = "y" * 600
+    node_a = {
+        "id": "a", "title": "A", "type": "fact", "space": "s", "content": long_content,
+    }
+    node_b = dict(node_a, id="b", title="B")
+    batches = {
+        "summary": "1 link candidates",
+        "link_candidates": [{"node_a": node_a, "node_b": node_b, "similarity": 0.9}],
+        "conflict_candidates": [],
+        "merge_candidates": [],
+        "consolidation_clusters": [],
+    }
+
+    text = mcp_adapter._format_maintenance_batches(batches)
+
+    assert long_content not in text
+    assert long_content[:300] in text

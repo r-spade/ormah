@@ -180,7 +180,7 @@ def _format_maintenance_batches(batches: dict) -> str:
             for j, n in enumerate(cluster, 1):
                 lines.append(f"  {j}. [{n['type']}] {n['id']}  \"{n['title']}\"")
                 if n.get("content"):
-                    lines.append(f"     {n['content'][:200]}")
+                    lines.append(f"     {n['content']}")
             lines.append("")
 
     if not (link_candidates or conflict_candidates or merge_candidates or clusters):

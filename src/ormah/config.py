@@ -291,6 +291,7 @@ class Settings(BaseSettings):
     claude_maintenance_enabled: bool = False
     claude_maintenance_interval_hours: int = 24  # hours between maintenance runs
     claude_maintenance_batch_size: int = 25  # candidates per type per run
+    claude_maintenance_cluster_max_chars: int = 24000  # serialized budget per cluster
 
     # --- Validators ---
 
@@ -644,6 +645,13 @@ class Settings(BaseSettings):
     def _enrichment_interval_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"interval must be >= 1 minute, got {v}")
+        return v
+
+    @field_validator("claude_maintenance_cluster_max_chars")
+    @classmethod
+    def _claude_maintenance_cluster_max_chars_min(cls, v: int) -> int:
+        if v < 1000:
+            raise ValueError(f"claude_maintenance_cluster_max_chars must be >= 1000, got {v}")
         return v
 
     @property

@@ -171,3 +171,17 @@ def test_inverted_cluster_bounds_returns_empty_and_warns(consolidation_engine, c
     assert "consolidation_max_cluster_nodes" in caplog.text
 
 
+def test_clusters_carry_node_type(consolidation_engine):
+    """The agent picks the consolidated node's type — it must see the sources' type."""
+    from ormah.background.consolidator import _find_consolidation_clusters
+
+    engine, _ids = consolidation_engine
+    engine.settings.consolidation_cluster_threshold = 0.0
+    engine.settings.consolidation_min_cluster_size = 2
+
+    clusters = _find_consolidation_clusters(engine, limit=4)
+
+    assert clusters, "no cluster formed — the assertion below would never run"
+    for cluster in clusters:
+        for node in cluster:
+            assert node.get("type") == "fact"

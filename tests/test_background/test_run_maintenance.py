@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.models.node import CreateNodeRequest, NodeType
 
@@ -273,3 +275,294 @@ class TestWhisperSignal:
         text = engine.get_whisper_context(prompt="how does Python indexing work")
         assert MAINTENANCE_DUE_SIGNAL in text
         assert "continue the conversation without blocking the user" in text
+
+
+class TestSelectClusterWithinBudget:
+    """The per-node metadata overhead is ~77 chars for these fixtures; budgets below
+    are chosen with that measured overhead in mind, so each case exercises the
+    boundary it names."""
+
+    def _node(self, nid: str, chars: int, content: str | None = None) -> dict:
+        return {
+            "id": nid,
+            "title": f"t{nid}",
+            "type": "fact",
+            "space": "s",
+            "content": content if content is not None else "x" * chars,
+        }
+
+    def _size(self, node: dict) -> int:
+        return len(json.dumps(node, ensure_ascii=False))
+
+    def test_cluster_within_budget_is_returned_whole(self):
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node(f"n{i}", 400) for i in range(5)]
+        assert _select_cluster_within_budget(cluster, budget=24000, min_size=2) == cluster
+
+    def test_oversized_cluster_is_trimmed(self, caplog):
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node(f"n{i}", 500) for i in range(4)]
+        budget = self._size(cluster[0]) * 2 + 10  # exactly two nodes fit
+
+        with caplog.at_level("INFO"):
+            result = _select_cluster_within_budget(cluster, budget=budget, min_size=2)
+
+        assert [n["id"] for n in result] == ["n0", "n1"]
+        for node in result:
+            assert len(node["content"]) == 500, "trim must never slice a node"
+        assert "trimmed" in caplog.text
+
+    def test_an_oversized_match_does_not_hide_the_smaller_ones(self, caplog):
+        """The v3 defect: a strict prefix stopped here and lost seed + m2.
+
+        Sizes: seed 177, m1 24_073, m2 173 serialized. `seed + m1` is 24_250,
+        over budget; `seed + m2` is 350, well under. Stopping at m1 returns [].
+        """
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("seed", 100), self._node("m1", 24000), self._node("m2", 100)]
+
+        with caplog.at_level("INFO"):
+            result = _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+
+        assert [n["id"] for n in result] == ["seed", "m2"]
+        assert "m1" in caplog.text, "the skipped node must be named in the log"
+
+    def test_repeated_cycles_make_progress(self):
+        """No starvation: the finder rebuilds the same ordered cluster every cycle,
+        so a cluster that yields nothing once would yield nothing forever."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("seed", 100), self._node("m1", 24000), self._node("m2", 100)]
+
+        results = [
+            _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+            for _ in range(3)
+        ]
+
+        assert all(r for r in results), "a cycle produced nothing — this cluster is starved"
+        assert all([n["id"] for n in r] == ["seed", "m2"] for r in results)
+
+    def test_a_kept_cluster_always_contains_the_seed(self):
+        """The invariant next-fit violated: never consolidate without the seed."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("seed", 600), self._node("m1", 400), self._node("m2", 400)]
+        budget = self._size(cluster[0]) + self._size(cluster[1]) + 10
+
+        result = _select_cluster_within_budget(cluster, budget=budget, min_size=2)
+
+        assert result, "this budget fits two nodes; the cluster should survive"
+        assert result[0]["id"] == "seed"
+
+    def test_cluster_below_min_size_after_trim_is_dropped_with_warning(self, caplog):
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node(f"n{i}", 12001) for i in range(5)]
+
+        with caplog.at_level("WARNING"):
+            result = _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+
+        assert result == []
+        assert caplog.records, "a dropped cluster must never be silent"
+
+    def test_seed_larger_than_the_budget_drops_the_cluster(self, caplog):
+        """An oversized seed must not claim the cluster and starve its matches —
+        it drops the whole cluster, explicitly, with the seed named."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("huge", 30000), self._node("a", 100), self._node("b", 100)]
+
+        with caplog.at_level("WARNING"):
+            result = _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+
+        assert result == []
+        assert "huge" in caplog.text
+
+    def test_budget_counts_serialized_size_not_raw_content(self, caplog):
+        """3000 NUL chars are 3000 raw but 18_070 serialized — a len(content)
+        budget would keep this cluster; the serialized budget must drop it."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("esc", 0, content="\x00" * 3000), self._node("a", 400)]
+        assert self._size(cluster[0]) > 5000 > len(cluster[0]["content"])
+
+        with caplog.at_level("WARNING"):
+            result = _select_cluster_within_budget(cluster, budget=5000, min_size=2)
+
+        assert result == [], "the budget is measuring raw content, not the serialized node"
+
+
+def _seed_long_nodes(engine, n: int = 2, chars: int = 600) -> dict[str, str]:
+    """Create n nodes whose content is exactly `chars` long. Returns {id: content}.
+
+    auto_link is disabled during remember() so the pairs stay unchecked and remain
+    available as link candidates later.
+    """
+    base = "Python uses indentation to define code block scope. "
+    seeded: dict[str, str] = {}
+    orig_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        for i in range(n):
+            content = (f"{i} " + base * 40)[:chars]
+            assert len(content) == chars
+            req = CreateNodeRequest(
+                content=content,
+                type=NodeType.fact,
+                title=f"Python indentation {i}",
+                space="testproject",
+            )
+            nid, _ = engine.remember(req)
+            seeded[nid] = content
+    finally:
+        engine.settings.auto_link_similarity_threshold = orig_threshold
+    return seeded
+
+
+class TestConsolidationBatchFidelity:
+
+    def test_consolidation_cluster_carries_full_content(self, engine):
+        seeded = _seed_long_nodes(engine, n=2, chars=600)
+        engine.settings.consolidation_cluster_threshold = 0.0
+        engine.settings.consolidation_min_cluster_size = 2
+
+        batches = engine.get_maintenance_batches()
+
+        clusters = batches["consolidation_clusters"]
+        assert clusters, "no consolidation cluster produced — the fixture is not exercising the batch"
+        checked = 0
+        for cluster in clusters:
+            for node in cluster:
+                if node["id"] in seeded:
+                    assert node["content"] == seeded[node["id"]]
+                    assert len(node["content"]) == 600
+                    checked += 1
+        assert checked >= 2, "seeded nodes never appeared in a cluster"
+
+    def test_norm_truncates_screening_batches(self, engine, monkeypatch):
+        """The over-fix guard: it must fail if _norm stops truncating screening.
+
+        It monkeypatches the finder because the real one already slices to 400 in
+        `_node_dict` (auto_linker.py:154), so asserting on its output would stay
+        green even with _norm's limit removed. Both council peers found that.
+        """
+        import ormah.background.auto_linker as auto_linker
+
+        long_node = {
+            "id": "n1",
+            "title": "long",
+            "type": "fact",
+            "space": "testproject",
+            "content": "y" * 600,
+        }
+        other = dict(long_node, id="n2")
+        monkeypatch.setattr(
+            auto_linker,
+            "_find_link_candidates",
+            lambda engine, limit: [{"node_a": long_node, "node_b": other, "similarity": 0.9}],
+        )
+
+        batches = engine.get_maintenance_batches()
+
+        assert batches["link_candidates"], "monkeypatched finder produced nothing"
+        for candidate in batches["link_candidates"]:
+            for node in (candidate["node_a"], candidate["node_b"]):
+                assert len(node["content"]) == 400, "screening batches must stay truncated"
+
+    def test_oversized_cluster_is_trimmed_in_the_batch(self, engine, monkeypatch):
+        """A cluster over budget reaches the batch as a prefix, contents intact."""
+        import json
+
+        import ormah.background.consolidator as consolidator
+
+        nodes = [
+            {
+                "id": f"n{i}",
+                "title": f"node {i}",
+                "type": "fact",
+                "space": "testproject",
+                "content": "z" * 6000,
+            }
+            for i in range(5)
+        ]
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda engine, limit: [nodes]
+        )
+        engine.settings.claude_maintenance_cluster_max_chars = 24000
+
+        batches = engine.get_maintenance_batches()
+
+        clusters = batches["consolidation_clusters"]
+        assert len(clusters) == 1, "a prefix is one cluster, never several"
+        kept = clusters[0]
+        assert [n["id"] for n in kept] == ["n0", "n1", "n2"], (
+            "three 6000-char nodes serialize to 18_258; a fourth reaches 24_344, over 24_000"
+        )
+        for node in kept:
+            assert len(node["content"]) == 6000, "trim must never slice a node"
+        assert len(json.dumps(kept, ensure_ascii=False)) <= 24000
+
+    def test_worst_case_cardinality_stays_bounded(self, engine, monkeypatch):
+        """Four max-size clusters of large nodes stay within `4 x budget`.
+
+        With one prefix per cluster the bound is exactly `n_clusters * budget` —
+        unlike v2's bin-packing, where the sub-cluster count was unbounded. Node
+        size is 6000 chars so the trim actually fires (3 of 5 survive), and
+        `assert clusters` keeps the test from passing by emitting nothing.
+        """
+        import json
+
+        import ormah.background.consolidator as consolidator
+
+        budget = engine.settings.claude_maintenance_cluster_max_chars
+        max_nodes = engine.settings.consolidation_max_cluster_nodes
+        big_clusters = [
+            [
+                {
+                    "id": f"c{c}n{i}",
+                    "title": f"node {c}-{i}",
+                    "type": "fact",
+                    "space": "testproject",
+                    "content": "w" * 6000,
+                }
+                for i in range(max_nodes)
+            ]
+            for c in range(4)
+        ]
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda engine, limit: big_clusters
+        )
+
+        batches = engine.get_maintenance_batches()
+
+        clusters = batches["consolidation_clusters"]
+        assert clusters, "the trim dropped everything — the fixture proves nothing"
+        assert len(clusters) == 4, "one prefix per cluster"
+        for sub in clusters:
+            assert len(json.dumps(sub, ensure_ascii=False)) <= budget
+
+        payload = json.dumps(clusters, ensure_ascii=False)
+        bound = 4 * budget + 4096
+        assert len(payload) <= bound, (
+            f"consolidation batch is unbounded: {len(payload)} chars, bound {bound}"
+        )
+
+    def test_consolidation_cluster_carries_type(self, engine):
+        seeded = _seed_long_nodes(engine, n=2, chars=600)
+        engine.settings.consolidation_cluster_threshold = 0.0
+        engine.settings.consolidation_min_cluster_size = 2
+
+        batches = engine.get_maintenance_batches()
+
+        clusters = batches["consolidation_clusters"]
+        assert clusters, "no consolidation cluster produced — the assertion below would never run"
+        checked = 0
+        for cluster in clusters:
+            for node in cluster:
+                if node["id"] in seeded:
+                    assert node["type"] == "fact"
+                    checked += 1
+        assert checked >= 2, "seeded nodes never appeared in a cluster"
