@@ -418,3 +418,132 @@ def test_cli_backup_status_explains_empty_memory_store(capsys):
     out = capsys.readouterr().out
     assert "Latest backup: none" in out
     assert "Backup due now: no (no memory nodes yet)" in out
+
+
+def test_restore_onto_existing_index_seeds_pre_fsrs_backup(tmp_path):
+    """#236, CLI path: a backup holding pre-FSRS Markdown (no last_review,
+    access_count > 0) is restored onto a memory dir whose index.db already
+    says 'migrated'. The next engine start must seed stability from
+    access_count instead of trusting the stale marker."""
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    memory_dir.mkdir()
+    (memory_dir / "nodes").mkdir()
+
+    # The backup: one pre-FSRS node, written straight to Markdown.
+    pre_fsrs = MemoryNode(
+        type=NodeType.fact,
+        title="Pre-FSRS",
+        content="Used five times before FSRS existed",
+        access_count=5,
+        stability=1.0,
+        last_review=None,
+    )
+    FileStore(memory_dir / "nodes").save(pre_fsrs)
+    service = _service(memory_dir, backup_dir)
+    backup = service.create(now=datetime(2026, 8, 25, 12, 0, 0, tzinfo=timezone.utc))
+
+    # The target: an engine that has already migrated a different graph.
+    for path in (memory_dir / "nodes").glob("*.md"):
+        path.unlink()
+    settings = Settings(memory_dir=memory_dir)
+    engine = MemoryEngine(settings)
+    engine.startup()
+    try:
+        row = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
+        ).fetchone()
+        assert row["value"] == "2"
+    finally:
+        engine.shutdown()
+
+    service.restore(backup.name)
+
+    engine = MemoryEngine(settings)
+    engine.startup()
+    try:
+        stability = engine.db.conn.execute(
+            "SELECT stability FROM nodes WHERE id = ?", (pre_fsrs.id,)
+        ).fetchone()["stability"]
+        assert stability == 10.0, "restore onto an existing index skipped the FSRS seed"
+        assert engine.file_store.load(pre_fsrs.id).stability == 10.0
+    finally:
+        engine.shutdown()
+
+
+def test_restore_withholds_the_version_while_a_file_cannot_be_indexed(tmp_path):
+    """Council round 3 (Cursor F1): the CLI restore path reaches the migration
+    through startup(), which never sees the builder's bookkeeping. If a version
+    were recorded over a partial graph, the node that only indexes on a later
+    pass would sit behind the early return forever.
+
+    The malformed file cannot be part of the backup itself: BackupService
+    refuses to create or restore a tree containing an unparseable node file
+    (backup.py:182), so the only reachable version of this scenario is a file
+    that becomes unindexable AFTER the restore, directly in the memory dir,
+    before the engine's first startup() ever sees it."""
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    memory_dir.mkdir()
+    (memory_dir / "nodes").mkdir()
+
+    pre_fsrs = MemoryNode(
+        type=NodeType.fact,
+        title="Pre-FSRS",
+        content="Used five times before FSRS existed",
+        access_count=5,
+        stability=1.0,
+        last_review=None,
+    )
+    FileStore(memory_dir / "nodes").save(pre_fsrs)
+    service = _service(memory_dir, backup_dir)
+    backup = service.create(now=datetime(2026, 8, 25, 13, 0, 0, tzinfo=timezone.utc))
+
+    for path in (memory_dir / "nodes").glob("*.md"):
+        path.unlink()
+    service.restore(backup.name)
+
+    # Only now, after the restore, does the tree become unindexable.
+    (memory_dir / "nodes" / "broken.md").write_text("not: [valid", encoding="utf-8")
+
+    settings = Settings(memory_dir=memory_dir)
+    engine = MemoryEngine(settings)
+    engine.startup()
+    try:
+        version = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
+        ).fetchone()
+        assert version is None, "a version was recorded while broken.md was unindexed"
+        stability = engine.db.conn.execute(
+            "SELECT stability FROM nodes WHERE id = ?", (pre_fsrs.id,)
+        ).fetchone()["stability"]
+        assert stability == 10.0, "the indexed node was not seeded"
+    finally:
+        engine.shutdown()
+
+    # Repair the file into a second pre-FSRS node; the next start completes.
+    repaired = MemoryNode(
+        type=NodeType.fact,
+        title="Repaired",
+        content="Also used five times",
+        access_count=5,
+        stability=1.0,
+        last_review=None,
+    )
+    (memory_dir / "nodes" / "broken.md").unlink()
+    FileStore(memory_dir / "nodes").save(repaired)
+
+    engine = MemoryEngine(settings)
+    engine.startup()
+    try:
+        engine.rebuild_index()
+        version = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
+        ).fetchone()
+        assert version["value"] == "2"
+        stability = engine.db.conn.execute(
+            "SELECT stability FROM nodes WHERE id = ?", (repaired.id,)
+        ).fetchone()["stability"]
+        assert stability == 10.0, "the repaired node was stranded"
+    finally:
+        engine.shutdown()

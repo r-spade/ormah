@@ -42,6 +42,7 @@ from ormah.models.node import (
     UpdateNodeRequest,
 )
 from ormah.store.file_store import FileStore
+from ormah.store.markdown import parse_node
 from ormah.text.tokens import STOP_WORDS
 
 logger = logging.getLogger(__name__)
@@ -168,12 +169,32 @@ class MemoryEngine:
 
     def _migrate_fsrs(self) -> None:
         """Seed FSRS stability once, and record the store's lifecycle-model version."""
+        # The seed runs on every call, gated by nothing (#236, council round 4,
+        # Codex high@0.98). A store-wide marker cannot decide a per-node
+        # question: a pre-FSRS node can arrive at any time — an external tool
+        # writes it into nodes/ and incremental_update indexes it — long after
+        # the store records the current version. Gating the seed on that marker
+        # stranded such a node at stability 1.0 forever. The per-node predicate
+        # inside the seed is what makes this cheap and safe: on a store with
+        # nothing to do it matches no rows, and a node it already seeded no
+        # longer qualifies.
+        self._seed_stability_from_access_count()
+
         version = self._lifecycle_model_version()
         if version >= LIFECYCLE_MODEL_VERSION:
             return
 
-        if version == 0:
-            self._seed_stability_from_access_count()
+        if not self._graph_is_fully_indexed():
+            # Recording a version over a partial graph is the one irreversible
+            # mistake here (council round 2, Codex F2; round 3, Cursor F1): a
+            # pre-FSRS node that lands on a later incremental pass would sit
+            # behind the early return above forever. Seeding what IS indexed is
+            # safe and idempotent, so keep it and simply withhold the marker.
+            logger.warning(
+                "Lifecycle migration ran on an incomplete graph; withholding the "
+                "version marker so the next start re-evaluates it."
+            )
+            return
 
         with self.db.transaction() as conn:
             conn.execute(
@@ -186,6 +207,61 @@ class MemoryEngine:
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
             )
+
+    def _graph_is_fully_indexed(self) -> bool:
+        """True when every Markdown node file has a row in the index.
+
+        full_rebuild logs and skips files it cannot hash, parse, or index, then
+        returns a partial count, so "the rebuild finished" does not mean "the
+        graph is whole". The check belongs here rather than on the caller: both
+        paths this issue is about — startup() (including the start that
+        follows a CLI BackupService.restore) and MemoryEngine.rebuild_index —
+        reach the migration without ever seeing the builder's bookkeeping.
+
+        Membership AND cardinality (#236, council rounds 4 and 5). Equal counts
+        do not establish that every file has its row: a file replaced externally
+        by a different node while the process was stopped leaves both sides at
+        the same count while the id sets diverge. Membership alone is not enough
+        either: a set discards multiplicity, so two files carrying the same id
+        collapse to one entry against SQLite's single row and would read as
+        complete (round 5, Codex high@0.99). Both checks are kept.
+
+        A file that fails to parse returns False before any comparison, and the
+        ordering is load-bearing. An unparseable file contributes no id, so it
+        would drop out of BOTH sets and a bare set equality would call such a
+        graph complete — the opposite of what this guard exists to say. Fail
+        closed on every edge: unreadable file, duplicate id, or sets unequal in
+        either direction.
+
+        list_paths() globs nodes/*.md only, and soft-deleted files are moved to
+        deleted/, so tombstones are absent from both sides of the comparison.
+        """
+        paths = self.file_store.list_paths()
+        on_disk: set[str] = set()
+        for path in paths:
+            try:
+                on_disk.add(parse_node(path.read_text(encoding="utf-8")).id)
+            except Exception:
+                logger.warning(
+                    "Lifecycle completeness check: cannot read %s; treating the "
+                    "graph as incomplete.",
+                    path,
+                )
+                return False
+
+        if len(on_disk) != len(paths):
+            logger.warning(
+                "Lifecycle completeness check: %d files carry only %d distinct "
+                "node ids; treating the graph as incomplete.",
+                len(paths),
+                len(on_disk),
+            )
+            return False
+
+        indexed = {
+            row["id"] for row in self.db.conn.execute("SELECT id FROM nodes").fetchall()
+        }
+        return on_disk == indexed
 
     def _lifecycle_model_version(self) -> int:
         """Read the store's lifecycle-model version, upgrading the legacy flag.
@@ -229,35 +305,85 @@ class MemoryEngine:
         return 1 if reviewed else 0
 
     def _seed_stability_from_access_count(self) -> None:
-        """Seed FSRS stability from access_count, updating both DB and markdown."""
-        rows = self.db.conn.execute(
-            "SELECT id, access_count, last_accessed FROM nodes"
-        ).fetchall()
+        """Seed FSRS stability from access_count, updating both DB and markdown.
 
+        Eligibility is per node, not per store (#236, council round 1). A node
+        qualifies only when it carries no evidence of its own lifecycle state:
+        no last_review, the default stability, and a real usage history. Any
+        other node — one Ormah reinforced, one seeded by an earlier run, one an
+        external tool wrote a real stability into — is left untouched in the DB
+        and on disk. Fail-closed, because the seed is destructive: skipping a
+        node leaves a default in place, seeding one destroys a real value.
+
+        The whole loop below runs inside one DB transaction, so a mid-loop
+        failure rolls back every row already written to the DB while the
+        Markdown files already saved stay rewritten — the two stores diverge.
+        The retry is correct anyway: the seed formula is deterministic and the
+        write idempotent, so reseeding a node the interrupted run had already
+        written reproduces the same value, and the DB and Markdown reconverge.
+        """
+        candidate_ids = [
+            r["id"]
+            for r in self.db.conn.execute(
+                "SELECT id FROM nodes "
+                "WHERE last_review IS NULL AND stability = 1.0 AND access_count > 0"
+            ).fetchall()
+        ]
+
+        seeded = 0
         with self.db.transaction() as conn:
-            for r in rows:
-                access_count = r["access_count"] or 0
-                stability = min(30.0, access_count * 2.0) if access_count > 0 else 1.0
-                last_review = r["last_accessed"]
+            for node_id in candidate_ids:
+                node = self.file_store.load(node_id)
+                if node is None:
+                    continue
 
-                # Update DB
+                # Compute strictly from the loaded node's own durable fields,
+                # never the SQLite row that made it a candidate (council-pr,
+                # round 1: Codex medium@0.97). The row only decides WHICH
+                # nodes are worth loading; using its access_count/last_accessed
+                # to compute the seeded VALUE reproduces whatever the index
+                # last saw, which can be older than disk -- an external tool
+                # can advance access_count on Markdown without the index (or
+                # this predicate's own stability=1.0/last_review=NULL shape)
+                # ever changing, so the row stays a "candidate" while it is
+                # already stale on the one input the formula actually uses.
+                stability = min(30.0, node.access_count * 2.0)
+                last_review_dt = node.last_accessed
+
+                # Re-check the predicate against the loaded node too (Codex
+                # high@0.99, Cursor high@0.90, converged independently).
+                # startup() with a non-empty index never refreshes it before
+                # _migrate_fsrs() runs, so the index can be stale relative to
+                # disk -- an external tool wrote a real stability into a node
+                # the index still shows as pre-FSRS. Writing unconditionally
+                # from the stale row would destroy that newer value on disk.
+                #
+                # A node this same seed already wrote in an earlier,
+                # interrupted attempt is not such a case: the formula is
+                # deterministic over the node's own fields, so its disk state
+                # already equals what this pass would produce again.
+                # Recognizing that keeps the resumability this method's
+                # docstring promises (Codex F3) -- a node the failed attempt
+                # had already (re)written still converges instead of being
+                # skipped as "someone else's value".
+                pre_fsrs = node.last_review is None and node.stability == 1.0
+                already_seeded = (
+                    node.stability == stability and node.last_review == last_review_dt
+                )
+                if not (pre_fsrs or already_seeded):
+                    continue
+
                 conn.execute(
                     "UPDATE nodes SET stability = ?, last_review = ? WHERE id = ?",
-                    (stability, last_review, r["id"]),
+                    (stability, last_review_dt.isoformat() if last_review_dt else None, node_id),
                 )
 
-                # Update markdown file
-                node = self.file_store.load(r["id"])
-                if node is not None:
-                    node.stability = stability
-                    if last_review:
-                        try:
-                            node.last_review = datetime.fromisoformat(last_review)
-                        except (ValueError, TypeError):
-                            pass
-                    self.file_store.save(node)
+                node.stability = stability
+                node.last_review = last_review_dt
+                self.file_store.save(node)
+                seeded += 1
 
-        logger.info("FSRS data migration complete: seeded %d nodes from access_count", len(rows))
+        logger.info("FSRS data migration: seeded %d eligible nodes from access_count", seeded)
 
     def _seed_initial_maintenance_grace_period(self) -> None:
         """Avoid firing agent-backed maintenance immediately on fresh installs."""
@@ -1319,10 +1445,20 @@ class MemoryEngine:
             f"ID: {node.id} | valid_until: {node.valid_until.isoformat()}"
         )
 
+    @_serialized_memory_operation
     def rebuild_index(self) -> int:
-        """Full rebuild of the index from markdown files, including embeddings."""
+        """Full rebuild of the index from markdown files, including embeddings.
+
+        full_rebuild wipes the lifecycle markers (#236), so the migration is
+        re-evaluated here; the seed's per-node predicate decides which restored
+        nodes are genuinely pre-FSRS, and _migrate_fsrs itself withholds the
+        version marker if the rebuild left the graph incomplete. Serialized
+        because the seed calls file_store inside db.transaction(); holding the
+        memory lock first keeps the memory -> db order used by reinforcement.
+        """
         count = self.builder.full_rebuild()
         self._reindex_all_embeddings()
+        self._migrate_fsrs()
         return count
 
     @_serialized_memory_operation
@@ -2039,10 +2175,12 @@ class MemoryEngine:
         opens db.transaction(), i.e. memory-lock -> db-lock. The inverse order
         (db-lock -> memory-lock, via file_store calls inside a transaction)
         exists in _seed_stability_from_access_count, _migrate_identity_tiers,
-        and _ensure_self_node, but all three run only from startup() before the
-        server serves, so the two orders never interleave today. Invariant this
-        depends on: never call file_store inside db.transaction() outside
-        startup().
+        and _ensure_self_node. They run from startup() before the server
+        serves, or — for the seed, via rebuild_index (#236) — under
+        _serialized_memory_operation, where the memory RLock is already held
+        and the order collapses to memory -> db. Invariant this depends on:
+        never call file_store inside db.transaction() outside startup() or a
+        _serialized_memory_operation.
         """
         node = self.file_store.load(node_id)
         if node is None:

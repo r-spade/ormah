@@ -33,7 +33,13 @@ class IndexBuilder:
 
         # Mass reindex re-allocates seq from the durable counter; clear the watermark so the
         # rebuilt store is reprocessed even if the counter was also reset (wiped meta).
-        self.db.conn.execute("DELETE FROM meta WHERE key = 'auto_link_watermark'")
+        # The lifecycle markers are derived state too (#236): index.db is excluded from
+        # backups, so a restore onto an existing index must re-evaluate the FSRS migration
+        # instead of trusting a marker written for the previous graph.
+        self.db.conn.execute(
+            "DELETE FROM meta WHERE key IN "
+            "('auto_link_watermark', 'fsrs_migrated', 'lifecycle_model_version')"
+        )
 
         # Two-pass: nodes first, then edges (to satisfy FK constraints)
         paths = list(self.file_store.list_paths())

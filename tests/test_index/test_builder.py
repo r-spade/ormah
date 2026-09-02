@@ -150,3 +150,34 @@ def test_builder_never_takes_file_lock_inside_write_transaction(engine):
     assert engine.builder.incremental_update() == (0, 0)
 
     assert not violations, f"FileStore lock acquired inside db.transaction(): {violations}"
+
+
+def test_full_rebuild_clears_lifecycle_keys(db, file_store):
+    """#236: the index is derived state, so a rebuild must invalidate the
+    lifecycle-migration markers the same way it already invalidates the
+    auto-link watermark. Otherwise a restore onto an existing index finds
+    'already migrated' and never seeds pre-FSRS nodes."""
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('lifecycle_model_version', '2')"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('auto_link_watermark', '7')"
+        )
+        # An unrelated key must survive: rebuild invalidates lifecycle state, not all of meta.
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_node_id', 'keep-me')"
+        )
+
+    IndexBuilder(db, file_store).full_rebuild()
+
+    keys = {
+        row["key"] for row in db.conn.execute("SELECT key FROM meta").fetchall()
+    }
+    assert "fsrs_migrated" not in keys
+    assert "lifecycle_model_version" not in keys
+    assert "auto_link_watermark" not in keys
+    assert "user_node_id" in keys
