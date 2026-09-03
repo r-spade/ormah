@@ -5,6 +5,7 @@ import {
   CHECKOUT_CONFIRMATION_MAX_CHECKS,
   checkoutConfirmationAfterCheck,
   checkoutConfirmationIsDelayed,
+  completeRecoveryKitImport,
   effectiveProtectionState,
   operationPhaseIsActive,
   protectionCompletionSummary,
@@ -370,6 +371,7 @@ function remote(overrides: Partial<RemoteSnapshot> = {}): RemoteSnapshot {
     size_bytes: 1238414,
     from_this_device: true,
     restore_tested_here: true,
+    reason_code: null,
     error: null,
     ...overrides,
   };
@@ -495,6 +497,35 @@ describe("protectionActions", () => {
     expect(actions.map((action) => action.kind)).toEqual(["protect", "restore"]);
   });
 
+  it("offers kit recovery before a fresh device can list an existing store", () => {
+    const actions = protectionActions(
+      true,
+      "local_only",
+      status({ protection_state: "local_only", enabled: false, store_id: null }),
+      remote({
+        snapshot_id: null,
+        created_at: null,
+        size_bytes: null,
+        reason_code: "key_missing",
+        error: "Cloud store id is missing; import a recovery kit first.",
+      }),
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(["protect", "recover"]);
+    expect(find(actions, "recover")?.label).toBe("Recover from a backup");
+  });
+
+  it("keeps Protect available for a genuinely new local-only account", () => {
+    const actions = protectionActions(
+      true,
+      "local_only",
+      status({ protection_state: "local_only", enabled: false, store_id: null }),
+      remote({ snapshot_id: null, created_at: null, size_bytes: null, reason_code: null }),
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(["protect"]);
+  });
+
   it("keeps backup visible and explained while cloud protection is offline", () => {
     const actions = protectionActions(
       true,
@@ -582,5 +613,39 @@ describe("recoveryKitSectionVisible", () => {
     }))).toBe(true);
     expect(recoveryKitSectionVisible(status({ enabled: false }))).toBe(false);
     expect(recoveryKitSectionVisible(null)).toBe(false);
+  });
+});
+
+describe("completeRecoveryKitImport", () => {
+  it("refreshes discovery before preparing restore after kit import", async () => {
+    const calls: string[] = [];
+
+    const result = await completeRecoveryKitImport(
+      async () => {
+        calls.push("import");
+        return { status: "imported" };
+      },
+      async () => { calls.push("refresh"); },
+      async () => { calls.push("prepare"); },
+    );
+
+    expect(result).toBe("imported");
+    expect(calls).toEqual(["import", "refresh", "prepare"]);
+  });
+
+  it("returns to the caller cleanly when choosing a kit is canceled", async () => {
+    const calls: string[] = [];
+
+    const result = await completeRecoveryKitImport(
+      async () => {
+        calls.push("import");
+        return { status: "canceled" };
+      },
+      async () => { calls.push("refresh"); },
+      async () => { calls.push("prepare"); },
+    );
+
+    expect(result).toBe("canceled");
+    expect(calls).toEqual(["import"]);
   });
 });

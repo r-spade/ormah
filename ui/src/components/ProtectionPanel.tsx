@@ -22,6 +22,7 @@ import {
   CHECKOUT_CONFIRMATION_INTERVAL_MS,
   checkoutConfirmationAfterCheck,
   checkoutConfirmationIsDelayed,
+  completeRecoveryKitImport,
   isDesktopApp,
   effectiveProtectionState,
   operationPhaseIsActive,
@@ -136,6 +137,7 @@ function operationLabel(
 const ACTION_ICONS: Record<ProtectionActionKind, JSX.Element> = {
   signin: <LogIn size={16} />,
   protect: <ShieldCheck size={16} />,
+  recover: <KeyRound size={16} />,
   backup: <RefreshCw size={15} />,
   restore: <CloudDownload size={15} />,
   verify: <ShieldCheck size={15} />,
@@ -197,6 +199,16 @@ function errorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
+export function RemoteListingExplanation({ remote }: { remote: RemoteSnapshot | null }) {
+  if (!remote?.error) return null;
+  return (
+    <div className="protection-remote-explanation" role="status">
+      <AlertTriangle size={15} />
+      <span>{remote.error}</span>
+    </div>
+  );
+}
+
 export default function ProtectionPanel({
   open,
   nodeCount = null,
@@ -252,11 +264,18 @@ export default function ProtectionPanel({
       setRefreshFailed(false);
       onStatusChange?.(nextStatus);
       setError(null);
-      // One listing call, and only for a store that has something in the
-      // cloud. A failure here costs the device-versus-cloud comparison, never
-      // the panel itself, so it is deliberately not awaited into the catch.
-      if (nextStatus.enabled || nextStatus.store_id) {
-        productBridge.remoteSnapshot().then(setRemote).catch(() => setRemote(null));
+      // A signed-in fresh device has no store identity yet. Asking for the
+      // listing is still essential: its safe typed reason tells us whether to
+      // offer recovery-kit import rather than accidentally creating a store.
+      // A listing failure never takes the panel down.
+      if (nextAccount.signed_in) {
+        try {
+          setRemote(await productBridge.remoteSnapshot());
+        } catch {
+          setRemote(null);
+        }
+      } else {
+        setRemote(null);
       }
       if (nextAccount.signed_in && !offerRequested.current) {
         offerRequested.current = true;
@@ -515,16 +534,23 @@ export default function ProtectionPanel({
     setBusy(true);
     setError(null);
     try {
-      const result = await productBridge.importRecoveryKit();
-      if (result.status === "canceled") return;
+      const result = await completeRecoveryKitImport(
+        productBridge.importRecoveryKit,
+        refresh,
+        startRestorePreparation,
+      );
+      if (result === "canceled") {
+        setOperation(null);
+        setView("summary");
+        return;
+      }
       onToast("Recovery kit imported on this device.", "success");
-      await startRestorePreparation();
     } catch (err) {
       setError(errorMessage(err, "The recovery kit could not be imported."));
     } finally {
       setBusy(false);
     }
-  }, [onToast, startRestorePreparation]);
+  }, [onToast, refresh, startRestorePreparation]);
 
   const confirmRestore = useCallback(async () => {
     if (!operation?.operation_id || operation.phase !== "ready") return;
@@ -820,6 +846,11 @@ export default function ProtectionPanel({
       case "protect":
         await beginProtection();
         return;
+      case "recover":
+        setOperation(null);
+        setError(null);
+        setView("restore_key");
+        return;
       case "backup":
       case "verify":
         await runOperation(kind);
@@ -933,6 +964,8 @@ export default function ProtectionPanel({
               <span>{error}</span>
             </div>
           )}
+
+          {view === "summary" && <RemoteListingExplanation remote={remote} />}
 
           <div className="sr-status" aria-live="polite">{summaryTitle}</div>
 
@@ -1118,8 +1151,12 @@ export default function ProtectionPanel({
                 {/* Not being able to read the listing is not the same as the
                     cloud being empty, and must never be shown as one. */}
                 <strong>{
-                  !remote || remote.error
-                    ? "unavailable"
+                  !remote
+                    ? "backup listing unavailable"
+                    : remote.error
+                      ? remote.reason_code === "key_missing"
+                        ? "recovery kit needed"
+                        : "backup listing unavailable"
                     : remote.created_at
                       ? `newest ${formatDate(remote.created_at)}`
                       : "no backup yet"

@@ -116,6 +116,25 @@ export type RecoveryKitActionResult =
     recovery_kit_verified_at: null;
   };
 
+export type RecoveryKitImportStatus = "imported" | "canceled";
+
+/**
+ * Importing a kit gives this device a store identity. Refresh discovery before
+ * starting restore preparation, because preparation itself must not be the
+ * first attempt to list that newly reachable store.
+ */
+export async function completeRecoveryKitImport(
+  importKit: () => Promise<{ status: RecoveryKitImportStatus }>,
+  refresh: () => Promise<void>,
+  prepareRestore: () => Promise<void>,
+): Promise<RecoveryKitImportStatus> {
+  const result = await importKit();
+  if (result.status === "canceled") return result.status;
+  await refresh();
+  await prepareRestore();
+  return result.status;
+}
+
 export function recoveryKitSectionVisible(
   status: ProtectionStatus | null | undefined,
 ): boolean {
@@ -284,7 +303,7 @@ export const productBridge = {
   cancelRestore: (preparationOperationId: string) =>
     native<{ status: "discarded" }>("cancel_restore", { preparationOperationId }),
   importRecoveryKit: () =>
-    native<{ status: "imported" | "canceled" }>("import_recovery_kit"),
+    native<{ status: RecoveryKitImportStatus }>("import_recovery_kit"),
   openCheckout: (intentId: string) =>
     native<BillingHandoff>("open_checkout", { intentId }),
   openPortal: () => native<{ opened: boolean }>("open_billing_portal"),
@@ -367,6 +386,8 @@ export interface RemoteSnapshot {
   from_this_device: boolean;
   /** Only this device's own checks count; it cannot vouch for another's. */
   restore_tested_here: boolean;
+  /** Stable, product-safe reason why the remote listing is unavailable. */
+  reason_code: string | null;
   error: string | null;
 }
 
@@ -388,6 +409,7 @@ export function verificationIsOverdue(
 export type ProtectionActionKind =
   | "signin"
   | "protect"
+  | "recover"
   | "backup"
   | "restore"
   | "verify"
@@ -405,6 +427,7 @@ export interface ProtectionAction {
 
 const BACKUP_LABEL = "Back up now";
 const RESTORE_LABEL = "Restore newest backup";
+const RECOVER_LABEL = "Recover from a backup";
 
 const REPAIR_LABELS: Record<Exclude<ProtectionRepairAction, "none">, string> = {
   verify: "Retry recovery check",
@@ -506,6 +529,18 @@ export function protectionActions(
       reason: "Brings the newest cloud backup onto this device.",
     }]
     : [];
+  // A fresh device cannot list an existing store until its recovery kit has
+  // supplied the store identity. This is deliberately keyed only by the
+  // stable protocol reason, never the explanatory message.
+  const recoverMissingStore: ProtectionAction[] = remote?.reason_code === "key_missing"
+    ? [{
+      kind: "recover",
+      label: RECOVER_LABEL,
+      variant: "secondary",
+      disabled: false,
+      reason: "Import the recovery kit from an existing protected memory before choosing a new one.",
+    }]
+    : [];
 
   switch (state) {
     case "local_only":
@@ -519,6 +554,7 @@ export function protectionActions(
           disabled: false,
           reason: null,
         },
+        ...recoverMissingStore,
         ...restoreOnly,
       ];
 

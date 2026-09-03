@@ -15,6 +15,7 @@ from ormah.api import routes_protection
 from ormah.api.local_auth import LOCAL_ADMIN_HEADER, require_loopback
 from ormah.cloud.operations import ProtectionOperationCoordinator
 from ormah.cloud.recovery import RecoveryKitError, RecoveryReadiness
+from ormah.cloud.restore import CloudRestoreError
 from ormah.cloud.state import (
     ProtectionOperation,
     ProtectionOperationKind,
@@ -627,6 +628,7 @@ def test_remote_reports_a_backup_made_by_another_device(protection_app, monkeypa
     assert payload["from_this_device"] is False
     # This device never checked that snapshot, so it cannot vouch for it.
     assert payload["restore_tested_here"] is False
+    assert payload["reason_code"] is None
     assert payload["error"] is None
 
 
@@ -654,6 +656,7 @@ def test_remote_recognises_this_devices_own_verified_upload(protection_app, monk
 
     assert payload["from_this_device"] is True
     assert payload["restore_tested_here"] is True
+    assert payload["reason_code"] is None
 
 
 def test_remote_degrades_without_taking_the_panel_down(protection_app, monkeypatch):
@@ -672,6 +675,7 @@ def test_remote_degrades_without_taking_the_panel_down(protection_app, monkeypat
     payload = response.json()
     assert payload["snapshot_id"] is None
     assert payload["from_this_device"] is False
+    assert payload["reason_code"] == "remote_listing_failed"
     assert payload["error"]
     assert "never-return-this-token" not in response.text
 
@@ -683,4 +687,26 @@ def test_remote_reports_an_empty_store_without_error(protection_app, monkeypatch
     payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
 
     assert payload["snapshot_id"] is None
+    assert payload["reason_code"] is None
     assert payload["error"] is None
+
+
+def test_remote_reports_missing_store_identity_with_a_typed_reason(protection_app, monkeypatch):
+    client, _, _, _ = protection_app
+
+    monkeypatch.setattr(
+        routes_protection,
+        "newest_cloud_snapshot",
+        lambda settings: (_ for _ in ()).throw(
+            CloudRestoreError(
+                "Cloud store id is missing; import a recovery kit first.",
+                "key_missing",
+            )
+        ),
+    )
+
+    payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
+
+    assert payload["snapshot_id"] is None
+    assert payload["reason_code"] == "key_missing"
+    assert payload["error"] == "Cloud store id is missing; import a recovery kit first."

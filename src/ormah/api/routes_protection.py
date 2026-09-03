@@ -189,6 +189,7 @@ def remote_snapshot(request: Request):
         "size_bytes": None,
         "from_this_device": False,
         "restore_tested_here": False,
+        "reason_code": None,
         "error": None,
     }
     try:
@@ -196,6 +197,7 @@ def remote_snapshot(request: Request):
     except CloudRestoreError as exc:
         return {
             **unavailable,
+            "reason_code": exc.reason_code,
             "error": safe_product_error_message(
                 str(exc), getattr(settings, "account_token", None)
             ),
@@ -203,6 +205,7 @@ def remote_snapshot(request: Request):
     except Exception as exc:
         return {
             **unavailable,
+            "reason_code": "remote_listing_failed",
             "error": safe_product_error_message(
                 f"Could not read cloud backups: {exc}",
                 getattr(settings, "account_token", None),
@@ -218,6 +221,7 @@ def remote_snapshot(request: Request):
         "from_this_device": snapshot_id == state.get("last_successful_backup_snapshot_id"),
         # A device can only vouch for a check it ran itself.
         "restore_tested_here": snapshot_id == state.get("last_verified_snapshot_id"),
+        "reason_code": None,
         "error": None,
     }
 
