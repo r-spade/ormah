@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,28 @@ MAX_RECOVERY_KIT_BYTES = 256 * 1024
 
 class CloudKeyError(RuntimeError):
     """Raised for key-file lifecycle failures."""
+
+
+@dataclass(frozen=True)
+class RecoveryImportPlan:
+    """A fully validated recovery import, ready to apply without conflicts."""
+
+    identity_strings: tuple[str, ...]
+    store_id: str | None
+    key_path: Path
+    memory_dir: Path
+    store_id_status: str
+    key_status: str
+
+
+@dataclass(frozen=True)
+class RecoveryImportResult:
+    """The independently observable outcomes of a recovery import."""
+
+    identity_strings: tuple[str, ...]
+    store_id: str | None
+    store_id_status: str
+    key_status: str
 
 
 def _atomic_write_0600(path: Path, text: str) -> None:
@@ -104,6 +127,31 @@ def init_key(key_path: Path | None = None) -> str:
     return identity_str
 
 
+def _read_import_source(source: str) -> str:
+    """Load a path-or-text import source exactly once."""
+    source_path = Path(source).expanduser()
+    try:
+        return source_path.read_text(encoding="utf-8") if source_path.is_file() else source
+    except OSError:
+        # Raw recovery-kit text can exceed the platform's maximum path length.
+        # `source` is documented to accept either form, so a failed path probe
+        # must fall back to parsing it as text.
+        return source
+
+
+def _identity_strings_from_text(text: str) -> list[str]:
+    strings = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("AGE-SECRET-KEY-")
+    ]
+    if not strings:
+        raise CloudKeyError("No age identities found in the provided key material.")
+    for string in strings:
+        identity_from_str(string)
+    return strings
+
+
 def import_key(source: str, key_path: Path | None = None) -> list[str]:
     """Install identities from a recovery kit or key file (fresh machine).
 
@@ -116,23 +164,7 @@ def import_key(source: str, key_path: Path | None = None) -> list[str]:
             f"A cloud key already exists at {key_path}; refusing to overwrite. "
             "Move it aside first if you really mean to replace it."
         )
-    source_path = Path(source).expanduser()
-    try:
-        text = source_path.read_text(encoding="utf-8") if source_path.is_file() else source
-    except OSError:
-        # Raw recovery-kit text can exceed the platform's maximum path length.
-        # `source` is documented to accept either form, so a failed path probe
-        # must fall back to parsing it as text.
-        text = source
-    strings = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip().startswith("AGE-SECRET-KEY-")
-    ]
-    if not strings:
-        raise CloudKeyError("No age identities found in the provided key material.")
-    for s in strings:  # validate before writing anything
-        identity_from_str(s)
+    strings = _identity_strings_from_text(_read_import_source(source))
     _atomic_write_0600(key_path, _serialize_key_file(strings, rotated=False))
     return strings
 
@@ -281,6 +313,122 @@ def install_store_id(memory_dir: Path, store_id: str) -> str:
     memory_dir.mkdir(parents=True, exist_ok=True)
     store_path.write_text(store_id + "\n", encoding="utf-8")
     return store_id
+
+
+def _existing_store_id(memory_dir: Path) -> str | None:
+    """Read and strictly validate the installed store id without changing it."""
+    store_path = memory_dir.expanduser() / STORE_ID_NAME
+    if not store_path.exists() and not store_path.is_symlink():
+        return None
+    if not store_path.is_file():
+        raise CloudKeyError(f"Cloud store id is not a readable file: {store_path}")
+    value = store_path.read_text(encoding="utf-8").strip()
+    try:
+        return _validate_store_id(value)
+    except CloudKeyError as exc:
+        raise CloudKeyError(f"Corrupt store id at {store_path}: {value!r}") from exc
+
+
+def plan_recovery_import(
+    source: str,
+    memory_dir: Path,
+    key_path: Path | None = None,
+) -> RecoveryImportPlan:
+    """Preflight a recovery-kit import before changing the key or store id.
+
+    The source is read and parsed once. Existing keyrings may retain identities
+    from rotation, but must already contain every identity carried by the kit.
+    """
+    key_path = (KEY_PATH if key_path is None else key_path).expanduser()
+    memory_dir = memory_dir.expanduser()
+    text = _read_import_source(source)
+    identity_strings = tuple(_identity_strings_from_text(text))
+    store_id = extract_store_id_from_text(text)
+
+    existing_store_id = _existing_store_id(memory_dir)
+    if store_id is not None and existing_store_id is not None and existing_store_id != store_id:
+        raise CloudKeyError(
+            f"This memory store already has store id {existing_store_id}, but the recovery "
+            f"kit carries {store_id}. Refusing to overwrite — restoring into a store that "
+            "belongs to a different remote namespace would orphan its backups. No files were "
+            "changed."
+        )
+
+    key_exists = key_path.exists() or key_path.is_symlink()
+    if key_exists and not key_path.is_file():
+        raise CloudKeyError(f"Cloud key is not a readable file: {key_path}. No files were changed.")
+    if key_exists:
+        existing_identities = load_identity_strings(key_path)
+        # Validate existing material as well; a malformed key must not be silently
+        # treated as a compatible keyring.
+        for identity in existing_identities:
+            identity_from_str(identity)
+        if any(identity not in existing_identities for identity in identity_strings):
+            raise CloudKeyError(
+                "The recovery kit contains an identity that is not present in the existing "
+                "cloud key. Refusing to merge or replace key material implicitly. No files "
+                "were changed."
+            )
+        key_status = "already_matched"
+    else:
+        key_status = "installed"
+
+    if store_id is None and existing_store_id is None:
+        # Bare key material is still supported. Generate its namespace during
+        # preflight so the subsequent store/key writes have the same conflict
+        # guarantees as a full recovery kit.
+        store_id = str(uuid.uuid4())
+        store_id_status = "generated"
+    elif store_id is None:
+        store_id = existing_store_id
+        store_id_status = "already_present"
+    else:
+        store_id_status = "already_matched" if existing_store_id is not None else "installed"
+
+    return RecoveryImportPlan(
+        identity_strings=identity_strings,
+        store_id=store_id,
+        key_path=key_path,
+        memory_dir=memory_dir,
+        store_id_status=store_id_status,
+        key_status=key_status,
+    )
+
+
+def apply_recovery_import(plan: RecoveryImportPlan) -> RecoveryImportResult:
+    """Apply a preflighted import and report each resource's actual outcome."""
+    if plan.store_id_status in {"installed", "generated"}:
+        try:
+            install_store_id(plan.memory_dir, plan.store_id or "")
+        except (CloudKeyError, OSError) as exc:
+            raise CloudKeyError(
+                "Recovery import failed before installing either resource. "
+                f"Store ID: not installed; recovery key: not installed. {exc}"
+            ) from exc
+
+    if plan.key_status == "installed":
+        try:
+            _atomic_write_0600(
+                plan.key_path,
+                _serialize_key_file(list(plan.identity_strings), rotated=False),
+            )
+        except OSError as exc:
+            store_outcome = {
+                "installed": "installed",
+                "generated": "generated",
+                "already_matched": "already matched",
+            }.get(plan.store_id_status, "not installed")
+            raise CloudKeyError(
+                "Recovery import partially completed. "
+                f"Store ID: {store_outcome}; recovery key: not installed. {exc}"
+            ) from exc
+
+    return RecoveryImportResult(
+        identity_strings=plan.identity_strings,
+        store_id=plan.store_id,
+        store_id_status=plan.store_id_status,
+        key_status=plan.key_status,
+    )
 
 
 # --- Recovery kit ---
