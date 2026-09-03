@@ -834,9 +834,14 @@ def main():
     # --- uninstall ---
     uninstall_p = sub.add_parser(
         "uninstall",
-        help="Remove integrations and local data; preserve cloud recovery files",
+        help="Remove backend and known desktop artifacts; preserve cloud recovery files",
     )
-    uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
+    uninstall_p.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Skip prompts and remove all known user-owned desktop artifacts",
+    )
     uninstall_p.set_defaults(func=_cmd_uninstall)
 
     # --- claude-md ---

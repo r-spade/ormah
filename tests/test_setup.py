@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import stat
 import subprocess
 from contextlib import ExitStack
@@ -2900,6 +2901,68 @@ class TestRunUninstall:
     def _patch_all(self, mock_uninstall_autostart, mock_hooks, mock_mcp, mock_md, mock_rmtree, mock_run):
         """Shared patcher helper — not used directly, see individual tests."""
 
+    def _safe_uninstall_operations(self):
+        """Suppress unrelated integrations while exercising real temp-path cleanup."""
+        stack = ExitStack()
+        for target in (
+            "ormah.server_manager.uninstall_autostart",
+            "ormah.setup._remove_claude_hooks",
+            "ormah.setup._remove_codex_hooks",
+            "ormah.setup._remove_mcp_registration",
+            "ormah.setup._remove_pi_extension",
+            "ormah.setup._remove_claude_md_block",
+            "ormah.setup._remove_codex_md_block",
+            "ormah.setup._remove_codex_agents",
+            "ormah.setup._remove_claude_agents",
+            "ormah.setup._remove_claude_commands",
+            "ormah.setup._remove_pi_md_block",
+            "ormah.setup._remove_pi_agents",
+            "ormah.setup._remove_fastembed_cache",
+        ):
+            stack.enter_context(patch(target))
+        return stack
+
+    @staticmethod
+    def _make_macos_desktop(home: Path, applications: Path) -> tuple[Path, Path, Path, Path]:
+        app = applications / "Ormah.app"
+        info = app / "Contents" / "Info.plist"
+        info.parent.mkdir(parents=True)
+        info.write_bytes(
+            plistlib.dumps(
+                {
+                    "CFBundleIdentifier": "dev.ormah.desktop",
+                    "CFBundleName": "Ormah",
+                }
+            )
+        )
+        support = home / "Library" / "Application Support" / "dev.ormah.desktop"
+        webkit = home / "Library" / "WebKit" / "dev.ormah.desktop"
+        support.mkdir(parents=True)
+        webkit.mkdir(parents=True)
+        launch_agent = home / "Library" / "LaunchAgents" / "dev.ormah.desktop.plist"
+        launch_agent.parent.mkdir(parents=True)
+        launch_agent.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": "dev.ormah.desktop",
+                    "ProgramArguments": [str(app / "Contents" / "MacOS" / "ormah-desktop")],
+                }
+            )
+        )
+        return app, support, webkit, launch_agent
+
+    @staticmethod
+    def _desktop_run(calls: list[list[str]], *, launchctl_returncode: int = 0, ps_output: str = ""):
+        def fake_run(args, **_kwargs):
+            calls.append(args)
+            if args[0] == "launchctl":
+                return MagicMock(returncode=launchctl_returncode, stdout="", stderr="launch failed")
+            if args[0] == "ps":
+                return MagicMock(returncode=0, stdout=ps_output, stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return fake_run
+
     def test_cancels_on_first_no(self, monkeypatch, capsys):
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
@@ -2942,6 +3005,208 @@ class TestRunUninstall:
 
         captured = capsys.readouterr()
         assert "uninstalled" in captured.out.lower()
+
+    def test_full_yes_removes_only_validated_macos_desktop_artifacts_before_uv(
+        self, tmp_path, capsys
+    ):
+        applications = tmp_path / "system-applications"
+        app, support, webkit, launch_agent = self._make_macos_desktop(tmp_path, applications)
+        unrelated = tmp_path / "Library" / "Application Support" / "not-ormah"
+        unrelated.mkdir(parents=True)
+        calls: list[list[str]] = []
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR", applications),
+            patch("ormah.setup.subprocess.run", side_effect=self._desktop_run(calls)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not app.exists()
+        assert not support.exists()
+        assert not webkit.exists()
+        assert not launch_agent.exists()
+        assert unrelated.exists()
+        launch_index = next(i for i, command in enumerate(calls) if command[0] == "launchctl")
+        uv_index = next(i for i, command in enumerate(calls) if command[:3] == ["uv", "tool", "uninstall"])
+        assert launch_index < uv_index
+        assert "completely uninstalled" in capsys.readouterr().out.lower()
+
+    def test_desktop_launchagent_failure_never_claims_complete_uninstall(self, tmp_path, capsys):
+        applications = tmp_path / "system-applications"
+        _, _, _, launch_agent = self._make_macos_desktop(tmp_path, applications)
+        calls: list[list[str]] = []
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR", applications),
+            patch(
+                "ormah.setup.subprocess.run",
+                side_effect=self._desktop_run(calls, launchctl_returncode=1),
+            ),
+            patch("ormah.setup.Path.unlink", side_effect=PermissionError("permission denied")),
+        ):
+            run_uninstall(yes=True)
+
+        assert launch_agent.exists()
+        output = capsys.readouterr().out
+        assert str(launch_agent) in output
+        assert "not been fully uninstalled" in output
+        assert any(command[:3] == ["uv", "tool", "uninstall"] for command in calls)
+
+    def test_desktop_symlink_and_unexpected_data_fail_closed(self, tmp_path, capsys):
+        applications = tmp_path / "system-applications"
+        target = tmp_path / "someone-elses-app"
+        target.mkdir()
+        app = applications / "Ormah.app"
+        app.parent.mkdir(parents=True)
+        app.symlink_to(target, target_is_directory=True)
+        unsafe_data = tmp_path / "Library" / "WebKit" / "dev.ormah.desktop"
+        unsafe_data.parent.mkdir(parents=True)
+        unsafe_data.write_text("not a Tauri data directory")
+        calls: list[list[str]] = []
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR", applications),
+            patch("ormah.setup.subprocess.run", side_effect=self._desktop_run(calls)),
+        ):
+            run_uninstall(yes=True)
+
+        assert app.is_symlink()
+        assert unsafe_data.is_file()
+        output = capsys.readouterr().out
+        assert str(app) in output
+        assert str(unsafe_data) in output
+        assert "not been fully uninstalled" in output
+
+    def test_interactive_desktop_decline_keeps_app_but_disables_autostart(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        applications = tmp_path / "system-applications"
+        app, support, webkit, launch_agent = self._make_macos_desktop(tmp_path, applications)
+        calls: list[list[str]] = []
+        answers = iter(["y", "yes", "n"])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR", applications),
+            patch("ormah.setup.subprocess.run", side_effect=self._desktop_run(calls)),
+        ):
+            run_uninstall()
+
+        assert app.exists()
+        assert support.exists()
+        assert webkit.exists()
+        assert not launch_agent.exists()
+        output = capsys.readouterr().out.lower()
+        assert "kept by request" in output
+        assert "not been fully uninstalled" in output
+
+    def test_yes_is_noninteractive_and_includes_known_desktop_artifacts(
+        self, tmp_path, monkeypatch
+    ):
+        applications = tmp_path / "system-applications"
+        app, support, webkit, launch_agent = self._make_macos_desktop(tmp_path, applications)
+        calls: list[list[str]] = []
+        monkeypatch.setattr("builtins.input", lambda _: pytest.fail("--yes must not prompt"))
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR", applications),
+            patch("ormah.setup.subprocess.run", side_effect=self._desktop_run(calls)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not any(path.exists() for path in (app, support, webkit, launch_agent))
+
+    def test_permission_failure_reports_exact_remaining_desktop_app(self, tmp_path, capsys):
+        applications = tmp_path / "system-applications"
+        app, _, _, _ = self._make_macos_desktop(tmp_path, applications)
+        calls: list[list[str]] = []
+        real_rmtree = __import__("shutil").rmtree
+
+        def deny_app(path, *args, **kwargs):
+            if Path(path) == app:
+                raise PermissionError("permission denied")
+            return real_rmtree(path, *args, **kwargs)
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR", applications),
+            patch("ormah.setup.subprocess.run", side_effect=self._desktop_run(calls)),
+            patch("ormah.setup.shutil.rmtree", side_effect=deny_app),
+        ):
+            run_uninstall(yes=True)
+
+        assert app.exists()
+        output = capsys.readouterr().out
+        assert str(app) in output
+        assert "not been fully uninstalled" in output
+
+    def test_running_desktop_that_will_not_quit_is_left_in_place(self, tmp_path, capsys):
+        applications = tmp_path / "system-applications"
+        app, support, webkit, _ = self._make_macos_desktop(tmp_path, applications)
+        executable = app / "Contents" / "MacOS" / "ormah-desktop"
+        calls: list[list[str]] = []
+        ps_output = f"123 {executable}\n"
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR", applications),
+            patch(
+                "ormah.setup.subprocess.run",
+                side_effect=self._desktop_run(calls, ps_output=ps_output),
+            ),
+        ):
+            run_uninstall(yes=True)
+
+        assert app.exists()
+        assert support.exists()
+        assert webkit.exists()
+        assert any(command[0] == "osascript" for command in calls)
+        assert "still running" in capsys.readouterr().out.lower()
+
+    def test_linux_removes_only_the_appimage_integration_and_reports_dpkg_owner(
+        self, tmp_path, capsys
+    ):
+        entry = tmp_path / ".local" / "share" / "applications" / "ormah.desktop"
+        entry.parent.mkdir(parents=True)
+        entry.write_text(
+            "[Desktop Entry]\nName=Ormah\nExec=\"/tmp/Ormah.AppImage\"\n"
+            "Icon=ormah-desktop\nStartupWMClass=ormah-desktop\n"
+        )
+        icon = tmp_path / ".local" / "share" / "icons" / "hicolor" / "128x128" / "apps" / "ormah-desktop.png"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"icon")
+        calls: list[list[str]] = []
+
+        def linux_run(args, **_kwargs):
+            calls.append(args)
+            if args[0] == "dpkg-query":
+                return MagicMock(returncode=0, stdout="ormah-desktop: /usr/bin/ormah-desktop\n")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Linux"),
+            patch("ormah.setup.subprocess.run", side_effect=linux_run),
+        ):
+            run_uninstall(yes=True)
+
+        assert not entry.exists()
+        assert not icon.exists()
+        output = capsys.readouterr().out
+        assert "sudo apt remove ormah-desktop" in output
+        assert "not been fully uninstalled" in output
 
     def test_deletes_data_directories(self, tmp_path, capsys):
         share_dir = tmp_path / ".local" / "share" / "ormah"
@@ -3016,9 +3281,13 @@ class TestRunUninstall:
         key_content = key_path.read_text()
         kit_content = kit_path.read_text()
         (config_dir / ".env").write_text("ORMAH_ACCOUNT_TOKEN=secret\n")
+        applications = tmp_path / "system-applications"
+        app, support, webkit, launch_agent = self._make_macos_desktop(tmp_path, applications)
 
         with (
             patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR", applications),
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
@@ -3045,6 +3314,7 @@ class TestRunUninstall:
             "cloud.key",
             "ormah-recovery-kit.md",
         }
+        assert not any(path.exists() for path in (app, support, webkit, launch_agent))
         output = capsys.readouterr().out.lower()
         assert "preserved cloud recovery material" in output
         assert "permanently unreadable" in output

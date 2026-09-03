@@ -6,6 +6,8 @@ import contextlib
 import glob
 import json
 import os
+import platform
+import plistlib
 import re
 import shlex
 import shutil
@@ -67,6 +69,13 @@ def _find_binary(name: str) -> str | None:
 ENV_PATH = ENV_DIR / ".env"
 WRAPPER_PATH = ENV_DIR / "ormah-server"
 CLOUD_RECOVERY_FILENAMES = frozenset({"cloud.key", "ormah-recovery-kit.md"})
+
+# These values are part of the Tauri bundle configuration.  Keep desktop
+# removal deliberately narrow: all paths below are exact leaf targets, never
+# parents that might contain another application's data.
+DESKTOP_BUNDLE_IDENTIFIER = "dev.ormah.desktop"
+DESKTOP_PRODUCT_NAME = "Ormah"
+MACOS_SYSTEM_APPLICATIONS_DIR = Path("/Applications")
 
 CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
@@ -2129,12 +2138,341 @@ def _remove_config_preserving_cloud_recovery(config_dir: Path) -> tuple[Path, ..
     return preserved
 
 
+@dataclass
+class DesktopUninstallState:
+    """Known desktop artifacts and truthful cleanup outcomes for one uninstall."""
+
+    app_bundles: list[Path] = field(default_factory=list)
+    data_dirs: list[Path] = field(default_factory=list)
+    launch_agent: Path | None = None
+    linux_appimage_files: list[Path] = field(default_factory=list)
+    package_removal_command: str | None = None
+    remaining: list[str] = field(default_factory=list)
+    autostart_removed: bool = True
+    process_stopped: bool = True
+
+    @property
+    def detected(self) -> bool:
+        return bool(
+            self.app_bundles
+            or self.data_dirs
+            or self.launch_agent
+            or self.linux_appimage_files
+            or self.package_removal_command
+            or self.remaining
+        )
+
+    @property
+    def removable_artifacts(self) -> list[Path]:
+        return self.app_bundles + self.data_dirs + self.linux_appimage_files
+
+
+def _is_safe_exact_directory(path: Path) -> bool:
+    """True only for a real directory at one already-known exact path."""
+    return path.is_dir() and not path.is_symlink()
+
+
+def _is_valid_ormah_app_bundle(path: Path) -> bool:
+    """Validate an exact macOS bundle before treating it as ours.
+
+    A directory named ``Ormah.app`` is not sufficient evidence.  In particular,
+    do not follow a bundle symlink or remove a hand-created directory that merely
+    has the same name.
+    """
+    if not _is_safe_exact_directory(path) or path.name != "Ormah.app":
+        return False
+    info_plist = path / "Contents" / "Info.plist"
+    if info_plist.is_symlink() or not info_plist.is_file():
+        return False
+    try:
+        info_data = plistlib.loads(info_plist.read_bytes())
+    except (OSError, plistlib.InvalidFileException):
+        return False
+    return (
+        isinstance(info_data, dict)
+        and info_data.get("CFBundleIdentifier") == DESKTOP_BUNDLE_IDENTIFIER
+        and info_data.get("CFBundleName", DESKTOP_PRODUCT_NAME) == DESKTOP_PRODUCT_NAME
+    )
+
+
+def _macos_desktop_paths(home: Path) -> tuple[list[Path], list[Path], Path]:
+    """Return exact Tauri-owned macOS locations, without probing parents."""
+    apps = [MACOS_SYSTEM_APPLICATIONS_DIR / "Ormah.app", home / "Applications" / "Ormah.app"]
+    data = [
+        home / "Library" / "Application Support" / DESKTOP_BUNDLE_IDENTIFIER,
+        home / "Library" / "WebKit" / DESKTOP_BUNDLE_IDENTIFIER,
+    ]
+    launch_agent = home / "Library" / "LaunchAgents" / f"{DESKTOP_BUNDLE_IDENTIFIER}.plist"
+    return apps, data, launch_agent
+
+
+def _is_valid_macos_desktop_data_dir(path: Path) -> bool:
+    """Validate an exact per-bundle Tauri data directory without following links."""
+    _, candidates, _ = _macos_desktop_paths(Path.home())
+    return path in candidates and _is_safe_exact_directory(path)
+
+
+def _is_valid_ormah_launch_agent(path: Path, app_bundles: list[Path]) -> bool:
+    """Validate the exact Tauri LaunchAgent rather than deleting by filename."""
+    if path.is_symlink() or not path.is_file() or path.name != f"{DESKTOP_BUNDLE_IDENTIFIER}.plist":
+        return False
+    try:
+        data = plistlib.loads(path.read_bytes())
+    except (OSError, plistlib.InvalidFileException):
+        return False
+    if not isinstance(data, dict) or data.get("Label") != DESKTOP_BUNDLE_IDENTIFIER:
+        return False
+    arguments = data.get("ProgramArguments")
+    if not isinstance(arguments, list) or not arguments or not isinstance(arguments[0], str):
+        return False
+    executable = Path(arguments[0])
+    # The entry remains safely recognizable even if the bundle was manually
+    # deleted first.  Do not resolve paths: resolving could follow a symlink.
+    expected_prefixes = [bundle / "Contents" / "MacOS" for bundle in app_bundles]
+    return any(
+        executable.parent == prefix and executable.name == "ormah-desktop"
+        for prefix in expected_prefixes
+    )
+
+
+def _is_valid_appimage_desktop_entry(path: Path) -> bool:
+    """Recognize only the exact entry written by desktop/src-tauri/src/lib.rs."""
+    if path.is_symlink() or not path.is_file() or path.name != "ormah.desktop":
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return all(
+        marker in text
+        for marker in (
+            "[Desktop Entry]",
+            "Name=Ormah",
+            "Icon=ormah-desktop",
+            "StartupWMClass=ormah-desktop",
+        )
+    ) and any(line.startswith("Exec=") for line in text.splitlines())
+
+
+def _is_valid_appimage_icon(path: Path) -> bool:
+    """Validate one of the two exact icon paths written by AppImage integration."""
+    home = Path.home()
+    expected = {
+        home / ".local" / "share" / "icons" / "hicolor" / size / "apps" / "ormah-desktop.png"
+        for size in ("128x128", "256x256")
+    }
+    return path in expected and path.is_file() and not path.is_symlink()
+
+
+def _linux_debian_removal_command() -> str | None:
+    """Return a package-manager command only when dpkg proves ownership.
+
+    The .deb does not have a user-owned, stable install directory.  Asking dpkg
+    about its executable lets us report the actual package name instead of
+    guessing one or attempting an unsafe package removal ourselves.
+    """
+    try:
+        result = subprocess.run(
+            ["dpkg-query", "-S", "/usr/bin/ormah-desktop"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:  # noqa: BLE001 - discovery must not block uninstall
+        return None
+    output = result.stdout if isinstance(result.stdout, str) else ""
+    if not isinstance(result.returncode, int) or result.returncode != 0 or ":" not in output:
+        return None
+    package = output.split(":", 1)[0].strip()
+    if not re.fullmatch(r"[A-Za-z0-9.+-]+", package):
+        return None
+    return f"sudo apt remove {package}"
+
+
+def _inspect_desktop_installation(system: str | None = None) -> DesktopUninstallState:
+    """Find only desktop artifacts with positive Ormah ownership evidence."""
+    system = system or platform.system()
+    home = Path.home()
+    state = DesktopUninstallState()
+    if system == "Darwin":
+        app_candidates, data_candidates, launch_agent = _macos_desktop_paths(home)
+        state.app_bundles = [path for path in app_candidates if _is_valid_ormah_app_bundle(path)]
+        state.remaining.extend(
+            str(path)
+            for path in app_candidates
+            if (path.exists() or path.is_symlink()) and path not in state.app_bundles
+        )
+        # Tauri namespaces these directories by its bundle identifier.  Exact
+        # paths plus no symlink is sufficient; unlike an app bundle, they do not
+        # carry an embedded identifier to inspect.
+        state.data_dirs = [path for path in data_candidates if _is_safe_exact_directory(path)]
+        state.remaining.extend(
+            str(path)
+            for path in data_candidates
+            if (path.exists() or path.is_symlink()) and path not in state.data_dirs
+        )
+        if _is_valid_ormah_launch_agent(launch_agent, app_candidates):
+            state.launch_agent = launch_agent
+        elif launch_agent.exists() or launch_agent.is_symlink():
+            state.remaining.append(str(launch_agent))
+    elif system == "Linux":
+        entry = home / ".local" / "share" / "applications" / "ormah.desktop"
+        if _is_valid_appimage_desktop_entry(entry):
+            state.linux_appimage_files.append(entry)
+            for size in ("128x128", "256x256"):
+                icon = home / ".local" / "share" / "icons" / "hicolor" / size / "apps" / "ormah-desktop.png"
+                if _is_valid_appimage_icon(icon):
+                    state.linux_appimage_files.append(icon)
+        elif entry.exists() or entry.is_symlink():
+            state.remaining.append(str(entry))
+        state.package_removal_command = _linux_debian_removal_command()
+    return state
+
+
+def _remove_desktop_launch_agent(state: DesktopUninstallState) -> None:
+    """Unload and remove the validated desktop LaunchAgent before Python cleanup."""
+    if state.launch_agent is None:
+        return
+    try:
+        result = subprocess.run(
+            ["launchctl", "bootout", f"gui/{os.getuid()}", str(state.launch_agent)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        returncode = result.returncode
+        if isinstance(returncode, int) and returncode != 0:
+            detail = result.stderr.strip() if isinstance(result.stderr, str) else ""
+            warn(f"Could not unload desktop LaunchAgent {state.launch_agent}: {detail or f'exit {returncode}'}")
+        # Revalidate immediately before deleting: a replacement plist must not
+        # be removed merely because the earlier inspection found an Ormah one.
+        apps, _, _ = _macos_desktop_paths(Path.home())
+        if not _is_valid_ormah_launch_agent(state.launch_agent, apps):
+            warn(f"Refusing to remove changed desktop LaunchAgent: {state.launch_agent}")
+            state.autostart_removed = False
+            state.remaining.append(str(state.launch_agent))
+            return
+        state.launch_agent.unlink()
+        ok(f"Removed desktop LaunchAgent: {state.launch_agent}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        warn(f"Could not remove desktop LaunchAgent {state.launch_agent}: {exc}")
+        state.autostart_removed = False
+        state.remaining.append(str(state.launch_agent))
+
+
+def _find_running_macos_desktop_processes(app_bundles: list[Path]) -> list[int]:
+    """Find the app only by an exact, validated bundle executable path."""
+    expected_prefixes = {str(bundle / "Contents" / "MacOS") + os.sep for bundle in app_bundles}
+    if not expected_prefixes:
+        return []
+    try:
+        result = subprocess.run(
+            ["ps", "-x", "-o", "pid=,command="], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    output = result.stdout if isinstance(result.stdout, str) else ""
+    pids: list[int] = []
+    for line in output.splitlines():
+        pid_text, _, command = line.strip().partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        executable = command.strip().split(" ", 1)[0]
+        if any(executable.startswith(prefix) for prefix in expected_prefixes):
+            pids.append(pid)
+    return pids
+
+
+def _stop_running_macos_desktop(state: DesktopUninstallState) -> None:
+    """Ask the identified app to quit; never use broad process-name killing."""
+    pids = _find_running_macos_desktop_processes(state.app_bundles)
+    if not pids:
+        return
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", f'tell application id "{DESKTOP_BUNDLE_IDENTIFIER}" to quit'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if isinstance(result.returncode, int) and result.returncode != 0:
+            detail = result.stderr.strip() if isinstance(result.stderr, str) else ""
+            warn(f"Could not ask Ormah Desktop to quit: {detail or f'exit {result.returncode}'}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        warn(f"Could not ask Ormah Desktop to quit: {exc}")
+    if _find_running_macos_desktop_processes(state.app_bundles):
+        state.process_stopped = False
+        for bundle in state.app_bundles:
+            if str(bundle) not in state.remaining:
+                state.remaining.append(str(bundle))
+        warn("Ormah Desktop is still running; quit it, then remove the remaining desktop artifacts.")
+
+
+def _remove_selected_desktop_artifacts(state: DesktopUninstallState, system: str) -> None:
+    """Delete exact validated desktop targets after autostart/process handling."""
+    if system == "Darwin" and not state.process_stopped:
+        return
+    for path in state.removable_artifacts:
+        valid = (
+            _is_valid_ormah_app_bundle(path)
+            if path.suffix == ".app"
+            else _is_valid_macos_desktop_data_dir(path)
+            if system == "Darwin" and (path.is_dir() or path.is_symlink())
+            else _is_valid_appimage_desktop_entry(path)
+            if path.name == "ormah.desktop"
+            else _is_valid_appimage_icon(path)
+        )
+        if not valid:
+            warn(f"Refusing to delete unexpected desktop artifact: {path}")
+            state.remaining.append(str(path))
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            ok(f"Deleted desktop artifact: {path}")
+        except OSError as exc:
+            warn(f"Could not delete desktop artifact {path}: {exc}")
+            state.remaining.append(str(path))
+
+
+def _print_desktop_uninstall_summary(state: DesktopUninstallState, desktop_selected: bool) -> bool:
+    """Report desktop status and return whether a truthful full removal occurred."""
+    remaining = list(dict.fromkeys(state.remaining))
+    if state.package_removal_command:
+        warn(f"Debian-owned Ormah Desktop remains; remove it with: {state.package_removal_command}")
+        remaining.append(state.package_removal_command)
+    if state.detected and not desktop_selected:
+        for path in state.removable_artifacts:
+            remaining.append(str(path))
+        warn("Desktop app and local UI data were kept by request; its autostart was disabled.")
+    if remaining:
+        warn("Backend removal completed, but these desktop artifacts remain:")
+        for item in dict.fromkeys(remaining):
+            warn(f"  {item}")
+        return False
+    return True
+
+
 def run_uninstall(yes: bool = False) -> None:
     """Remove Ormah while preserving zero-knowledge cloud recovery material."""
+    system = platform.system()
+    desktop = _inspect_desktop_installation(system)
     print(
         "This will remove Ormah integrations, local memory, caches, and account "
         "configuration. Cloud recovery files are preserved.\n"
     )
+
+    if desktop.detected:
+        info("Ormah Desktop artifacts were detected.")
+        if system == "Darwin":
+            info("Its login LaunchAgent will be disabled so it cannot reinstall the backend.")
+        elif desktop.package_removal_command:
+            info(f"The Debian package is package-managed and must be removed separately: {desktop.package_removal_command}")
+        print()
 
     config_dir = Path.home() / ".config" / "ormah"
     recovery_paths = _cloud_recovery_paths(config_dir)
@@ -2164,6 +2502,19 @@ def run_uninstall(yes: bool = False) -> None:
         if confirm != "yes":
             info("Uninstall cancelled")
             return
+
+    # --yes is deliberately a full uninstall request: remove every known,
+    # positively identified user-owned desktop artifact.  Interactive callers
+    # retain the existing top-level confirmation, then make this narrower choice.
+    desktop_selected = yes
+    if not yes and desktop.removable_artifacts:
+        try:
+            answer = input(
+                "Remove the Ormah Desktop app and its local UI/WebKit data? (Y/n) "
+            ).strip().lower()
+        except EOFError:
+            answer = ""
+        desktop_selected = answer not in ("n", "no")
 
     print()
 
@@ -2196,28 +2547,42 @@ def run_uninstall(yes: bool = False) -> None:
         else:
             ok("Cloud recovery material is complete and verified")
 
-    # a. Stop daemon
+    # a. Disable the desktop login item before uninstalling Python.  The desktop
+    # app installs its pinned runtime when launched, so this must happen first.
+    if system == "Darwin":
+        step("Disabling Ormah Desktop autostart")
+        _remove_desktop_launch_agent(desktop)
+        if desktop_selected:
+            step("Closing Ormah Desktop")
+            _stop_running_macos_desktop(desktop)
+            step("Removing Ormah Desktop artifacts")
+            _remove_selected_desktop_artifacts(desktop, system)
+    elif desktop_selected and desktop.removable_artifacts:
+        step("Removing Ormah Desktop integration")
+        _remove_selected_desktop_artifacts(desktop, system)
+
+    # b. Stop daemon
     step("Stopping server")
     from ormah.server_manager import uninstall_autostart
     uninstall_autostart()
 
-    # b. Remove Claude Code hooks
+    # c. Remove Claude Code hooks
     step("Removing Claude Code hooks")
     _remove_claude_hooks()
     _remove_codex_hooks()
 
-    # c. Remove MCP registration
+    # d. Remove MCP registration
     step("Removing MCP registration")
     _remove_mcp_registration()
 
-    # c.5 Remove the Pi package registration before deleting Ormah's own files.
+    # d.5 Remove the Pi package registration before deleting Ormah's own files.
     step("Removing Pi extension")
     try:
         _remove_pi_extension()
     except Exception as exc:  # noqa: BLE001
         warn(f"Could not remove ormah-pi automatically: {exc}")
 
-    # d. Remove CLAUDE.md block
+    # e. Remove CLAUDE.md block
     step("Removing CLAUDE.md instructions")
     _remove_claude_md_block()
     _remove_codex_md_block()
@@ -2227,7 +2592,7 @@ def run_uninstall(yes: bool = False) -> None:
     _remove_pi_md_block()
     _remove_pi_agents()
 
-    # e. Delete data directories
+    # f. Delete data directories
     step("Deleting data directories")
 
     xdg_dirs = [
@@ -2257,7 +2622,7 @@ def run_uninstall(yes: bool = False) -> None:
         else:
             info(f"{d} not found — skipping")
 
-    # f. Delete fastembed model cache
+    # g. Delete fastembed model cache
     step("Removing embedding model cache")
     _remove_fastembed_cache()
 
@@ -2281,8 +2646,13 @@ def run_uninstall(yes: bool = False) -> None:
     if not uv_uninstalled and not removed_tool_files:
         warn("Could not remove package files — remove manually with: uv tool uninstall ormah")
 
+    desktop_complete = _print_desktop_uninstall_summary(desktop, desktop_selected)
+    package_complete = uv_uninstalled or removed_tool_files
     print()
-    ok("Ormah has been uninstalled")
+    if desktop_complete and package_complete:
+        ok("Ormah has been completely uninstalled")
+    else:
+        warn("Ormah backend cleanup completed, but Ormah has not been fully uninstalled.")
 
 
 # ---------------------------------------------------------------------------

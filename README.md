@@ -191,6 +191,14 @@ available. If complete recovery cannot be guaranteed, uninstall stops without
 removing data or integrations. Deleting the preserved files manually can make
 encrypted cloud backups permanently unreadable.
 
+When a positively identified Ormah Desktop install is present, interactive
+uninstall separately asks whether to remove its app bundle and local UI/WebKit
+data; it always disables the known desktop login item first. `ormah uninstall
+--yes` includes those known user-owned desktop artifacts. A macOS app bundle
+that cannot be removed and a Debian-owned desktop package are left in place and
+reported with the exact manual or package-manager action, so completion is not
+claimed prematurely.
+
 Restore on a new machine with:
 
 ```bash
