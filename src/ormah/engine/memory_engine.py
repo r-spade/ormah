@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ormah import lifecycle
+from ormah import signal_strength
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -59,6 +60,10 @@ _CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge"})
 # boolean meta key 'fsrs_migrated'); 2 = bounded reinforcement (#221). An integer
 # so a future curve migration can tell which model produced the stored values.
 LIFECYCLE_MODEL_VERSION = 2
+
+# Evidence-ladder version for signals.strength (#218). Bump when the ladder's
+# values or mappings change, so a stamped store recomputes from its evidence.
+SIGNAL_STRENGTH_LADDER_VERSION = 1
 
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
@@ -159,12 +164,99 @@ class MemoryEngine:
 
         # One-time FSRS data migration: seed stability from access patterns
         self._migrate_fsrs()
+        self._migrate_signal_strength()
 
         self._ensure_self_node()
         self._migrate_identity_tiers()
         self._seed_initial_maintenance_grace_period()
         self._warmup_embedder()
         self._warmup_reranker()
+
+    def _meta_int(self, key: str) -> int:
+        """Read an integer meta value, treating absent or unparseable as 0."""
+        row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        try:
+            return int(row["value"]) if row else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def _migrate_signal_strength(self) -> None:
+        """Normalise signals.strength onto the #218 ordinal evidence ladder.
+
+        Runs on every startup, not once. The first pass covers the whole table; every
+        later pass covers only rows that appeared since the previous one, tracked by a
+        cutoff on signals.id (AUTOINCREMENT, so ids are monotonic and never reused).
+
+        The rescan exists because a one-time stamp cannot repair what an OLD binary
+        writes AFTER the stamp is set -- a rollback then re-upgrade, or the second
+        unmanaged server process this project already knows about (#238). Those rows
+        would carry pre-ladder values forever on a table the stamp calls migrated, and
+        the column would silently mix incomparable scales.
+
+        Rescanning already-correct rows is safe because strength_from_evidence is a
+        pure function of (source, polarity, evidence) and every write site stores
+        exactly what it returns for what it recorded, so a row written by the current
+        code recomputes to itself. That property is what makes this a repair instead
+        of a drift, and it did not hold until evidence became a lossless record of the
+        overlap ratio.
+
+        The cutoff advances only to the highest id actually processed, never to
+        MAX(id). db.transaction() opens BEGIN IMMEDIATE, so no writer -- in this
+        process or any other -- can commit between the SELECT and the stamp, which
+        means that interleaving cannot occur as the code stands. Advancing by
+        processed id is therefore defence in depth against a future change to that
+        isolation, not a fix for a reachable race.
+
+        Recompute is exact, not estimated: the judge stamps the min_confidence in
+        force when its row was written, so a row normalises to what it would have
+        stored had the ladder existed then, not to what today's settings would give.
+
+        No file_store call, so this does not take db-lock before memory-lock and stays
+        outside the ordering hazard documented on _record_confirmed_use.
+        """
+        version = self._meta_int("signal_strength_ladder_version")
+        # An unstamped store, or one stamped by a build that predates the cutoff, gets
+        # a full pass: 0 is the only lower bound that cannot skip a row.
+        lower_bound = (
+            self._meta_int("signal_strength_ladder_cutoff")
+            if version >= SIGNAL_STRENGTH_LADDER_VERSION
+            else 0
+        )
+
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT id, source, polarity, evidence FROM signals WHERE id > ?",
+                (lower_bound,),
+            ).fetchall()
+            processed_max = lower_bound
+            for row in rows:
+                conn.execute(
+                    "UPDATE signals SET strength = ? WHERE id = ?",
+                    (
+                        signal_strength.strength_from_evidence(
+                            row["source"], row["polarity"], row["evidence"]
+                        ),
+                        row["id"],
+                    ),
+                )
+                processed_max = max(processed_max, row["id"])
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('signal_strength_ladder_version', ?)",
+                (str(SIGNAL_STRENGTH_LADDER_VERSION),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('signal_strength_ladder_cutoff', ?)",
+                (str(processed_max),),
+            )
+        if rows:
+            logger.info(
+                "Normalised strength on %d signal rows above id %d (#218 ladder v%d)",
+                len(rows),
+                lower_bound,
+                SIGNAL_STRENGTH_LADDER_VERSION,
+            )
 
     def _migrate_fsrs(self) -> None:
         """Seed FSRS stability once, and record the store's lifecycle-model version."""
@@ -2968,7 +3060,7 @@ class MemoryEngine:
                     resolved_node_id,
                     "feedback_submitted",
                     signal,
-                    1.0,
+                    signal_strength.feedback_strength(source, signal),
                     source,
                     session_id,
                     "submit_feedback",

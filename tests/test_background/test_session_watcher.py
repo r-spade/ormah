@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ormah import signal_strength
 from ormah.background.session_watcher import (
     IngestResult,
     SessionHandler,
@@ -424,7 +425,10 @@ def test_llm_judge_promotes_used_verdict(engine, tmp_path):
     assert judge_signal is not None
     assert judge_signal["signal_type"] == "whisper_judged_used"
     assert judge_signal["polarity"] == 1
-    assert judge_signal["strength"] == 0.88
+    # #218: strength is the judge's band position now, not its raw confidence.
+    assert judge_signal["strength"] == pytest.approx(
+        signal_strength.judge_strength(0.88, engine.settings.feedback_llm_judge_min_confidence, 1)
+    )
 
     affinity = engine.db.conn.execute(
         "SELECT * FROM affinity WHERE whisper_log_id = ?", (whisper_log_id,)
