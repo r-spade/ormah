@@ -11,6 +11,7 @@ from ormah.engine.prompt_classifier import (
     PromptClassifier,
     PromptIntent,
     extract_time_params,
+    match_synthetic_pattern,
     strip_temporal_phrases,
 )
 
@@ -512,3 +513,60 @@ class TestContinuationIntent:
         intent = classifier.classify("continue where we left off")
         assert "continuation" in intent.categories
         assert "created_after" in intent.search_params
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-prompt filter (issue #134)
+# ---------------------------------------------------------------------------
+
+
+class TestMatchSyntheticPattern:
+    """Which pattern fired — the signal rot detection needs (#143)."""
+
+    def test_task_notification_returns_its_pattern_source(self):
+        assert match_synthetic_pattern("<task-notification>done</task-notification>") == (
+            r"<task-notification>"
+        )
+
+    def test_scheduled_task_returns_its_pattern_source(self):
+        assert match_synthetic_pattern("<scheduled-task id=3>") == r"<scheduled-task\b"
+
+    def test_autonomous_loop_returns_its_pattern_source(self):
+        assert match_synthetic_pattern("# Autonomous loop check") == (
+            r"#\s*Autonomous loop check\b"
+        )
+
+    def test_leading_whitespace_still_matches(self):
+        assert match_synthetic_pattern("\n  <task-notification>x") == r"<task-notification>"
+
+    def test_operator_pattern_returns_the_raw_string(self):
+        assert match_synthetic_pattern("BATCH JOB 12 done", [r"BATCH JOB"]) == r"BATCH JOB"
+
+    def test_ide_wrapped_human_prompt_returns_none(self):
+        # <ide_opened_file> PREFIXES a real human prompt (#134 regression guard).
+        assert match_synthetic_pattern("<ide_opened_file>/a/b.py</ide_opened_file>fix this") is None
+
+    def test_human_asking_about_a_marker_returns_none(self):
+        # Anchored .match(), not .search() — a human discussing a marker is human.
+        assert match_synthetic_pattern("what is a <task-notification> block?") is None
+
+    def test_plain_human_prompt_returns_none(self):
+        assert match_synthetic_pattern("fix the parser") is None
+
+    def test_empty_prompt_returns_none(self):
+        assert match_synthetic_pattern("") is None
+
+    def test_invalid_operator_regex_is_skipped_not_fatal(self):
+        # A config typo must never take the whisper down (fail-open).
+        assert match_synthetic_pattern("hello", ["[unclosed"]) is None
+
+    def test_invalid_regex_does_not_hide_a_later_valid_one(self):
+        assert match_synthetic_pattern("BATCH x", ["[unclosed", r"BATCH"]) == r"BATCH"
+
+    def test_empty_operator_pattern_returns_empty_string_not_none(self):
+        """The empty regex matches everything and returns "" — falsy but REAL.
+
+        Callers MUST test `is not None`. If this ever returns None, an operator
+        who configured "" silently loses all filtering.
+        """
+        assert match_synthetic_pattern("anything at all", [""]) == ""

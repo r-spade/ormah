@@ -215,6 +215,30 @@ class Settings(BaseSettings):
     # Whisper intent classification
     whisper_intent_threshold: float = 0.65  # min cosine similarity for intent match
 
+    # Machine-generated turns (subagent task-notifications, scheduled tasks,
+    # autonomous-loop checks) reach the UserPromptSubmit hook like any prompt.
+    # Whispering into them burns encode+search+rerank where no human reads, and
+    # the injection can never be "referenced" — contaminating the usage judge.
+    # Defaults cover Claude Code's own markers; add install-specific regexes
+    # (headless scripts, other agents) here. Anchored at the prompt start.
+    whisper_synthetic_filter_enabled: bool = True
+    whisper_synthetic_prompt_patterns: list[str] = []
+
+    # Rot detection for the list above (#143). A pattern that matched before and
+    # stopped is stale; a pattern that never matched is merely irrelevant to this
+    # install and stays silent.
+    whisper_pattern_rot_days: int = 30
+    whisper_pattern_monitor_interval_minutes: int = 1440
+    # A pattern that fired once, months ago, is not evidence of a live workflow.
+    # Proposing its removal is noise, and noise teaches the user to ignore the
+    # alert — which defeats the feature. Require a real history before calling
+    # anything rotted (council I4).
+    whisper_pattern_rot_min_matches: int = 2
+    # How much whisper traffic must have happened since a pattern last fired before
+    # "it stopped" beats "it just did not come up". Guards against a user returning
+    # from vacation and having every pattern proposed as rotted.
+    whisper_pattern_rot_min_opportunity: int = 50
+
     # Whisper topic-shift detection (skip injection when topic unchanged)
     whisper_topic_shift_enabled: bool = True
     whisper_topic_shift_threshold: float = 0.75  # cosine sim above this = same topic
@@ -463,6 +487,18 @@ class Settings(BaseSettings):
     def _whisper_log_cleanup_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"whisper log cleanup settings must be >= 1, got {v}")
+        return v
+
+    @field_validator(
+        "whisper_pattern_rot_days",
+        "whisper_pattern_monitor_interval_minutes",
+        "whisper_pattern_rot_min_matches",
+        "whisper_pattern_rot_min_opportunity",
+    )
+    @classmethod
+    def _whisper_pattern_monitor_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"whisper pattern monitor settings must be >= 1, got {v}")
         return v
 
     @field_validator("core_memory_cap")

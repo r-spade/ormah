@@ -301,6 +301,7 @@ class ContextBuilder:
         candidate_count: int = 0,
         injected_count: int = 0,
         max_gate_score: float | None = None,
+        matched_pattern: str | None = None,
     ) -> None:
         """Write one whisper_decisions row per whisper call — including silence.
 
@@ -317,11 +318,12 @@ class ContextBuilder:
                 conn.execute(
                     "INSERT INTO whisper_decisions "
                     "(session_id, space, prompt_hash, intent, outcome, "
-                    "candidate_count, injected_count, max_gate_score, logged_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "candidate_count, injected_count, max_gate_score, logged_at, "
+                    "matched_pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (session_id, space, prompt_hash, intent_str, outcome,
                      candidate_count, injected_count, max_gate_score,
-                     datetime.now(timezone.utc).isoformat()),
+                     datetime.now(timezone.utc).isoformat(), matched_pattern),
                 )
         except Exception as e:
             logger.warning("whisper_decisions write failed: %s", e)

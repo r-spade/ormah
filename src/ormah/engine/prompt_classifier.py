@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,46 @@ import numpy as np
 from ormah.embeddings.base import EmbeddingAdapter
 
 logger = logging.getLogger(__name__)
+
+# Machine-generated turns that reach the UserPromptSubmit hook. Matched ANCHORED
+# at the start of the prompt: a human ASKING about one of these markers is a real
+# prompt and still gets a whisper. Fail-open — when in doubt, whisper.
+# Deliberately excluded: wrapper tags like <ide_opened_file> and <system-reminder>,
+# which PREFIX a real human prompt rather than replace it (issue #134).
+_SYNTHETIC_PATTERNS = (
+    re.compile(r"<task-notification>", re.IGNORECASE),
+    re.compile(r"<scheduled-task\b", re.IGNORECASE),
+    re.compile(r"#\s*Autonomous loop check\b", re.IGNORECASE),
+)
+
+
+def match_synthetic_pattern(prompt: str, extra_patterns: Sequence[str] = ()) -> str | None:
+    """The source of the pattern that matched, or None when the prompt is human.
+
+    Returns the regex source rather than a bool so callers can record WHICH
+    pattern fired — a pattern that stops firing is a rotted pattern (#143).
+
+    ``extra_patterns`` carries install-specific regexes from settings; the
+    defaults stay generic to Claude Code. An invalid pattern is logged and
+    ignored — a config typo must never take the whisper down.
+
+    An operator can configure the empty pattern "", which matches everything and
+    returns "" — falsy but a real match. Callers MUST test ``is not None``.
+    """
+    text = prompt.lstrip()
+    if not text:
+        return None
+    for compiled in _SYNTHETIC_PATTERNS:
+        if compiled.match(text):
+            return compiled.pattern
+    for raw in extra_patterns or ():
+        try:
+            if re.match(raw, text):
+                return raw
+        except (re.error, TypeError) as e:
+            logger.warning("Ignoring invalid synthetic-prompt pattern %r: %s", raw, e)
+    return None
+
 
 # Archetype prompts per intent category.  More examples = better embedding
 # space coverage for paraphrases the user might actually type.
