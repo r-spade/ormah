@@ -33,14 +33,17 @@ import {
   protectionPresentation,
   protectionReconnectDelay,
   protectionRepairAction,
+  remoteListingMessage,
   resolveCheckoutIntent,
   recoveryKitSectionVisible,
+  shouldLoadRemoteSnapshot,
   type AccountStatus,
   type CheckoutConfirmation,
   type ProtectionActionKind,
   type RemoteSnapshot,
   type BillingOffer,
   type OperationPhase,
+  type ProtectionAction,
   type ProtectionOperation,
   type ProtectionStatus,
 } from "../productBridge";
@@ -200,12 +203,40 @@ function errorMessage(value: unknown, fallback: string): string {
 }
 
 export function RemoteListingExplanation({ remote }: { remote: RemoteSnapshot | null }) {
-  if (!remote?.error) return null;
+  const message = remoteListingMessage(remote);
+  if (!message) return null;
   return (
     <div className="protection-remote-explanation" role="status">
       <AlertTriangle size={15} />
-      <span>{remote.error}</span>
+      <span>{message}</span>
     </div>
+  );
+}
+
+export function ProtectionActionList({
+  actions,
+  busy,
+  onAction,
+}: {
+  actions: ProtectionAction[];
+  busy: boolean;
+  onAction: (kind: ProtectionActionKind) => void;
+}) {
+  return (
+    <section className="protection-actions">
+      {actions.map((action) => (
+        <div className="protection-action" key={action.kind}>
+          <button
+            className={action.variant === "primary" ? "protection-primary" : "protection-secondary"}
+            disabled={busy || action.disabled}
+            onClick={() => onAction(action.kind)}
+          >
+            {ACTION_ICONS[action.kind]} {action.label}
+          </button>
+          {action.reason && <p className="protection-action-reason">{action.reason}</p>}
+        </div>
+      ))}
+    </section>
   );
 }
 
@@ -243,8 +274,8 @@ export default function ProtectionPanel({
   const reconnectAttempt = useRef(0);
   const desktop = isDesktopApp();
 
-  const refresh = useCallback(async () => {
-    if (!desktop) return;
+  const refresh = useCallback(async (): Promise<boolean> => {
+    if (!desktop) return false;
     setLoading(true);
     try {
       try {
@@ -264,11 +295,9 @@ export default function ProtectionPanel({
       setRefreshFailed(false);
       onStatusChange?.(nextStatus);
       setError(null);
-      // A signed-in fresh device has no store identity yet. Asking for the
-      // listing is still essential: its safe typed reason tells us whether to
-      // offer recovery-kit import rather than accidentally creating a store.
-      // A listing failure never takes the panel down.
-      if (nextAccount.signed_in) {
+      // A device without a store identity cannot list a store yet. The summary
+      // offers Start fresh and Recover existing memory as honest peer choices.
+      if (shouldLoadRemoteSnapshot(nextAccount.signed_in, nextStatus)) {
         try {
           setRemote(await productBridge.remoteSnapshot());
         } catch {
@@ -283,9 +312,11 @@ export default function ProtectionPanel({
           offerRequested.current = false;
         });
       }
+      return true;
     } catch (err) {
       setRefreshFailed(true);
       setError(errorMessage(err, "Protection status is unavailable."));
+      return false;
     } finally {
       setLoading(false);
     }
@@ -445,14 +476,18 @@ export default function ProtectionPanel({
     }
   }, [account?.signed_in, bindAndContinue]);
 
-  const startRestorePreparation = useCallback(async () => {
+  const startRestorePreparation = useCallback(async (
+    failureMessage = "Recovery could not start.",
+  ): Promise<boolean> => {
     setBusy(true);
     setError(null);
     try {
       setOperation(await productBridge.prepareRestore());
       setView("summary");
+      return true;
     } catch (err) {
-      setError(errorMessage(err, "Recovery could not start."));
+      setError(errorMessage(err, failureMessage));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -537,14 +572,21 @@ export default function ProtectionPanel({
       const result = await completeRecoveryKitImport(
         productBridge.importRecoveryKit,
         refresh,
-        startRestorePreparation,
+        () => startRestorePreparation(
+          "The recovery kit was imported, but cloud recovery could not start.",
+        ),
       );
       if (result === "canceled") {
-        setOperation(null);
-        setView("summary");
         return;
       }
-      onToast("Recovery kit imported on this device.", "success");
+      if (result === "refresh_failed") {
+        setError(
+          "The recovery kit was imported, but Ormah could not refresh this device. Try again.",
+        );
+        return;
+      }
+      if (result === "restore_failed") return;
+      onToast("Recovery kit imported. Checking the newest cloud backup.", "success");
     } catch (err) {
       setError(errorMessage(err, "The recovery kit could not be imported."));
     } finally {
@@ -1151,12 +1193,12 @@ export default function ProtectionPanel({
                 {/* Not being able to read the listing is not the same as the
                     cloud being empty, and must never be shown as one. */}
                 <strong>{
-                  !remote
+                  !status.store_id
+                    ? "not connected on this device"
+                    : !remote
                     ? "backup listing unavailable"
                     : remote.error
-                      ? remote.reason_code === "key_missing"
-                        ? "recovery kit needed"
-                        : "backup listing unavailable"
+                      ? "backup listing unavailable"
                     : remote.created_at
                       ? `newest ${formatDate(remote.created_at)}`
                       : "no backup yet"
@@ -1170,20 +1212,11 @@ export default function ProtectionPanel({
           )}
 
           {view === "summary" && !activeLabel && (
-            <section className="protection-actions">
-              {actions.map((action) => (
-                <div className="protection-action" key={action.kind}>
-                  <button
-                    className={action.variant === "primary" ? "protection-primary" : "protection-secondary"}
-                    disabled={busy || action.disabled}
-                    onClick={() => void runProtectionAction(action.kind)}
-                  >
-                    {ACTION_ICONS[action.kind]} {action.label}
-                  </button>
-                  {action.reason && <p className="protection-action-reason">{action.reason}</p>}
-                </div>
-              ))}
-            </section>
+            <ProtectionActionList
+              actions={actions}
+              busy={busy}
+              onAction={(kind) => void runProtectionAction(kind)}
+            />
           )}
 
           {recoveryKitSectionVisible(status) && view === "summary" && (

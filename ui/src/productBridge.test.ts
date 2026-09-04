@@ -14,8 +14,10 @@ import {
   protectionReconnectDelay,
   protectionRepairAction,
   protectionPresentation,
+  remoteListingMessage,
   recoveryKitSectionVisible,
   resolveCheckoutIntent,
+  shouldLoadRemoteSnapshot,
   verificationIsOverdue,
   type ProtectionAction,
   type ProtectionActionKind,
@@ -502,25 +504,32 @@ describe("protectionActions", () => {
       true,
       "local_only",
       status({ protection_state: "local_only", enabled: false, store_id: null }),
-      remote({
-        snapshot_id: null,
-        created_at: null,
-        size_bytes: null,
-        reason_code: "key_missing",
-        error: "Cloud store id is missing; import a recovery kit first.",
-      }),
+      null,
     );
 
     expect(actions.map((action) => action.kind)).toEqual(["protect", "recover"]);
-    expect(find(actions, "recover")?.label).toBe("Recover from a backup");
+    expect(find(actions, "recover")?.label).toBe("Recover existing memory");
   });
 
-  it("keeps Protect available for a genuinely new local-only account", () => {
+  it("gives a genuinely new account the same two neutral choices", () => {
     const actions = protectionActions(
       true,
       "local_only",
       status({ protection_state: "local_only", enabled: false, store_id: null }),
-      remote({ snapshot_id: null, created_at: null, size_bytes: null, reason_code: null }),
+      null,
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(["protect", "recover"]);
+    expect(find(actions, "protect")?.variant).toBe("primary");
+    expect(find(actions, "recover")?.variant).toBe("secondary");
+  });
+
+  it("does not offer kit recovery after a store identity exists", () => {
+    const actions = protectionActions(
+      true,
+      "local_only",
+      status({ protection_state: "local_only", enabled: false }),
+      null,
     );
 
     expect(actions.map((action) => action.kind)).toEqual(["protect"]);
@@ -625,11 +634,11 @@ describe("completeRecoveryKitImport", () => {
         calls.push("import");
         return { status: "imported" };
       },
-      async () => { calls.push("refresh"); },
-      async () => { calls.push("prepare"); },
+      async () => { calls.push("refresh"); return true; },
+      async () => { calls.push("prepare"); return true; },
     );
 
-    expect(result).toBe("imported");
+    expect(result).toBe("restore_started");
     expect(calls).toEqual(["import", "refresh", "prepare"]);
   });
 
@@ -641,11 +650,56 @@ describe("completeRecoveryKitImport", () => {
         calls.push("import");
         return { status: "canceled" };
       },
-      async () => { calls.push("refresh"); },
-      async () => { calls.push("prepare"); },
+      async () => { calls.push("refresh"); return true; },
+      async () => { calls.push("prepare"); return true; },
     );
 
     expect(result).toBe("canceled");
     expect(calls).toEqual(["import"]);
+  });
+
+  it("does not prepare restore when the post-import refresh fails", async () => {
+    const calls: string[] = [];
+
+    const result = await completeRecoveryKitImport(
+      async () => { calls.push("import"); return { status: "imported" }; },
+      async () => { calls.push("refresh"); return false; },
+      async () => { calls.push("prepare"); return true; },
+    );
+
+    expect(result).toBe("refresh_failed");
+    expect(calls).toEqual(["import", "refresh"]);
+  });
+
+  it("reports restore preparation separately from successful import", async () => {
+    const calls: string[] = [];
+
+    const result = await completeRecoveryKitImport(
+      async () => { calls.push("import"); return { status: "imported" }; },
+      async () => { calls.push("refresh"); return true; },
+      async () => { calls.push("prepare"); return false; },
+    );
+
+    expect(result).toBe("restore_failed");
+    expect(calls).toEqual(["import", "refresh", "prepare"]);
+  });
+});
+
+describe("fresh-device remote discovery", () => {
+  it("waits for a store identity before asking the cloud", () => {
+    expect(shouldLoadRemoteSnapshot(false, status({}))).toBe(false);
+    expect(shouldLoadRemoteSnapshot(true, status({ store_id: null }))).toBe(false);
+    expect(shouldLoadRemoteSnapshot(true, status({}))).toBe(true);
+  });
+
+  it("maps reason codes to fixed product copy instead of backend text", () => {
+    expect(remoteListingMessage(remote({
+      reason_code: "remote_listing_failed",
+      error: "ConnectError(private-hostname:9443)",
+    }))).toBe("Cloud backups could not be checked. Try again.");
+    expect(remoteListingMessage(remote({
+      reason_code: "key_missing",
+      error: "Cloud store id is missing; import a recovery kit first.",
+    }))).toBeNull();
   });
 });

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import uuid
 
@@ -24,11 +25,25 @@ from ormah.cloud.state import (
 )
 from ormah.cloud.store_lock import StoreLockTimeout
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/admin/cloud/protection",
     tags=["cloud-protection"],
     dependencies=[Depends(require_local_admin)],
 )
+
+_REMOTE_LISTING_MESSAGES = {
+    "key_missing": "This device is not connected to a cloud memory store.",
+    "sign_in_required": "Sign in again to check cloud backups.",
+}
+
+
+def _remote_listing_message(reason_code: str) -> str:
+    return _REMOTE_LISTING_MESSAGES.get(
+        reason_code,
+        "Cloud backups could not be checked.",
+    )
 
 
 class EmptyRequest(BaseModel):
@@ -195,21 +210,25 @@ def remote_snapshot(request: Request):
     try:
         newest = newest_cloud_snapshot(settings)
     except CloudRestoreError as exc:
+        if exc.reason_code != "key_missing":
+            logger.warning(
+                "Could not list cloud recovery points: %s",
+                safe_product_error_message(exc, getattr(settings, "account_token", None)),
+            )
         return {
             **unavailable,
             "reason_code": exc.reason_code,
-            "error": safe_product_error_message(
-                str(exc), getattr(settings, "account_token", None)
-            ),
+            "error": _remote_listing_message(exc.reason_code),
         }
     except Exception as exc:
+        logger.warning(
+            "Could not list cloud recovery points: %s",
+            safe_product_error_message(exc, getattr(settings, "account_token", None)),
+        )
         return {
             **unavailable,
             "reason_code": "remote_listing_failed",
-            "error": safe_product_error_message(
-                f"Could not read cloud backups: {exc}",
-                getattr(settings, "account_token", None),
-            ),
+            "error": _remote_listing_message("remote_listing_failed"),
         }
     if newest is None:
         return unavailable

@@ -15,7 +15,6 @@ from ormah.api import routes_protection
 from ormah.api.local_auth import LOCAL_ADMIN_HEADER, require_loopback
 from ormah.cloud.operations import ProtectionOperationCoordinator
 from ormah.cloud.recovery import RecoveryKitError, RecoveryReadiness
-from ormah.cloud.restore import CloudRestoreError
 from ormah.cloud.state import (
     ProtectionOperation,
     ProtectionOperationKind,
@@ -676,7 +675,7 @@ def test_remote_degrades_without_taking_the_panel_down(protection_app, monkeypat
     assert payload["snapshot_id"] is None
     assert payload["from_this_device"] is False
     assert payload["reason_code"] == "remote_listing_failed"
-    assert payload["error"]
+    assert payload["error"] == "Cloud backups could not be checked."
     assert "never-return-this-token" not in response.text
 
 
@@ -691,22 +690,11 @@ def test_remote_reports_an_empty_store_without_error(protection_app, monkeypatch
     assert payload["error"] is None
 
 
-def test_remote_reports_missing_store_identity_with_a_typed_reason(protection_app, monkeypatch):
+def test_remote_reports_missing_store_identity_with_a_typed_reason(protection_app):
     client, _, _, _ = protection_app
-
-    monkeypatch.setattr(
-        routes_protection,
-        "newest_cloud_snapshot",
-        lambda settings: (_ for _ in ()).throw(
-            CloudRestoreError(
-                "Cloud store id is missing; import a recovery kit first.",
-                "key_missing",
-            )
-        ),
-    )
 
     payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
 
     assert payload["snapshot_id"] is None
     assert payload["reason_code"] == "key_missing"
-    assert payload["error"] == "Cloud store id is missing; import a recovery kit first."
+    assert payload["error"] == "This device is not connected to a cloud memory store."

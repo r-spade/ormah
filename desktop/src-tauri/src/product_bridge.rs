@@ -1062,8 +1062,7 @@ mod tests {
     fn protection_payload_rejects_secret_bearing_fields() {
         assert!(reject_forbidden_response_fields(&json!({
             "state": "protected",
-            "operation": { "id": "safe" },
-            "reason_code": "key_missing"
+            "operation": { "id": "safe" }
         }))
         .is_ok());
         for key in [

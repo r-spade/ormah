@@ -117,6 +117,11 @@ export type RecoveryKitActionResult =
   };
 
 export type RecoveryKitImportStatus = "imported" | "canceled";
+export type RecoveryKitImportCompletion =
+  | "canceled"
+  | "refresh_failed"
+  | "restore_failed"
+  | "restore_started";
 
 /**
  * Importing a kit gives this device a store identity. Refresh discovery before
@@ -125,14 +130,14 @@ export type RecoveryKitImportStatus = "imported" | "canceled";
  */
 export async function completeRecoveryKitImport(
   importKit: () => Promise<{ status: RecoveryKitImportStatus }>,
-  refresh: () => Promise<void>,
-  prepareRestore: () => Promise<void>,
-): Promise<RecoveryKitImportStatus> {
+  refresh: () => Promise<boolean>,
+  prepareRestore: () => Promise<boolean>,
+): Promise<RecoveryKitImportCompletion> {
   const result = await importKit();
   if (result.status === "canceled") return result.status;
-  await refresh();
-  await prepareRestore();
-  return result.status;
+  if (!await refresh()) return "refresh_failed";
+  if (!await prepareRestore()) return "restore_failed";
+  return "restore_started";
 }
 
 export function recoveryKitSectionVisible(
@@ -391,6 +396,21 @@ export interface RemoteSnapshot {
   error: string | null;
 }
 
+export function shouldLoadRemoteSnapshot(
+  signedIn: boolean,
+  status: ProtectionStatus | null | undefined,
+): boolean {
+  return signedIn && Boolean(status?.store_id);
+}
+
+export function remoteListingMessage(remote: RemoteSnapshot | null): string | null {
+  if (!remote?.reason_code || remote.reason_code === "key_missing") return null;
+  if (remote.reason_code === "sign_in_required") {
+    return "Sign in again to check cloud backups.";
+  }
+  return "Cloud backups could not be checked. Try again.";
+}
+
 // Two intervals of the weekly restore-verification job. Inside that window an
 // unchecked upload is the normal resting state, not a problem, so it must not
 // paint the panel with a warning.
@@ -427,7 +447,7 @@ export interface ProtectionAction {
 
 const BACKUP_LABEL = "Back up now";
 const RESTORE_LABEL = "Restore newest backup";
-const RECOVER_LABEL = "Recover from a backup";
+const RECOVER_LABEL = "Recover existing memory";
 
 const REPAIR_LABELS: Record<Exclude<ProtectionRepairAction, "none">, string> = {
   verify: "Retry recovery check",
@@ -529,16 +549,16 @@ export function protectionActions(
       reason: "Brings the newest cloud backup onto this device.",
     }]
     : [];
-  // A fresh device cannot list an existing store until its recovery kit has
-  // supplied the store identity. This is deliberately keyed only by the
-  // stable protocol reason, never the explanatory message.
-  const recoverMissingStore: ProtectionAction[] = remote?.reason_code === "key_missing"
+  // With no local store identity, Ormah cannot know whether this is a new user
+  // or a returning device. Offer both honest choices without attempting a
+  // cloud listing that cannot succeed before kit import.
+  const recoverUninitializedStore: ProtectionAction[] = status?.store_id === null
     ? [{
       kind: "recover",
       label: RECOVER_LABEL,
       variant: "secondary",
       disabled: false,
-      reason: "Import the recovery kit from an existing protected memory before choosing a new one.",
+      reason: "Use the recovery kit saved from an existing protected memory.",
     }]
     : [];
 
@@ -554,7 +574,7 @@ export function protectionActions(
           disabled: false,
           reason: null,
         },
-        ...recoverMissingStore,
+        ...recoverUninitializedStore,
         ...restoreOnly,
       ];
 
