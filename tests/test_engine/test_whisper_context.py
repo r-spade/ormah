@@ -1778,9 +1778,13 @@ def _make_settings_mock(
     claude_maintenance_enabled=False,
     whisper_no_overlap_ce_floor=0.45,
     whisper_no_overlap_cosine_floor=0.70,
+    whisper_synthetic_filter_enabled=True,
+    whisper_synthetic_prompt_patterns=(),
 ):
     """Create a MagicMock settings object with affinity-related float attributes."""
     settings = MagicMock()
+    settings.whisper_synthetic_filter_enabled = whisper_synthetic_filter_enabled
+    settings.whisper_synthetic_prompt_patterns = whisper_synthetic_prompt_patterns
     settings.whisper_reranker_min_score = whisper_reranker_min_score
     settings.whisper_exploration_enabled = whisper_exploration_enabled
     settings.affinity_similarity_threshold = affinity_similarity_threshold
@@ -2849,6 +2853,30 @@ class TestWhisperDecisions:
             "SELECT * FROM whisper_decisions ORDER BY id"
         ).fetchall()
 
+    def test_note_synthetic_whisper_skip_writes_the_decision_row(self, db_graph):
+        # The skip itself happens at the /agent/whisper boundary (see
+        # TestSyntheticPromptEndpoint); the engine only records it, so
+        # whisper_decisions stays one-row-per-call. Goes through the real
+        # MemoryEngine method to cover the endpoint -> engine wiring.
+        from ormah.engine.memory_engine import MemoryEngine
+
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph)
+        engine = MagicMock(spec=MemoryEngine)
+        engine.context_builder = builder
+        MemoryEngine.note_synthetic_whisper_skip(
+            engine,
+            prompt="<task-notification>\n<task-id>x</task-id>",
+            space="proj",
+            session_id="s-synth",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_synthetic"
+        assert rows[0]["session_id"] == "s-synth"
+        assert rows[0]["space"] == "proj"
+
     def test_short_prompt_logs_silent_short(self, db_graph):
         db, graph = db_graph
         builder = self._builder_with_db(db, graph)
@@ -3170,6 +3198,144 @@ class TestTopicShiftServedMemory:
             )
 
         assert "Sessionless topic memory" not in result
+
+
+class TestSyntheticPromptEndpoint:
+    """A machine-generated turn is skipped at the /agent/whisper boundary,
+    BEFORE any per-turn state mutation (#134).
+
+    The guard must sit above the session buffer and above the engine, because
+    both carry irreversible per-turn side effects: the ring buffer feeds
+    topic-shift/continuation for the NEXT human turn, and the engine's first
+    statement consumes the one-time onboarding nudge (meta.onboarding_prompted).
+    """
+
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from ormah.api.routes_agent import router
+
+        app = FastAPI()
+        app.include_router(router)
+        engine = MagicMock()
+        engine.get_whisper_context.return_value = ""
+        app.state.engine = engine
+        return TestClient(app), engine
+
+    def test_synthetic_prompt_never_reaches_the_engine(self):
+        # REGRESSION GUARD (#134, council/codex R1): the engine's first statement is
+        # _maybe_get_onboarding_nudge, which INSERTs meta.onboarding_prompted and
+        # returns the nudge exactly once. If a machine turn reaches the engine, it
+        # burns the onboarding and the first human never sees it.
+        from ormah.api.routes_agent import _session_buffers
+
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": "<task-notification>\n<task-id>x</task-id>",
+                  "session_id": "s-synth"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["text"] == ""
+        engine.get_whisper_context.assert_not_called()
+        _session_buffers.clear()
+
+    def test_synthetic_prompt_does_not_enter_the_session_buffer(self):
+        # A machine turn must not pollute recent_prompts: the buffer feeds the
+        # topic-shift centroid for the next HUMAN turn.
+        from ormah.api.routes_agent import _session_buffers
+
+        _session_buffers.clear()
+        client, _ = self._client()
+
+        client.post(
+            "/agent/whisper",
+            json={"prompt": "<scheduled-task name=\"drive-watch\" file=\"/x/S.md\">",
+                  "session_id": "s-buf"},
+        )
+
+        assert "s-buf" not in _session_buffers
+        _session_buffers.clear()
+
+    def test_synthetic_prompt_records_telemetry(self):
+        from ormah.api.routes_agent import _session_buffers
+
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        client.post(
+            "/agent/whisper",
+            json={"prompt": "<task-notification>\n<task-id>x</task-id>",
+                  "session_id": "s-tel", "space": "proj"},
+        )
+
+        engine.note_synthetic_whisper_skip.assert_called_once()
+        kwargs = engine.note_synthetic_whisper_skip.call_args.kwargs
+        assert kwargs["session_id"] == "s-tel"
+        assert kwargs["space"] == "proj"
+        _session_buffers.clear()
+
+    def test_ide_wrapped_human_prompt_reaches_the_engine(self):
+        # REGRESSION GUARD (#134): <ide_opened_file> merely PREFIXES a real human
+        # prompt (46/46 on a live 30d corpus) — it must flow through untouched.
+        from ormah.api.routes_agent import _session_buffers
+
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": ("<ide_opened_file>The user opened /x/a.md in the IDE."
+                             "</ide_opened_file>\nrevisa o portfólio de segurança"),
+                  "session_id": "s-ide"},
+        )
+
+        assert resp.status_code == 200
+        engine.get_whisper_context.assert_called_once()
+        assert "s-ide" in _session_buffers
+        _session_buffers.clear()
+
+    def test_kill_switch_lets_synthetic_prompts_through(self, monkeypatch):
+        from ormah.api.routes_agent import _session_buffers
+        from ormah.config import settings as global_settings
+
+        monkeypatch.setattr(global_settings, "whisper_synthetic_filter_enabled", False)
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        client.post(
+            "/agent/whisper",
+            json={"prompt": "<task-notification>\n<task-id>x</task-id>",
+                  "session_id": "s-killswitch"},
+        )
+
+        engine.get_whisper_context.assert_called_once()
+        engine.note_synthetic_whisper_skip.assert_not_called()
+        _session_buffers.clear()
+
+    def test_extra_patterns_from_settings_apply_at_the_boundary(self, monkeypatch):
+        from ormah.api.routes_agent import _session_buffers
+        from ormah.config import settings as global_settings
+
+        monkeypatch.setattr(
+            global_settings, "whisper_synthetic_prompt_patterns",
+            [r"You are classifying the relationship"],
+        )
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": "You are classifying the relationship between two memories",
+                  "session_id": "s-extra"},
+        )
+
+        assert resp.json()["text"] == ""
+        engine.get_whisper_context.assert_not_called()
+        _session_buffers.clear()
 
 
 class TestSessionBufferEviction:

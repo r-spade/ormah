@@ -11,6 +11,7 @@ from ormah.engine.prompt_classifier import (
     PromptClassifier,
     PromptIntent,
     extract_time_params,
+    is_synthetic_prompt,
     strip_temporal_phrases,
 )
 
@@ -512,3 +513,49 @@ class TestContinuationIntent:
         intent = classifier.classify("continue where we left off")
         assert "continuation" in intent.categories
         assert "created_after" in intent.search_params
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-prompt filter (issue #134)
+# ---------------------------------------------------------------------------
+
+
+class TestIsSyntheticPrompt:
+    def test_task_notification_is_synthetic(self):
+        assert is_synthetic_prompt("<task-notification>\n<task-id>abc</task-id>") is True
+
+    def test_scheduled_task_is_synthetic(self):
+        assert is_synthetic_prompt('<scheduled-task name="drive-watch" file="/x/S.md">') is True
+
+    def test_autonomous_loop_is_synthetic(self):
+        assert is_synthetic_prompt("# Autonomous loop check\n\nYou're being invoked") is True
+
+    def test_leading_whitespace_still_matches(self):
+        assert is_synthetic_prompt("\n  <task-notification>\n<task-id>a</task-id>") is True
+
+    def test_ide_wrapper_with_human_prompt_is_not_synthetic(self):
+        # REGRESSION GUARD (issue #134): the IDE prefixes this tag to a REAL human
+        # prompt — 46/46 such events on the live DB carried human text. Filtering it
+        # would silence the whisper for every prompt sent with a file open in the IDE.
+        prompt = (
+            "<ide_opened_file>The user opened the file /x/notes.md in the IDE."
+            "</ide_opened_file>\nnão, isso fica em estratégia — revisa o portfólio"
+        )
+        assert is_synthetic_prompt(prompt) is False
+
+    def test_human_asking_about_a_marker_is_not_synthetic(self):
+        # The anchor is deliberate and fail-open: when in doubt, whisper.
+        assert is_synthetic_prompt("what is a <task-notification> block?") is False
+
+    def test_extra_pattern_from_settings_matches(self):
+        assert is_synthetic_prompt(
+            "You are classifying the relationship between two memories",
+            extra_patterns=[r"You are classifying the relationship"],
+        ) is True
+
+    def test_invalid_extra_pattern_fails_open(self):
+        # A config typo must degrade to "filters less", never kill the whisper.
+        assert is_synthetic_prompt("hello there", extra_patterns=["[unclosed"]) is False
+
+    def test_empty_prompt_is_not_synthetic(self):
+        assert is_synthetic_prompt("") is False

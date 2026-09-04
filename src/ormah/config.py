@@ -215,6 +215,15 @@ class Settings(BaseSettings):
     # Whisper intent classification
     whisper_intent_threshold: float = 0.65  # min cosine similarity for intent match
 
+    # Machine-generated turns (subagent task-notifications, scheduled tasks,
+    # autonomous-loop checks) reach the UserPromptSubmit hook like any prompt.
+    # Whispering into them burns encode+search+rerank where no human reads, and
+    # the injection can never be "referenced" — contaminating the usage judge.
+    # Defaults cover Claude Code's own markers; add install-specific regexes
+    # (headless scripts, other agents) here. Anchored at the prompt start.
+    whisper_synthetic_filter_enabled: bool = True
+    whisper_synthetic_prompt_patterns: list[str] = []
+
     # Whisper topic-shift detection (skip injection when topic unchanged)
     whisper_topic_shift_enabled: bool = True
     whisper_topic_shift_threshold: float = 0.75  # cosine sim above this = same topic
