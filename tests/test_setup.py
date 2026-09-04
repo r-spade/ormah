@@ -808,7 +808,7 @@ class TestConfigureClaudeDesktop:
 class TestConfigureCodexMcp:
     def test_writes_mcp_config_to_codex_toml(self, tmp_path):
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -832,7 +832,7 @@ class TestConfigureCodexMcp:
         )
 
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -857,7 +857,7 @@ class TestConfigureCodexMcp:
         )
 
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -3327,10 +3327,14 @@ class TestRemoveFastembedCache:
         assert "manually" in captured.out.lower()
 
     def test_removes_cache_dir_when_empty_after_cleanup(self, tmp_path, monkeypatch):
-        model_dir = tmp_path / "models--qdrant--bge-base-en-v1.5-onnx-q"
-        model_dir.mkdir()
+        # A dedicated subdirectory, not tmp_path itself: the autouse
+        # _isolate_settings_from_global_env fixture writes empty.env into tmp_path,
+        # so the "cache dir is now empty" assertion below would never hold on it.
+        cache_dir = tmp_path / "cache"
+        model_dir = cache_dir / "models--qdrant--bge-base-en-v1.5-onnx-q"
+        model_dir.mkdir(parents=True)
 
-        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache_dir))
 
         fake_embed_models = [{"model": "BAAI/bge-base-en-v1.5", "sources": {"hf": "qdrant/bge-base-en-v1.5-onnx-q"}}]
 
@@ -3341,7 +3345,7 @@ class TestRemoveFastembedCache:
             _remove_fastembed_cache()
 
         # cache_dir itself is removed when empty
-        assert not tmp_path.exists()
+        assert not cache_dir.exists()
 
     def test_uses_default_fastembed_cache_dir(self, tmp_path, monkeypatch):
         monkeypatch.delenv("FASTEMBED_CACHE_PATH")

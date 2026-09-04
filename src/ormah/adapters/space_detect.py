@@ -14,8 +14,11 @@ def detect_space_from_dir(path: str) -> str | None:
     """
     path = os.path.realpath(path)
 
-    # Don't auto-detect space for home directory or root
-    home = os.path.expanduser("~")
+    # Don't auto-detect space for home directory or root. realpath both sides:
+    # `path` is already resolved above, so comparing it against an unresolved
+    # $HOME misses the home directory whenever $HOME traverses a symlink, and
+    # the caller silently gets the home's basename as a space instead of None.
+    home = os.path.realpath(os.path.expanduser("~"))
     if path == home or path == "/":
         return None
 
