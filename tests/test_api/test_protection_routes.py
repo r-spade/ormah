@@ -627,6 +627,7 @@ def test_remote_reports_a_backup_made_by_another_device(protection_app, monkeypa
     assert payload["from_this_device"] is False
     # This device never checked that snapshot, so it cannot vouch for it.
     assert payload["restore_tested_here"] is False
+    assert payload["reason_code"] is None
     assert payload["error"] is None
 
 
@@ -654,6 +655,7 @@ def test_remote_recognises_this_devices_own_verified_upload(protection_app, monk
 
     assert payload["from_this_device"] is True
     assert payload["restore_tested_here"] is True
+    assert payload["reason_code"] is None
 
 
 def test_remote_degrades_without_taking_the_panel_down(protection_app, monkeypatch):
@@ -672,7 +674,8 @@ def test_remote_degrades_without_taking_the_panel_down(protection_app, monkeypat
     payload = response.json()
     assert payload["snapshot_id"] is None
     assert payload["from_this_device"] is False
-    assert payload["error"]
+    assert payload["reason_code"] == "remote_listing_failed"
+    assert payload["error"] == "Cloud backups could not be checked."
     assert "never-return-this-token" not in response.text
 
 
@@ -683,4 +686,15 @@ def test_remote_reports_an_empty_store_without_error(protection_app, monkeypatch
     payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
 
     assert payload["snapshot_id"] is None
+    assert payload["reason_code"] is None
     assert payload["error"] is None
+
+
+def test_remote_reports_missing_store_identity_with_a_typed_reason(protection_app):
+    client, _, _, _ = protection_app
+
+    payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
+
+    assert payload["snapshot_id"] is None
+    assert payload["reason_code"] == "key_missing"
+    assert payload["error"] == "This device is not connected to a cloud memory store."

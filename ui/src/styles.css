@@ -1067,6 +1067,17 @@ body.in-app .node-detail.tier-core {
   line-height: 1.45;
 }
 
+.protection-remote-explanation {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  margin: 14px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .protection-step,
 .protection-actions,
 .protection-account,

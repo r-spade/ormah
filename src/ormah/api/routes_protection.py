@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import uuid
 
@@ -24,11 +25,25 @@ from ormah.cloud.state import (
 )
 from ormah.cloud.store_lock import StoreLockTimeout
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/admin/cloud/protection",
     tags=["cloud-protection"],
     dependencies=[Depends(require_local_admin)],
 )
+
+_REMOTE_LISTING_MESSAGES = {
+    "key_missing": "This device is not connected to a cloud memory store.",
+    "sign_in_required": "Sign in again to check cloud backups.",
+}
+
+
+def _remote_listing_message(reason_code: str) -> str:
+    return _REMOTE_LISTING_MESSAGES.get(
+        reason_code,
+        "Cloud backups could not be checked.",
+    )
 
 
 class EmptyRequest(BaseModel):
@@ -189,24 +204,31 @@ def remote_snapshot(request: Request):
         "size_bytes": None,
         "from_this_device": False,
         "restore_tested_here": False,
+        "reason_code": None,
         "error": None,
     }
     try:
         newest = newest_cloud_snapshot(settings)
     except CloudRestoreError as exc:
+        if exc.reason_code != "key_missing":
+            logger.warning(
+                "Could not list cloud recovery points: %s",
+                safe_product_error_message(exc, getattr(settings, "account_token", None)),
+            )
         return {
             **unavailable,
-            "error": safe_product_error_message(
-                str(exc), getattr(settings, "account_token", None)
-            ),
+            "reason_code": exc.reason_code,
+            "error": _remote_listing_message(exc.reason_code),
         }
     except Exception as exc:
+        logger.warning(
+            "Could not list cloud recovery points: %s",
+            safe_product_error_message(exc, getattr(settings, "account_token", None)),
+        )
         return {
             **unavailable,
-            "error": safe_product_error_message(
-                f"Could not read cloud backups: {exc}",
-                getattr(settings, "account_token", None),
-            ),
+            "reason_code": "remote_listing_failed",
+            "error": _remote_listing_message("remote_listing_failed"),
         }
     if newest is None:
         return unavailable
@@ -218,6 +240,7 @@ def remote_snapshot(request: Request):
         "from_this_device": snapshot_id == state.get("last_successful_backup_snapshot_id"),
         # A device can only vouch for a check it ran itself.
         "restore_tested_here": snapshot_id == state.get("last_verified_snapshot_id"),
+        "reason_code": None,
         "error": None,
     }
 

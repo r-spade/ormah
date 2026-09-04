@@ -116,6 +116,30 @@ export type RecoveryKitActionResult =
     recovery_kit_verified_at: null;
   };
 
+export type RecoveryKitImportStatus = "imported" | "canceled";
+export type RecoveryKitImportCompletion =
+  | "canceled"
+  | "refresh_failed"
+  | "restore_failed"
+  | "restore_started";
+
+/**
+ * Importing a kit gives this device a store identity. Refresh discovery before
+ * starting restore preparation, because preparation itself must not be the
+ * first attempt to list that newly reachable store.
+ */
+export async function completeRecoveryKitImport(
+  importKit: () => Promise<{ status: RecoveryKitImportStatus }>,
+  refresh: () => Promise<boolean>,
+  prepareRestore: () => Promise<boolean>,
+): Promise<RecoveryKitImportCompletion> {
+  const result = await importKit();
+  if (result.status === "canceled") return result.status;
+  if (!await refresh()) return "refresh_failed";
+  if (!await prepareRestore()) return "restore_failed";
+  return "restore_started";
+}
+
 export function recoveryKitSectionVisible(
   status: ProtectionStatus | null | undefined,
 ): boolean {
@@ -284,7 +308,7 @@ export const productBridge = {
   cancelRestore: (preparationOperationId: string) =>
     native<{ status: "discarded" }>("cancel_restore", { preparationOperationId }),
   importRecoveryKit: () =>
-    native<{ status: "imported" | "canceled" }>("import_recovery_kit"),
+    native<{ status: RecoveryKitImportStatus }>("import_recovery_kit"),
   openCheckout: (intentId: string) =>
     native<BillingHandoff>("open_checkout", { intentId }),
   openPortal: () => native<{ opened: boolean }>("open_billing_portal"),
@@ -367,7 +391,24 @@ export interface RemoteSnapshot {
   from_this_device: boolean;
   /** Only this device's own checks count; it cannot vouch for another's. */
   restore_tested_here: boolean;
+  /** Stable, product-safe reason why the remote listing is unavailable. */
+  reason_code: string | null;
   error: string | null;
+}
+
+export function shouldLoadRemoteSnapshot(
+  signedIn: boolean,
+  status: ProtectionStatus | null | undefined,
+): boolean {
+  return signedIn && Boolean(status?.store_id);
+}
+
+export function remoteListingMessage(remote: RemoteSnapshot | null): string | null {
+  if (!remote?.reason_code || remote.reason_code === "key_missing") return null;
+  if (remote.reason_code === "sign_in_required") {
+    return "Sign in again to check cloud backups.";
+  }
+  return "Cloud backups could not be checked. Try again.";
 }
 
 // Two intervals of the weekly restore-verification job. Inside that window an
@@ -388,6 +429,7 @@ export function verificationIsOverdue(
 export type ProtectionActionKind =
   | "signin"
   | "protect"
+  | "recover"
   | "backup"
   | "restore"
   | "verify"
@@ -405,6 +447,7 @@ export interface ProtectionAction {
 
 const BACKUP_LABEL = "Back up now";
 const RESTORE_LABEL = "Restore newest backup";
+const RECOVER_LABEL = "Recover existing memory";
 
 const REPAIR_LABELS: Record<Exclude<ProtectionRepairAction, "none">, string> = {
   verify: "Retry recovery check",
@@ -506,6 +549,18 @@ export function protectionActions(
       reason: "Brings the newest cloud backup onto this device.",
     }]
     : [];
+  // With no local store identity, Ormah cannot know whether this is a new user
+  // or a returning device. Offer both honest choices without attempting a
+  // cloud listing that cannot succeed before kit import.
+  const recoverUninitializedStore: ProtectionAction[] = status?.store_id === null
+    ? [{
+      kind: "recover",
+      label: RECOVER_LABEL,
+      variant: "secondary",
+      disabled: false,
+      reason: "Use the recovery kit saved from an existing protected memory.",
+    }]
+    : [];
 
   switch (state) {
     case "local_only":
@@ -519,6 +574,7 @@ export function protectionActions(
           disabled: false,
           reason: null,
         },
+        ...recoverUninitializedStore,
         ...restoreOnly,
       ];
 
