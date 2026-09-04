@@ -196,6 +196,83 @@ def test_cloud_init_import_newer_canonical_kit_blocks_before_mutation(
     assert kit_path.read_bytes() == kit_before
 
 
+def test_cloud_init_import_does_not_overwrite_kit_for_another_store(
+    cloud_paths, tmp_path, capsys
+):
+    key_path, kit_path, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    import_source = tmp_path / "import.md"
+    import_source.write_bytes(kit_path.read_bytes())
+    current_store = (memory_dir / ".store_id").read_text(encoding="utf-8").strip()
+    kit_path.write_text(
+        kit_path.read_text(encoding="utf-8").replace(
+            f"store_id: {current_store}",
+            "store_id: 66666666-7777-4888-9999-aaaaaaaaaaaa",
+        ),
+        encoding="utf-8",
+    )
+    (memory_dir / ".store_id").unlink()
+    key_before = key_path.read_bytes()
+    kit_before = kit_path.read_bytes()
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit):
+        _run(["cloud", "init", "--import-key", str(import_source)])
+
+    assert "unrelated recovery material" in capsys.readouterr().err
+    assert not (memory_dir / ".store_id").exists()
+    assert key_path.read_bytes() == key_before
+    assert kit_path.read_bytes() == kit_before
+
+
+def test_cloud_init_import_does_not_overwrite_kit_with_unknown_identity(
+    cloud_paths, tmp_path, capsys
+):
+    key_path, kit_path, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    import_source = tmp_path / "import.md"
+    import_source.write_bytes(kit_path.read_bytes())
+    other_key = tmp_path / "other" / "cloud.key"
+    other_identity = cloud_keys.init_key(other_key)
+    current_identity = cloud_keys.load_identity_strings(key_path)[0]
+    kit_path.write_text(
+        kit_path.read_text(encoding="utf-8").replace(
+            current_identity, other_identity
+        ),
+        encoding="utf-8",
+    )
+    key_before = key_path.read_bytes()
+    store_before = (memory_dir / ".store_id").read_bytes()
+    kit_before = kit_path.read_bytes()
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit):
+        _run(["cloud", "init", "--import-key", str(import_source)])
+
+    assert "unrelated recovery material" in capsys.readouterr().err
+    assert key_path.read_bytes() == key_before
+    assert (memory_dir / ".store_id").read_bytes() == store_before
+    assert kit_path.read_bytes() == kit_before
+
+
+def test_cloud_init_import_repairs_empty_canonical_kit(
+    cloud_paths, tmp_path, capsys
+):
+    key_path, kit_path, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    import_source = tmp_path / "import.md"
+    import_source.write_bytes(kit_path.read_bytes())
+    kit_path.write_text("", encoding="utf-8")
+    (memory_dir / ".store_id").unlink()
+    capsys.readouterr()
+
+    _run(["cloud", "init", "--import-key", str(import_source), "--json"])
+
+    repaired = kit_path.read_text(encoding="utf-8")
+    assert cloud_keys.load_identity_strings(key_path)[0] in repaired
+    assert cloud_keys.extract_store_id(repaired) is not None
+
+
 def test_cloud_init_import_store_conflict_changes_neither_resource(
     cloud_paths, tmp_path, capsys
 ):
@@ -292,11 +369,12 @@ def test_cloud_init_import_raw_text_writes_new_key_with_0600(cloud_paths, capsys
 
 
 def test_cloud_init_import_bare_key_preflights_a_new_store_id(cloud_paths, capsys):
-    key_path, _, memory_dir = cloud_paths
+    key_path, kit_path, memory_dir = cloud_paths
     _run(["cloud", "init", "--json"])
     identity = cloud_keys.load_identity_strings(key_path)[0]
     key_path.unlink()
     (memory_dir / ".store_id").unlink()
+    kit_path.unlink()
     capsys.readouterr()
 
     _run(["cloud", "init", "--import-key", identity, "--json"])

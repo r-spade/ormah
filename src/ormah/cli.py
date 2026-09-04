@@ -546,10 +546,9 @@ def _cmd_cloud_init(args):
             # Preflight both resources before the first write. A preserved key
             # may contain extra pre-rotation identities, but it must contain
             # every identity carried by the recovery kit.
-            kit_path = validate_recovery_kit_destination()
-            import_result = apply_recovery_import(
-                plan_recovery_import(import_source, settings.memory_dir)
-            )
+            import_plan = plan_recovery_import(import_source, settings.memory_dir)
+            kit_path = validate_recovery_kit_destination(import_plan)
+            import_result = apply_recovery_import(import_plan)
         else:
             init_key()
     except (CloudKeyError, CloudCryptoError, OSError) as exc:

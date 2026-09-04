@@ -41,6 +41,7 @@ class RecoveryImportPlan:
     """A fully validated recovery import, ready to apply without conflicts."""
 
     identity_strings: tuple[str, ...]
+    installed_identity_strings: tuple[str, ...]
     store_id: str | None
     key_path: Path
     memory_dir: Path
@@ -404,8 +405,10 @@ def plan_recovery_import(
                 "then move it aside and retry."
             )
         key_status = "already_matched"
+        installed_identity_strings = tuple(existing_identities)
     else:
         key_status = "installed"
+        installed_identity_strings = identity_strings
 
     if store_id is None and existing_store_id is None:
         # Bare key material is still supported. Generate its namespace during
@@ -421,6 +424,7 @@ def plan_recovery_import(
 
     return RecoveryImportPlan(
         identity_strings=identity_strings,
+        installed_identity_strings=installed_identity_strings,
         store_id=store_id,
         key_path=key_path,
         memory_dir=memory_dir,
@@ -514,11 +518,48 @@ def _ensure_recovery_kit_can_be_rewritten(kit_path: Path) -> None:
         )
 
 
-def validate_recovery_kit_destination(kit_path: Path | None = None) -> Path:
-    """Validate the canonical kit destination before an import changes local state."""
+def validate_recovery_kit_destination(
+    plan: RecoveryImportPlan,
+    kit_path: Path | None = None,
+) -> Path:
+    """Ensure refreshing the canonical kit cannot discard unrelated recovery material."""
 
     kit_path = (RECOVERY_KIT_PATH if kit_path is None else kit_path).expanduser()
     _ensure_recovery_kit_can_be_rewritten(kit_path)
+    if not kit_path.exists():
+        return kit_path
+
+    text = kit_path.read_text(encoding="utf-8")
+    existing_store_id = extract_store_id_from_text(text)
+    if existing_store_id is not None and existing_store_id != plan.store_id:
+        raise CloudKeyError(
+            f"The existing recovery kit belongs to store {existing_store_id}, but this "
+            f"import targets {plan.store_id}. Refusing to overwrite unrelated recovery "
+            "material. No files were changed."
+        )
+
+    raw_identities = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("AGE-SECRET-KEY-")
+    ]
+    if raw_identities:
+        try:
+            existing_identities = _identity_strings_from_text(text)
+        except CloudKeyError as exc:
+            raise CloudKeyError(
+                "The existing recovery kit contains invalid key material and was not "
+                "overwritten. No files were changed."
+            ) from exc
+        if any(
+            identity not in plan.installed_identity_strings
+            for identity in existing_identities
+        ):
+            raise CloudKeyError(
+                "The existing recovery kit contains an identity that is not present in the "
+                "planned cloud key. Refusing to overwrite unrelated recovery material. "
+                "No files were changed."
+            )
     return kit_path
 
 
