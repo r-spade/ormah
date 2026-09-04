@@ -80,19 +80,39 @@ ARCHETYPES: dict[str, list[str]] = {
 #              None means "now" (i.e. the window extends to the present).
 _TIME_KEYWORDS: list[tuple[re.Pattern, int, int | None]] = [
     (re.compile(r"\btoday\b", re.IGNORECASE), 1, None),           # 24h ago → now
+    (re.compile(r"\bhoje\b", re.IGNORECASE), 1, None),            # 24h ago → now
     (re.compile(r"\byesterday\b", re.IGNORECASE), 2, 1),          # 48h ago → 24h ago
+    (re.compile(r"\bontem\b", re.IGNORECASE), 2, 1),              # 48h ago → 24h ago
     (re.compile(r"\blast\s+week\b", re.IGNORECASE), 14, 7),       # 14d ago → 7d ago
+    (re.compile(r"\bsemana\s+passada\b", re.IGNORECASE), 14, 7),  # 14d ago → 7d ago
     (re.compile(r"\bthis\s+week\b", re.IGNORECASE), 7, None),     # 7d ago → now
+    (re.compile(r"\b(?:esta|essa|nesta|nessa)\s+semana\b", re.IGNORECASE), 7, None),
     (re.compile(r"\blast\s+month\b", re.IGNORECASE), 60, 30),     # 60d ago → 30d ago
+    (re.compile(r"\bm[êe]s\s+passado\b", re.IGNORECASE), 60, 30),  # 60d ago → 30d ago
     (re.compile(r"\brecently\b|\blately\b", re.IGNORECASE), 3, None),  # 3d ago → now
+    (re.compile(r"\brecentemente\b|\bultimamente\b", re.IGNORECASE), 3, None),  # 3d → now
 ]
 
 _NUMERIC_TIME_RE = re.compile(
-    r"\b(?:last|past)\s+(\d+)\s+(hours?|days?|weeks?|months?)\b",
+    r"\b(?:last|past|[úu]ltim[oa]s?)\s+(\d+)\s+"
+    r"(hours?|days?|weeks?|months?|horas?|dias?|semanas?|meses|m[êe]s)\b",
     re.IGNORECASE,
 )
 
 _UNIT_TO_DAYS: dict[str, float] = {"hour": 1 / 24, "day": 1, "week": 7, "month": 30}
+
+# PT-BR unit -> canonical English key, applied after the caller has lowercased
+# and stripped the plural "s". Without this, _UNIT_TO_DAYS.get(unit, 1) silently
+# falls back to 1 day, so "últimas 2 semanas" would mean 2 days, and the
+# rolling-window branch (which tests for "week"/"month") would never fire.
+_UNIT_ALIASES: dict[str, str] = {
+    "hora": "hour",
+    "dia": "day",
+    "semana": "week",
+    "mese": "month",  # "meses" -> "mese"
+    "mê": "month",  # "mês" -> "mê"
+    "me": "month",  # "mes" -> "me"
+}
 
 _DEFAULT_TEMPORAL_DAYS = 3
 
@@ -100,11 +120,17 @@ _DEFAULT_TEMPORAL_DAYS = 3
 # Combines _TIME_KEYWORDS patterns + _NUMERIC_TIME_RE into one list.
 _TEMPORAL_STRIP_PATTERNS: list[re.Pattern] = [
     re.compile(r"\btoday\b", re.IGNORECASE),
+    re.compile(r"\bhoje\b", re.IGNORECASE),
     re.compile(r"\byesterday\b", re.IGNORECASE),
+    re.compile(r"\bontem\b", re.IGNORECASE),
     re.compile(r"\blast\s+week\b", re.IGNORECASE),
+    re.compile(r"\bsemana\s+passada\b", re.IGNORECASE),
     re.compile(r"\bthis\s+week\b", re.IGNORECASE),
+    re.compile(r"\b(?:esta|essa|nesta|nessa)\s+semana\b", re.IGNORECASE),
     re.compile(r"\blast\s+month\b", re.IGNORECASE),
+    re.compile(r"\bm[êe]s\s+passado\b", re.IGNORECASE),
     re.compile(r"\brecently\b|\blately\b|\brecent\b", re.IGNORECASE),
+    re.compile(r"\brecentemente\b|\bultimamente\b", re.IGNORECASE),
     _NUMERIC_TIME_RE,
 ]
 
@@ -143,7 +169,11 @@ def extract_time_params(prompt: str) -> dict:
     m = _NUMERIC_TIME_RE.search(prompt)
     if m:
         n = int(m.group(1))
-        unit = m.group(2).rstrip("s").lower()
+        # Lowercase before stripping the plural so an uppercased unit still
+        # normalises ("DIAS" -> "dias" -> "dia"), then fold PT-BR onto the
+        # English key the tables below are written in.
+        unit = m.group(2).lower().rstrip("s")
+        unit = _UNIT_ALIASES.get(unit, unit)
         days_per_unit = _UNIT_TO_DAYS.get(unit, 1)
         days = n * days_per_unit
 

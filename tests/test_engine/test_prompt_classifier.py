@@ -11,6 +11,7 @@ from ormah.engine.prompt_classifier import (
     PromptClassifier,
     PromptIntent,
     extract_time_params,
+    has_temporal_phrases,
     strip_temporal_phrases,
 )
 
@@ -399,6 +400,58 @@ class TestTimeExtraction:
         assert 4.9 < self._days_ago(params["created_after"]) < 5.1
         assert self._days_ago(params["created_before"]) < 0.01
 
+    # -- PT-BR ----------------------------------------------------------
+    # Each window below must differ from the 3d->now default, so a passing
+    # test proves the keyword matched rather than falling through.
+
+    def test_ptbr_ontem_bounded(self):
+        """'ontem' narrows to the same 2d -> 1d window as 'yesterday'."""
+        params = extract_time_params("o que fizemos ontem")
+        assert 1.9 < self._days_ago(params["created_after"]) < 2.1
+        assert 0.9 < self._days_ago(params["created_before"]) < 1.1
+
+    def test_ptbr_hoje_extends_to_now(self):
+        params = extract_time_params("o que fizemos hoje")
+        assert 0.95 < self._days_ago(params["created_after"]) < 1.05
+        assert self._days_ago(params["created_before"]) < 0.01
+
+    def test_ptbr_semana_passada_bounded(self):
+        params = extract_time_params("o que aconteceu na semana passada")
+        assert 13.9 < self._days_ago(params["created_after"]) < 14.1
+        assert 6.9 < self._days_ago(params["created_before"]) < 7.1
+
+    def test_ptbr_esta_semana_extends_to_now(self):
+        params = extract_time_params("o que fizemos esta semana")
+        assert 6.9 < self._days_ago(params["created_after"]) < 7.1
+        assert self._days_ago(params["created_before"]) < 0.01
+
+    def test_ptbr_mes_passado_bounded(self):
+        params = extract_time_params("o que aconteceu no mês passado")
+        assert 59.9 < self._days_ago(params["created_after"]) < 60.1
+        assert 29.9 < self._days_ago(params["created_before"]) < 30.1
+
+    def test_ptbr_numeric_days_extend_to_now(self):
+        params = extract_time_params("o que mudou nos últimos 4 dias")
+        assert 3.9 < self._days_ago(params["created_after"]) < 4.1
+        assert self._days_ago(params["created_before"]) < 0.01
+
+    def test_ptbr_numeric_weeks_rolling(self):
+        """'últimas 2 semanas' mirrors the EN rolling window: 28d -> 14d."""
+        params = extract_time_params("me mostra as últimas 2 semanas")
+        assert 27.9 < self._days_ago(params["created_after"]) < 28.1
+        assert 13.9 < self._days_ago(params["created_before"]) < 14.1
+
+    def test_ptbr_numeric_months_rolling(self):
+        params = extract_time_params("resumo dos últimos 3 meses")
+        assert 179.9 < self._days_ago(params["created_after"]) < 180.1
+        assert 89.9 < self._days_ago(params["created_before"]) < 90.1
+
+    def test_ptbr_numeric_hours(self):
+        params = extract_time_params("o que aconteceu nas últimas 6 horas")
+        dt = datetime.fromisoformat(params["created_after"])
+        diff_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+        assert 5.9 < diff_hours < 6.1
+
     def test_backwards_compat_static_method(self):
         """PromptClassifier._extract_time_params still works."""
         params = PromptClassifier._extract_time_params("what did we do today")
@@ -409,6 +462,22 @@ class TestTimeExtraction:
 # ---------------------------------------------------------------------------
 # Tests: Temporal phrase stripping
 # ---------------------------------------------------------------------------
+
+class TestHasTemporalPhrases:
+    """'recentemente'/'ultimamente' map to 3d -> now, which is also the
+    no-keyword default, so extract_time_params cannot tell a match from a
+    fallback. has_temporal_phrases can: it skips the default entirely.
+    """
+
+    def test_ptbr_recentemente_is_temporal(self):
+        assert has_temporal_phrases("houve mudanças recentemente") is True
+
+    def test_ptbr_ultimamente_is_temporal(self):
+        assert has_temporal_phrases("o que mudou ultimamente") is True
+
+    def test_non_temporal_prompt_is_not_temporal(self):
+        assert has_temporal_phrases("como funciona o pipeline de busca") is False
+
 
 class TestStripTemporalPhrases:
 
@@ -435,6 +504,32 @@ class TestStripTemporalPhrases:
         result = strip_temporal_phrases("any recent changes to auth")
         assert "auth" in result
         assert "recent" not in result
+
+    def test_strip_ptbr_ontem(self):
+        assert strip_temporal_phrases("o que fizemos ontem") == "o que fizemos"
+
+    def test_strip_ptbr_hoje(self):
+        assert strip_temporal_phrases("o que fizemos hoje") == "o que fizemos"
+
+    def test_strip_ptbr_semana_passada(self):
+        result = strip_temporal_phrases("o que fizemos no whisper na semana passada")
+        assert "whisper" in result
+        assert "semana passada" not in result
+
+    def test_strip_ptbr_mes_passado(self):
+        result = strip_temporal_phrases("mudanças no auth no mês passado")
+        assert "auth" in result
+        assert "mês passado" not in result
+
+    def test_strip_ptbr_numeric_days(self):
+        result = strip_temporal_phrases("mudanças no auth nos últimos 3 dias")
+        assert "auth" in result
+        assert "últimos 3 dias" not in result
+
+    def test_strip_ptbr_recentemente(self):
+        result = strip_temporal_phrases("mudanças recentemente no auth")
+        assert "auth" in result
+        assert "recentemente" not in result
 
     def test_no_temporal_returns_unchanged(self):
         prompt = "how does the search pipeline work"
