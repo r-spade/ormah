@@ -283,3 +283,24 @@ def test_project_scoped_nodes_skipped_by_default(engine):
 
     # LLM should never be called since project-scoped nodes are skipped
     mock_llm.assert_not_called()
+
+
+def test_candidate_discovery_failure_is_reported_not_swallowed(engine, monkeypatch):
+    """A broken encoder/vector store must surface as a failed run. _find_conflict_candidates
+    caught everything and returned [], so the run ended 'cleanly' with zero candidates and
+    the job tracker recorded a success — conflict detection silently disabled while
+    /admin/health stayed green (Codex, PR B)."""
+    from ormah.background import conflict_detector as cd
+
+    engine.settings.llm_provider = "ollama"
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("vector store exploded")
+
+    monkeypatch.setattr(cd, "_find_conflict_candidates", cd._find_conflict_candidates)
+    monkeypatch.setattr("ormah.embeddings.encoder.get_encoder", boom, raising=False)
+
+    result = cd.run_conflict_detection(engine)
+
+    assert isinstance(result, dict), "a broken run must report an error, not return None"
+    assert "error" in result

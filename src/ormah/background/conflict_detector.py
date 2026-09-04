@@ -208,9 +208,13 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
 
         return candidates
 
-    except Exception as e:
-        logger.warning("_find_conflict_candidates failed: %s", e)
-        return []
+    except Exception:
+        # Do NOT swallow into an empty list: a broken encoder, vector store or DB would
+        # look like "zero candidates, clean run", so the tracker recorded a success and
+        # /admin/health stayed green while conflict detection was silently dead. Let it
+        # reach run_conflict_detection's handler, which reports {"error": ...}.
+        logger.warning("_find_conflict_candidates failed", exc_info=True)
+        raise
 
 
 @serialized_memory_job
@@ -292,3 +296,4 @@ def run_conflict_detection(engine) -> None:
 
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)
+        return {"error": str(e)}

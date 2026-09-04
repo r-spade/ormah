@@ -261,9 +261,12 @@ def _find_link_candidates(engine, limit: int = 8) -> list[dict]:
 
         return candidates
 
-    except Exception as e:
-        logger.warning("_find_link_candidates failed: %s", e)
-        return []
+    except Exception:
+        # Same reason as conflict_detector: swallowing this into an empty list turned a
+        # broken encoder/vector store into a "clean run with no candidates", which the
+        # tracker recorded as a success. Let run_auto_linker's handler report the error.
+        logger.warning("_find_link_candidates failed", exc_info=True)
+        raise
 
 
 def _apply_edge(
@@ -420,3 +423,4 @@ def run_auto_linker(engine) -> None:
 
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)
+        return {"error": str(e)}

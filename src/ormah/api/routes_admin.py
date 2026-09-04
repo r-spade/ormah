@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -253,11 +258,15 @@ def resume_all_tasks(request: Request):
 def run_task(task_id: str, request: Request):
     """Manually trigger a background task by ID."""
     engine = request.app.state.engine
+    tracker = getattr(request.app.state, "job_tracker", None)
 
     # index_updater is a method on engine.builder, not a standalone function
     if task_id == "index_updater":
-        added, updated = engine.builder.incremental_update()
-        return {"status": "completed", "task": task_id, "added": added, "updated": updated}
+        with _guard(tracker, task_id) as acquired:
+            if not acquired:
+                raise HTTPException(status_code=409, detail=f"Task {task_id} is already running")
+            added, updated = engine.builder.incremental_update()
+            return {"status": "completed", "task": task_id, "added": added, "updated": updated}
 
     if task_id not in _TASK_RUNNERS:
         raise HTTPException(status_code=404, detail=f"Unknown task: {task_id}. Available: {list(_TASK_RUNNERS.keys()) + ['index_updater']}")
@@ -267,8 +276,56 @@ def run_task(task_id: str, request: Request):
     module = importlib.import_module(module_path)
     runner = getattr(module, func_name)
 
-    runner(engine)
-    return {"status": "completed", "task": task_id}
+    # This route bypasses the scheduler, so APScheduler's max_instances=1 does not
+    # apply to it. Without this guard a manual trigger during a scheduled run starts a
+    # second concurrent run over the same watermark, and the two race each other's
+    # edge writes (#117).
+    with _guard(tracker, task_id) as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail=f"Task {task_id} is already running")
+        return _run_and_report(task_id, runner, engine)
+
+
+def _run_and_report(task_id: str, runner, engine) -> dict:
+    """Run a task and report what actually happened.
+
+    The route used to return {"status": "completed"} unconditionally: a run that
+    raised, or that returned {"error": ...}, was reported to the caller as a success.
+    """
+    from ormah.background.job_tracker import failure_reason
+
+    try:
+        result = runner(engine)
+    except Exception as e:
+        logger.warning("Manual run of %s failed: %s", task_id, e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    # Same classifier the tracker uses: runners do not raise, they signal failure in the
+    # return value, and not all of them use the same shape (dict with "error", or False).
+    reason = failure_reason(result)
+    if reason is not None:
+        raise HTTPException(status_code=500, detail=reason)
+
+    payload = {"status": "completed", "task": task_id}
+    if isinstance(result, dict):
+        payload["stats"] = result
+    return payload
+
+
+@contextlib.contextmanager
+def _guard(tracker, task_id: str):
+    """Claim task_id for the duration of the block, or yield False if it is running.
+
+    A missing tracker (scheduler never started) means no scheduled job can be running
+    either, so there is nothing to collide with — but two concurrent HTTP requests
+    still could, so the app always builds a JobTracker (main.py), tracker=None is only
+    reachable in tests.
+    """
+    if tracker is None:
+        yield True
+        return
+    with tracker.run_guard(task_id) as acquired:
+        yield acquired
 
 
 @router.post("/tasks/run-all")
@@ -276,20 +333,41 @@ def run_all_tasks(request: Request):
     """Run all background tasks sequentially in sleep-cycle order."""
     import importlib
 
+    from ormah.background.job_tracker import failure_reason
+
     engine = request.app.state.engine
+    tracker = getattr(request.app.state, "job_tracker", None)
     results: dict[str, str] = {}
 
     for task_id in _SLEEP_CYCLE_ORDER:
-        try:
-            if task_id == "index_updater":
-                engine.builder.incremental_update()
-            elif task_id in _TASK_RUNNERS:
-                module_path, func_name = _TASK_RUNNERS[task_id]
-                module = importlib.import_module(module_path)
-                runner = getattr(module, func_name)
-                runner(engine)
-            results[task_id] = "ok"
-        except Exception as exc:
-            results[task_id] = f"error: {exc}"
+        with _guard(tracker, task_id) as acquired:
+            if not acquired:
+                # Same hole as run_task: this bypasses the scheduler, so a job already
+                # in flight would get a second concurrent run over the same watermark,
+                # racing its edge and markdown writes (#117).
+                results[task_id] = "skipped: already running"
+                continue
+            try:
+                if task_id == "index_updater":
+                    engine.builder.incremental_update()
+                elif task_id in _TASK_RUNNERS:
+                    module_path, func_name = _TASK_RUNNERS[task_id]
+                    module = importlib.import_module(module_path)
+                    runner = getattr(module, func_name)
+                    reason = failure_reason(runner(engine))
+                    if reason is not None:
+                        results[task_id] = f"error: {reason}"
+                        continue
+                results[task_id] = "ok"
+            except Exception as exc:
+                results[task_id] = f"error: {exc}"
 
+    has_errors = any(v.startswith("error:") for v in results.values())
+    if has_errors:
+        return JSONResponse(status_code=503, content={"status": "degraded", "results": results})
+    # A skipped task is not an error, but the cycle did NOT run everything it was asked
+    # to. Reporting "completed" would tell a cron/script that the sleep cycle ran in full
+    # when part of it never started.
+    if any(v.startswith("skipped:") for v in results.values()):
+        return {"status": "partial", "results": results}
     return {"status": "completed", "results": results}
