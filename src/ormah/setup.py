@@ -6,6 +6,8 @@ import contextlib
 import glob
 import json
 import os
+import platform
+import plistlib
 import re
 import shlex
 import shutil
@@ -67,6 +69,9 @@ def _find_binary(name: str) -> str | None:
 ENV_PATH = ENV_DIR / ".env"
 WRAPPER_PATH = ENV_DIR / "ormah-server"
 CLOUD_RECOVERY_FILENAMES = frozenset({"cloud.key", "ormah-recovery-kit.md"})
+DESKTOP_BUNDLE_IDENTIFIER = "dev.ormah.desktop"
+DESKTOP_PRODUCT_NAME = "Ormah"
+MACOS_SYSTEM_APPLICATIONS_DIR = Path("/Applications")
 
 CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
@@ -2129,6 +2134,253 @@ def _remove_config_preserving_cloud_recovery(config_dir: Path) -> tuple[Path, ..
     return preserved
 
 
+@dataclass
+class DesktopUninstallState:
+    """Desktop presence and the one artifact the Python CLI may remove."""
+
+    system: str
+    autostart_path: Path | None = None
+    unrecognized_autostart: Path | None = None
+    artifacts: list[Path] = field(default_factory=list)
+    package_removal_command: str | None = None
+    autostart_disabled: bool = False
+
+    @property
+    def detected(self) -> bool:
+        return bool(
+            self.autostart_path
+            or self.unrecognized_autostart
+            or self.artifacts
+            or self.package_removal_command
+        )
+
+
+def _macos_autostart_path(home: Path) -> Path:
+    return home / "Library" / "LaunchAgents" / f"{DESKTOP_PRODUCT_NAME}.plist"
+
+
+def _linux_autostart_path(home: Path) -> Path:
+    return home / ".config" / "autostart" / f"{DESKTOP_PRODUCT_NAME}.desktop"
+
+
+def _macos_autostart_bundle(path: Path) -> Path | None:
+    """Return the app bundle named by a verified Tauri LaunchAgent."""
+
+    if path.is_symlink() or not path.is_file() or path.name != "Ormah.plist":
+        return None
+    try:
+        data = plistlib.loads(path.read_bytes())
+    except Exception:  # A damaged plist is not safe to remove automatically.
+        return None
+    if not isinstance(data, dict) or data.get("Label") != DESKTOP_PRODUCT_NAME:
+        return None
+    arguments = data.get("ProgramArguments")
+    if not isinstance(arguments, list) or not arguments or not isinstance(arguments[0], str):
+        return None
+    executable = Path(arguments[0])
+    valid = (
+        executable.is_absolute()
+        and executable.name in {"ormah-desktop", DESKTOP_PRODUCT_NAME}
+        and executable.parent.name == "MacOS"
+        and executable.parent.parent.name == "Contents"
+        and executable.parent.parent.parent.name == "Ormah.app"
+    )
+    return executable.parent.parent.parent if valid else None
+
+
+def _is_ormah_macos_autostart(path: Path) -> bool:
+    return _macos_autostart_bundle(path) is not None
+
+
+def _linux_autostart_executable(path: Path) -> Path | None:
+    """Return the executable named by a verified auto-launch desktop entry."""
+
+    if path.is_symlink() or not path.is_file() or path.name != "Ormah.desktop":
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    required = {
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Ormah",
+        "Terminal=false",
+    }
+    lines = {line.strip() for line in text.splitlines()}
+    executable = next(
+        (line.split("=", 1)[1].strip() for line in lines if line.startswith("Exec=")),
+        "",
+    )
+    if not required.issubset(lines):
+        return None
+    if executable.endswith("/ormah-desktop") or executable.endswith(".AppImage"):
+        return Path(executable)
+    return None
+
+
+def _is_ormah_linux_autostart(path: Path) -> bool:
+    return _linux_autostart_executable(path) is not None
+
+
+def _linux_debian_removal_command() -> str | None:
+    """Return the normal command only when dpkg proves package ownership."""
+
+    try:
+        result = subprocess.run(
+            ["dpkg-query", "-S", "/usr/bin/ormah-desktop"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or ":" not in result.stdout:
+        return None
+    package = result.stdout.split(":", 1)[0].strip()
+    if not re.fullmatch(r"[A-Za-z0-9.+-]+", package):
+        return None
+    return f"sudo apt remove {package}"
+
+
+def _appimage_executable(entry: Path) -> Path | None:
+    """Read an AppImage path for reporting only; never use it as a delete target."""
+
+    if entry.is_symlink() or not entry.is_file():
+        return None
+    try:
+        text = entry.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in text.splitlines():
+        if not line.startswith("Exec="):
+            continue
+        try:
+            command = shlex.split(line.split("=", 1)[1])
+        except ValueError:
+            return None
+        if not command:
+            return None
+        executable = Path(command[0]).expanduser()
+        if executable.is_absolute() and executable.name.endswith(".AppImage"):
+            return executable
+    return None
+
+
+def _inspect_desktop_installation(system: str | None = None) -> DesktopUninstallState:
+    """Find desktop autostart and report-only artifacts without deleting anything."""
+
+    system = system or platform.system()
+    home = Path.home()
+    state = DesktopUninstallState(system=system)
+    if system == "Darwin":
+        autostart = _macos_autostart_path(home)
+        autostart_bundle = _macos_autostart_bundle(autostart)
+        if autostart_bundle is not None:
+            state.autostart_path = autostart
+        elif autostart.exists() or autostart.is_symlink():
+            state.unrecognized_autostart = autostart
+        candidates = [
+            MACOS_SYSTEM_APPLICATIONS_DIR / "Ormah.app",
+            home / "Applications" / "Ormah.app",
+            home / "Library" / "Application Support" / DESKTOP_BUNDLE_IDENTIFIER,
+            home / "Library" / "WebKit" / DESKTOP_BUNDLE_IDENTIFIER,
+        ]
+        state.artifacts = [path for path in candidates if path.exists() or path.is_symlink()]
+        if (
+            autostart_bundle is not None
+            and (autostart_bundle.exists() or autostart_bundle.is_symlink())
+            and autostart_bundle not in state.artifacts
+        ):
+            state.artifacts.append(autostart_bundle)
+    elif system == "Linux":
+        autostart = _linux_autostart_path(home)
+        autostart_executable = _linux_autostart_executable(autostart)
+        if autostart_executable is not None:
+            state.autostart_path = autostart
+        elif autostart.exists() or autostart.is_symlink():
+            state.unrecognized_autostart = autostart
+        menu_entry = home / ".local" / "share" / "applications" / "ormah.desktop"
+        if menu_entry.exists() or menu_entry.is_symlink():
+            state.artifacts.append(menu_entry)
+            appimage = _appimage_executable(menu_entry)
+            if appimage is not None:
+                state.artifacts.append(appimage)
+            for size in ("128x128", "256x256"):
+                icon = (
+                    home
+                    / ".local"
+                    / "share"
+                    / "icons"
+                    / "hicolor"
+                    / size
+                    / "apps"
+                    / "ormah-desktop.png"
+                )
+                if icon.exists() or icon.is_symlink():
+                    state.artifacts.append(icon)
+        if (
+            autostart_executable is not None
+            and autostart_executable.name.endswith(".AppImage")
+            and (autostart_executable.exists() or autostart_executable.is_symlink())
+            and autostart_executable not in state.artifacts
+        ):
+            state.artifacts.append(autostart_executable)
+        state.package_removal_command = _linux_debian_removal_command()
+    return state
+
+
+def _disable_desktop_autostart(state: DesktopUninstallState) -> None:
+    """Remove only the exact, revalidated Tauri autostart file."""
+
+    path = state.autostart_path
+    if path is None:
+        return
+    validator = (
+        _is_ormah_macos_autostart
+        if state.system == "Darwin"
+        else _is_ormah_linux_autostart
+    )
+    if not validator(path):
+        state.unrecognized_autostart = path
+        warn(f"Refusing to remove changed desktop autostart entry: {path}")
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        warn(f"Could not disable Ormah Desktop autostart at {path}: {exc}")
+        state.unrecognized_autostart = path
+        return
+    state.autostart_disabled = True
+    ok(f"Disabled Ormah Desktop autostart: {path}")
+
+
+def _print_desktop_uninstall_summary(state: DesktopUninstallState) -> bool:
+    """Report exactly what remains; the hybrid CLI never deletes the desktop app."""
+
+    complete = True
+    if state.unrecognized_autostart is not None:
+        warn("Desktop autostart could not be safely disabled; remove this entry manually:")
+        warn(f"  {state.unrecognized_autostart}")
+        complete = False
+    elif state.autostart_path is not None and not state.autostart_disabled:
+        warn(f"Desktop autostart remains enabled: {state.autostart_path}")
+        complete = False
+
+    if state.artifacts or state.package_removal_command:
+        complete = False
+        warn("Ormah Desktop remains installed; opening it can reinstall the backend:")
+        for path in dict.fromkeys(state.artifacts):
+            warn(f"  {path}")
+        if state.system == "Darwin":
+            info("Quit Ormah, then move Ormah.app to Trash.")
+        if state.package_removal_command:
+            info(f"Remove the desktop package with: {state.package_removal_command}")
+        elif state.system == "Linux":
+            info("Delete the Ormah AppImage after quitting the app.")
+    return complete
+
+
 def run_uninstall(yes: bool = False) -> None:
     """Remove Ormah while preserving zero-knowledge cloud recovery material."""
     print(
@@ -2196,28 +2448,45 @@ def run_uninstall(yes: bool = False) -> None:
         else:
             ok("Cloud recovery material is complete and verified")
 
-    # a. Stop daemon
+    # a. Disable the desktop's own login item before removing its Python
+    # runtime. The hybrid CLI leaves the app/package for normal OS removal.
+    desktop = _inspect_desktop_installation()
+    if desktop.autostart_path is not None or desktop.unrecognized_autostart is not None:
+        step("Disabling Ormah Desktop autostart")
+        if desktop.unrecognized_autostart is not None:
+            warn(
+                "Uninstall cannot safely identify this desktop autostart entry: "
+                f"{desktop.unrecognized_autostart}"
+            )
+            warn("Uninstall cancelled before removing the backend or integrations.")
+            return
+        _disable_desktop_autostart(desktop)
+        if desktop.autostart_path is not None and not desktop.autostart_disabled:
+            warn("Uninstall cancelled before removing the backend or integrations.")
+            return
+
+    # b. Stop daemon
     step("Stopping server")
     from ormah.server_manager import uninstall_autostart
     uninstall_autostart()
 
-    # b. Remove Claude Code hooks
+    # c. Remove Claude Code hooks
     step("Removing Claude Code hooks")
     _remove_claude_hooks()
     _remove_codex_hooks()
 
-    # c. Remove MCP registration
+    # d. Remove MCP registration
     step("Removing MCP registration")
     _remove_mcp_registration()
 
-    # c.5 Remove the Pi package registration before deleting Ormah's own files.
+    # d.5 Remove the Pi package registration before deleting Ormah's own files.
     step("Removing Pi extension")
     try:
         _remove_pi_extension()
     except Exception as exc:  # noqa: BLE001
         warn(f"Could not remove ormah-pi automatically: {exc}")
 
-    # d. Remove CLAUDE.md block
+    # e. Remove CLAUDE.md block
     step("Removing CLAUDE.md instructions")
     _remove_claude_md_block()
     _remove_codex_md_block()
@@ -2227,7 +2496,7 @@ def run_uninstall(yes: bool = False) -> None:
     _remove_pi_md_block()
     _remove_pi_agents()
 
-    # e. Delete data directories
+    # f. Delete data directories
     step("Deleting data directories")
 
     xdg_dirs = [
@@ -2257,7 +2526,7 @@ def run_uninstall(yes: bool = False) -> None:
         else:
             info(f"{d} not found — skipping")
 
-    # f. Delete fastembed model cache
+    # g. Delete fastembed model cache
     step("Removing embedding model cache")
     _remove_fastembed_cache()
 
@@ -2281,8 +2550,15 @@ def run_uninstall(yes: bool = False) -> None:
     if not uv_uninstalled and not removed_tool_files:
         warn("Could not remove package files — remove manually with: uv tool uninstall ormah")
 
+    desktop_complete = _print_desktop_uninstall_summary(desktop)
+    package_complete = uv_uninstalled or removed_tool_files
     print()
-    ok("Ormah has been uninstalled")
+    if desktop_complete and package_complete:
+        ok("Ormah has been uninstalled")
+    elif package_complete:
+        warn("Ormah backend cleanup completed, but Ormah Desktop remains installed.")
+    else:
+        warn("Ormah cleanup is incomplete; follow the removal instructions above.")
 
 
 # ---------------------------------------------------------------------------
