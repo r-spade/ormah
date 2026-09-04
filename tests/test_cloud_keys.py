@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import stat
 import uuid
 
@@ -13,6 +15,7 @@ from ormah.cloud.crypto import encrypt_bytes, decrypt_bytes
 from ormah.cloud.keys import (
     CloudKeyError,
     _rotate_key_without_recovery_kit,
+    apply_recovery_import,
     current_recipient,
     get_or_create_store_id,
     import_key,
@@ -20,6 +23,7 @@ from ormah.cloud.keys import (
     key_file_exists,
     load_identities,
     load_identity_strings,
+    plan_recovery_import,
     rotate_key_and_recovery_kit,
     write_recovery_kit,
 )
@@ -271,6 +275,170 @@ def test_import_validates_before_writing(tmp_path):
     assert not fresh.exists()
 
 
+def test_recovery_import_rejects_duplicate_kit_identities_before_writing(key_path):
+    identity = init_key(key_path)
+    fresh_key = key_path.parent / "fresh.key"
+    memory_dir = key_path.parent / "memory"
+
+    with pytest.raises(CloudKeyError, match="duplicate age identities"):
+        plan_recovery_import(
+            f"{identity}\n{identity}\nstore_id: 22222222-3333-4444-9555-666666666666\n",
+            memory_dir,
+            fresh_key,
+        )
+
+    assert not fresh_key.exists()
+    assert not (memory_dir / ".store_id").exists()
+
+
+def test_recovery_import_reads_source_file_once(tmp_path, key_path, monkeypatch):
+    init_key(key_path)
+    kit_path = write_recovery_kit(
+        "22222222-3333-4444-9555-666666666666",
+        key_path,
+        tmp_path / "kit.md",
+    )
+    original_read_text = Path.read_text
+    reads = 0
+
+    def count_source_reads(path, *args, **kwargs):
+        nonlocal reads
+        if path == kit_path:
+            reads += 1
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", count_source_reads)
+
+    plan_recovery_import(str(kit_path), tmp_path / "memory", key_path)
+
+    assert reads == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink behavior")
+def test_recovery_import_rejects_symlinked_existing_key(tmp_path, key_path):
+    init_key(key_path)
+    kit_path = write_recovery_kit(
+        "22222222-3333-4444-9555-666666666666",
+        key_path,
+        tmp_path / "kit.md",
+    )
+    linked_key = tmp_path / "linked.key"
+    linked_key.symlink_to(key_path)
+
+    with pytest.raises(CloudKeyError, match="must not be a symlink"):
+        plan_recovery_import(str(kit_path), tmp_path / "memory", linked_key)
+
+    assert linked_key.is_symlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink behavior")
+def test_recovery_import_rejects_symlinked_existing_store(tmp_path, key_path):
+    init_key(key_path)
+    store_id = "22222222-3333-4444-9555-666666666666"
+    kit_path = write_recovery_kit(store_id, key_path, tmp_path / "kit.md")
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    target = tmp_path / "outside-store-id"
+    target.write_text(store_id + "\n", encoding="utf-8")
+    (memory_dir / ".store_id").symlink_to(target)
+
+    with pytest.raises(CloudKeyError, match="must not be a symlink"):
+        plan_recovery_import(str(kit_path), memory_dir, tmp_path / "fresh.key")
+
+    assert target.read_text(encoding="utf-8") == store_id + "\n"
+
+
+def test_recovery_import_rejects_malformed_existing_store(tmp_path, key_path):
+    init_key(key_path)
+    kit_path = write_recovery_kit(
+        "22222222-3333-4444-9555-666666666666",
+        key_path,
+        tmp_path / "kit.md",
+    )
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_path = memory_dir / ".store_id"
+    store_path.write_text("not-a-uuid\n", encoding="utf-8")
+    key_before = key_path.read_bytes()
+
+    with pytest.raises(CloudKeyError, match="Corrupt store id"):
+        plan_recovery_import(str(kit_path), memory_dir, key_path)
+
+    assert store_path.read_text(encoding="utf-8") == "not-a-uuid\n"
+    assert key_path.read_bytes() == key_before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission behavior")
+def test_recovery_import_rejects_broad_existing_key_permissions(tmp_path, key_path):
+    init_key(key_path)
+    kit_path = write_recovery_kit(
+        "22222222-3333-4444-9555-666666666666",
+        key_path,
+        tmp_path / "kit.md",
+    )
+    key_path.chmod(0o644)
+
+    with pytest.raises(CloudKeyError, match="chmod 600"):
+        plan_recovery_import(str(kit_path), tmp_path / "memory", key_path)
+
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o644
+
+
+def test_recovery_import_wraps_malformed_existing_key(tmp_path, key_path):
+    source_key = tmp_path / "source.key"
+    init_key(source_key)
+    kit_path = write_recovery_kit(
+        "22222222-3333-4444-9555-666666666666",
+        source_key,
+        tmp_path / "kit.md",
+    )
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text("AGE-SECRET-KEY-1NOTREAL\n", encoding="utf-8")
+    key_path.chmod(0o600)
+
+    with pytest.raises(CloudKeyError, match="existing cloud key is invalid"):
+        plan_recovery_import(str(kit_path), tmp_path / "memory", key_path)
+
+    assert key_path.read_text(encoding="utf-8") == "AGE-SECRET-KEY-1NOTREAL\n"
+
+
+def test_recovery_import_rejects_duplicate_existing_key(tmp_path, key_path):
+    source_key = tmp_path / "source.key"
+    identity = init_key(source_key)
+    kit_path = write_recovery_kit(
+        "22222222-3333-4444-9555-666666666666",
+        source_key,
+        tmp_path / "kit.md",
+    )
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(f"{identity}\n{identity}\n", encoding="utf-8")
+    key_path.chmod(0o600)
+
+    with pytest.raises(CloudKeyError, match="duplicate identities"):
+        plan_recovery_import(str(kit_path), tmp_path / "memory", key_path)
+
+    assert key_path.read_text(encoding="utf-8") == f"{identity}\n{identity}\n"
+
+
+def test_apply_recovery_import_installs_store_and_key(tmp_path, key_path):
+    source_key = tmp_path / "source.key"
+    identities = [init_key(source_key)]
+    store_id = "22222222-3333-4444-9555-666666666666"
+    kit_path = write_recovery_kit(store_id, source_key, tmp_path / "kit.md")
+    memory_dir = tmp_path / "memory"
+
+    result = apply_recovery_import(
+        plan_recovery_import(str(kit_path), memory_dir, key_path)
+    )
+
+    assert result.store_id_status == "installed"
+    assert result.key_status == "installed"
+    assert load_identity_strings(key_path) == identities
+    assert (memory_dir / ".store_id").read_text(encoding="utf-8").strip() == store_id
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE((memory_dir / ".store_id").stat().st_mode) == 0o600
+
+
 # --- store_id ---
 
 
@@ -370,6 +538,7 @@ def test_install_store_id_fresh_and_idempotent(tmp_path):
     sid = "55555555-6666-4777-8888-999999999999"
     assert install_store_id(memory_dir, sid) == sid
     assert (memory_dir / ".store_id").read_text().strip() == sid
+    assert stat.S_IMODE((memory_dir / ".store_id").stat().st_mode) == 0o600
     assert install_store_id(memory_dir, sid) == sid  # same id: no-op
 
 

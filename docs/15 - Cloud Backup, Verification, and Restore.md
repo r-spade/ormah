@@ -487,6 +487,19 @@ ormah server stop
 ormah backup restore --cloud --yes
 ```
 
+Recovery-kit import is preflighted before either local resource changes. Ormah reads the kit once,
+validates its store ID and every identity, then compares them with any installed `.store_id` and
+`cloud.key`. The normal uninstall/reinstall state has a preserved matching key but no store ID; in
+that case Ormah installs only the missing store ID, leaves the key file byte-for-byte unchanged,
+regenerates the canonical recovery kit from the complete installed keyring, and exits successfully.
+Repeating an already-complete import is also a successful no-op. A different store ID or an identity
+that is not already present in an existing keyring fails before either resource is written.
+
+Human and JSON output report the store and key outcomes independently. JSON callers receive
+`store_id_status` and `key_status`; neither output includes private identity material. Existing
+keyrings with additional retained rotation identities are valid, and the refreshed recovery kit
+contains the full current-first keyring rather than preserving a stale or unrelated kit file.
+
 The restore command:
 
 1. reads the imported store ID instead of generating a new remote namespace;

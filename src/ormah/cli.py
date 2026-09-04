@@ -517,18 +517,20 @@ def _cmd_cloud_init(args):
         KEY_PATH,
         MAX_RECOVERY_KIT_BYTES,
         CloudKeyError,
-        extract_store_id,
+        apply_recovery_import,
         get_or_create_store_id,
-        import_key,
         init_key,
-        install_store_id,
         load_identity_strings,
+        plan_recovery_import,
+        validate_recovery_kit_destination,
         write_recovery_kit,
     )
     from ormah.config import settings
     from ormah.console import info, ok, warn
 
     try:
+        import_result = None
+        kit_path = None
         if args.import_key:
             import_source = args.import_key
             if import_source == "-":
@@ -541,14 +543,12 @@ def _cmd_cloud_init(args):
                     import_source = raw_bytes.decode("utf-8")
                 except UnicodeDecodeError as exc:
                     raise CloudKeyError("The recovery kit is not valid UTF-8 text.") from exc
-            # The kit's store id is the remote namespace — it must be
-            # installed too, or the restored machine would point at a brand
-            # new store and orphan every existing backup. Installed first so
-            # a store-id conflict aborts before any key material is written.
-            imported_store_id = extract_store_id(import_source)
-            if imported_store_id:
-                install_store_id(settings.memory_dir, imported_store_id)
-            import_key(import_source)
+            # Preflight both resources before the first write. A preserved key
+            # may contain extra pre-rotation identities, but it must contain
+            # every identity carried by the recovery kit.
+            import_plan = plan_recovery_import(import_source, settings.memory_dir)
+            kit_path = validate_recovery_kit_destination(import_plan)
+            import_result = apply_recovery_import(import_plan)
         else:
             init_key()
     except (CloudKeyError, CloudCryptoError, OSError) as exc:
@@ -556,16 +556,25 @@ def _cmd_cloud_init(args):
 
     try:
         store_id = get_or_create_store_id(settings.memory_dir)
+        # The installed keyring is authoritative. Always regenerate the kit so
+        # an unrelated, stale, or damaged file is never affirmed as recovery.
         kit_path = write_recovery_kit(
             store_id,
+            kit_path=kit_path,
             account_email=getattr(settings, "account_email", None),
         )
         identity_count = len(load_identity_strings())
     except (CloudKeyError, CloudCryptoError, OSError) as exc:
-        _print_backup_error(
-            f"Encryption key was written to {KEY_PATH}, but finishing setup failed: {exc}\n"
-            "Complete it with: ormah cloud kit"
-        )
+        if import_result is not None:
+            _print_backup_error(
+                "Recovery identity was installed or verified, but the canonical recovery kit "
+                f"could not be refreshed: {exc}\nComplete it with: ormah cloud kit"
+            )
+        else:
+            _print_backup_error(
+                f"Encryption key was written to {KEY_PATH}, but finishing setup failed: {exc}\n"
+                "Complete it with: ormah cloud kit"
+            )
 
     if args.json:
         print(json.dumps({
@@ -574,14 +583,37 @@ def _cmd_cloud_init(args):
             "imported": bool(args.import_key),
             "store_id": store_id,
             "recovery_kit": str(kit_path),
+            "store_id_status": (
+                import_result.store_id_status if import_result is not None else "generated"
+            ),
+            "key_status": (
+                import_result.key_status if import_result is not None else "generated"
+            ),
         }, indent=2, sort_keys=True))
         return
 
     if args.import_key:
-        ok(f"Imported {identity_count} encryption identit{'y' if identity_count == 1 else 'ies'} to {KEY_PATH}")
+        if import_result.store_id_status == "installed":
+            ok(f"Store ID installed: {store_id}")
+        elif import_result.store_id_status == "already_matched":
+            ok(f"Store ID already matched: {store_id}")
+        elif import_result.store_id_status == "already_present":
+            ok(f"Store ID already present: {store_id}")
+        else:
+            ok(f"Store ID generated: {store_id}")
+        if import_result.key_status == "installed":
+            ok(
+                f"Recovery key installed: {KEY_PATH} "
+                f"({identity_count} identit{'y' if identity_count == 1 else 'ies'})"
+            )
+        else:
+            ok(
+                f"Recovery key already matched and preserved: {KEY_PATH} "
+                f"({identity_count} identit{'y' if identity_count == 1 else 'ies'})"
+            )
     else:
         ok(f"Generated encryption key: {KEY_PATH}")
-    info(f"Store id: {store_id}")
+        info(f"Store id: {store_id}")
     ok(f"Recovery kit written: {kit_path}")
     warn(
         "Store the recovery kit somewhere safe and OFFLINE. Anyone with it can "
