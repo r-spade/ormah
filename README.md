@@ -191,13 +191,14 @@ available. If complete recovery cannot be guaranteed, uninstall stops without
 removing data or integrations. Deleting the preserved files manually can make
 encrypted cloud backups permanently unreadable.
 
-When a positively identified Ormah Desktop install is present, interactive
-uninstall separately asks whether to remove its app bundle and local UI/WebKit
-data; it always disables the known desktop login item first. `ormah uninstall
---yes` includes those known user-owned desktop artifacts. A macOS app bundle
-that cannot be removed and a Debian-owned desktop package are left in place and
-reported with the exact manual or package-manager action, so completion is not
-claimed prematurely.
+`ormah uninstall` also detects and disables the verified Ormah Desktop login
+item before removing the Python runtime, preventing the desktop from restoring
+that runtime at the next login. The CLI deliberately leaves the application
+bundle/package and its UI data to the operating system: on macOS, quit Ormah
+and move `Ormah.app` to Trash; for a Debian install, run the exact
+`sudo apt remove ...` command printed by uninstall; for AppImage, delete the
+AppImage after quitting it. Uninstall lists every detected desktop remainder
+and never claims full removal while one remains.
 
 Restore on a new machine with:
 
