@@ -515,7 +515,6 @@ def _cmd_cloud_init(args):
     from ormah.cloud.crypto import CloudCryptoError
     from ormah.cloud.keys import (
         KEY_PATH,
-        RECOVERY_KIT_PATH,
         MAX_RECOVERY_KIT_BYTES,
         CloudKeyError,
         apply_recovery_import,
@@ -523,6 +522,7 @@ def _cmd_cloud_init(args):
         init_key,
         load_identity_strings,
         plan_recovery_import,
+        validate_recovery_kit_destination,
         write_recovery_kit,
     )
     from ormah.config import settings
@@ -530,6 +530,7 @@ def _cmd_cloud_init(args):
 
     try:
         import_result = None
+        kit_path = None
         if args.import_key:
             import_source = args.import_key
             if import_source == "-":
@@ -545,6 +546,7 @@ def _cmd_cloud_init(args):
             # Preflight both resources before the first write. A preserved key
             # may contain extra pre-rotation identities, but it must contain
             # every identity carried by the recovery kit.
+            kit_path = validate_recovery_kit_destination()
             import_result = apply_recovery_import(
                 plan_recovery_import(import_source, settings.memory_dir)
             )
@@ -555,23 +557,25 @@ def _cmd_cloud_init(args):
 
     try:
         store_id = get_or_create_store_id(settings.memory_dir)
-        # A matching imported kit is already complete recovery material. Leave
-        # it untouched for a genuine idempotent recovery import; a fresh device
-        # still receives a local kit when one is not already present.
-        recovery_kit_preserved = args.import_key and RECOVERY_KIT_PATH.is_file()
-        if recovery_kit_preserved:
-            kit_path = RECOVERY_KIT_PATH
-        else:
-            kit_path = write_recovery_kit(
-                store_id,
-                account_email=getattr(settings, "account_email", None),
-            )
+        # The installed keyring is authoritative. Always regenerate the kit so
+        # an unrelated, stale, or damaged file is never affirmed as recovery.
+        kit_path = write_recovery_kit(
+            store_id,
+            kit_path=kit_path,
+            account_email=getattr(settings, "account_email", None),
+        )
         identity_count = len(load_identity_strings())
     except (CloudKeyError, CloudCryptoError, OSError) as exc:
-        _print_backup_error(
-            f"Encryption key was written to {KEY_PATH}, but finishing setup failed: {exc}\n"
-            "Complete it with: ormah cloud kit"
-        )
+        if import_result is not None:
+            _print_backup_error(
+                "Recovery identity was installed or verified, but the canonical recovery kit "
+                f"could not be refreshed: {exc}\nComplete it with: ormah cloud kit"
+            )
+        else:
+            _print_backup_error(
+                f"Encryption key was written to {KEY_PATH}, but finishing setup failed: {exc}\n"
+                "Complete it with: ormah cloud kit"
+            )
 
     if args.json:
         print(json.dumps({
@@ -599,16 +603,19 @@ def _cmd_cloud_init(args):
         else:
             ok(f"Store ID generated: {store_id}")
         if import_result.key_status == "installed":
-            ok(f"Recovery key installed: {KEY_PATH}")
+            ok(
+                f"Recovery key installed: {KEY_PATH} "
+                f"({identity_count} identit{'y' if identity_count == 1 else 'ies'})"
+            )
         else:
-            ok(f"Recovery key already matched and preserved: {KEY_PATH}")
+            ok(
+                f"Recovery key already matched and preserved: {KEY_PATH} "
+                f"({identity_count} identit{'y' if identity_count == 1 else 'ies'})"
+            )
     else:
         ok(f"Generated encryption key: {KEY_PATH}")
         info(f"Store id: {store_id}")
-    if recovery_kit_preserved:
-        info(f"Recovery kit already present: {kit_path}")
-    else:
-        ok(f"Recovery kit written: {kit_path}")
+    ok(f"Recovery kit written: {kit_path}")
     warn(
         "Store the recovery kit somewhere safe and OFFLINE. Anyone with it can "
         "read your backups; without it, nobody can — including us."
