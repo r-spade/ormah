@@ -1,15 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import GraphCanvas from "@/components/GraphCanvas";
 import Act1Void from "@/components/Act1Void";
-import InstallPanel from "./InstallPanel";
 import {
   invoke, graphUrl, waitForServer, sleep,
   winMinimize, winClose, winToggleMaximize, onServerStatus,
 } from "./lib/bridge";
 
-type Phase = "intro" | "connect";
-
-// Title bar for the intro/connect phase (frameless window). On the graph view
+// Title bar for the startup splash (frameless window). On the graph view
 // the graph's own top bar carries the window controls.
 function TitleBar() {
   return (
@@ -33,7 +30,6 @@ function TitleBar() {
 export default function App() {
   const progressRef = useRef(0);
   const selfNodeReadyRef = useRef<{ x: number; y: number } | null>(null);
-  const [phase, setPhase] = useState<Phase>("intro");
   const [statusMsg, setStatusMsg] = useState("");
   const [canRetry, setCanRetry] = useState(false);
   const [retryBusy, setRetryBusy] = useState(false);
@@ -73,8 +69,6 @@ export default function App() {
     setRetryBusy(true);
     setCanRetry(false);
     try {
-      let onboarded = false;
-      try { onboarded = await invoke<boolean>("is_onboarded"); } catch { /* ignore */ }
       const accepted = await invoke<boolean>("retry_runtime_setup");
       if (!accepted) {
         setCanRetry(true);
@@ -82,8 +76,7 @@ export default function App() {
       }
       const ready = await waitForServer();
       if (!ready) return;
-      if (onboarded) await goGraph();
-      else setPhase("connect");
+      await goGraph();
     } finally {
       setRetryBusy(false);
     }
@@ -95,19 +88,11 @@ export default function App() {
 
     (async () => {
       const t0 = Date.now();
-      let onboarded = false;
-      try { onboarded = await invoke<boolean>("is_onboarded"); } catch { /* ignore */ }
-
       const ready = await waitForServer();
       if (!ready) return;
 
-      if (onboarded) {
-        await sleep(Math.max(0, 2200 - (Date.now() - t0)));
-        goGraph();
-        return;
-      }
-      await sleep(Math.max(0, 5200 - (Date.now() - t0)));
-      setPhase("connect");
+      await sleep(Math.max(0, 2200 - (Date.now() - t0)));
+      goGraph();
     })();
   }, []);
 
@@ -117,7 +102,7 @@ export default function App() {
       <div className="stage-wrap">
         <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
         <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
-        {phase === "intro" && statusMsg && (
+        {statusMsg && (
           <div className="boot-status" role={canRetry ? "alert" : "status"}>
             <span>{statusMsg}</span>
             {canRetry && (
@@ -127,7 +112,6 @@ export default function App() {
             )}
           </div>
         )}
-        {phase === "connect" && <InstallPanel onDone={goGraph} />}
       </div>
     </>
   );

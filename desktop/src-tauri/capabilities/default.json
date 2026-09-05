@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the Ormah onboarding webview to drive setup + read stats.",
+  "description": "Permissions for the Ormah bootstrap webview to start the local runtime.",
   "windows": ["*"],
   "permissions": [
     "core:default",

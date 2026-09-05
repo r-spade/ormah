@@ -1,17 +1,16 @@
 [[permission]]
 identifier = "desktop-bootstrap"
-description = "Allows the bundled bootstrap UI to manage the local runtime and onboarding."
+description = "Allows the bundled bootstrap UI to manage the local runtime."
 commands.allow = [
   "setup_agents",
   "fetch_stats",
   "detect_agents",
   "open_graph_cmd",
   "graph_url",
-  "mark_onboarded",
-  "is_onboarded",
   "start_server",
   "stop_server",
   "server_status",
+  "retry_runtime_setup",
   "desktop_bridge_info",
 ]
 

@@ -163,8 +163,6 @@ pub fn run() {
             commands::detect_agents,
             commands::open_graph_cmd,
             commands::graph_url,
-            commands::mark_onboarded,
-            commands::is_onboarded,
             commands::start_server,
             commands::stop_server,
             commands::server_status,

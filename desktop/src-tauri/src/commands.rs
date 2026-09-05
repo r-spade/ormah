@@ -1,4 +1,4 @@
-//! Tauri commands + small helpers shared by the tray and the onboarding webview.
+//! Tauri commands + small helpers shared by the tray and desktop webview.
 
 use serde_json::Value;
 use tauri::{AppHandle, Manager, Runtime};
@@ -142,31 +142,24 @@ pub fn retry_runtime_setup<R: Runtime>(app: AppHandle<R>) -> bool {
     crate::sidecar::start(app)
 }
 
-// ---- onboarding marker -----------------------------------------------------
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bootstrap_commands_are_allowed_by_the_desktop_capability() {
+        let permissions = include_str!("../permissions/desktop.toml");
+        let bootstrap = permissions
+            .split_once("identifier = \"desktop-bootstrap\"")
+            .expect("desktop bootstrap permission set is missing")
+            .1
+            .split_once("[[permission]]")
+            .map(|(bootstrap, _)| bootstrap)
+            .unwrap_or(permissions);
 
-fn marker_path<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|d| d.join("onboarded"))
-}
-
-pub fn onboarded<R: Runtime>(app: &AppHandle<R>) -> bool {
-    marker_path(app).map(|p| p.exists()).unwrap_or(false)
-}
-
-#[tauri::command]
-pub fn is_onboarded<R: Runtime>(app: AppHandle<R>) -> bool {
-    onboarded(&app)
-}
-
-#[tauri::command]
-pub fn mark_onboarded<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    if let Some(p) = marker_path(&app) {
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        for command in ["fetch_stats", "graph_url", "retry_runtime_setup"] {
+            assert!(
+                bootstrap.contains(&format!("\"{command}\"")),
+                "bootstrap command `{command}` is not allowed by the desktop capability"
+            );
         }
-        std::fs::write(&p, b"1").map_err(|e| e.to_string())?;
     }
-    Ok(())
 }
