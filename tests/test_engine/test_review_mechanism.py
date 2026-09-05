@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
 from ormah.engine.context_builder import ContextBuilder, _find_review_candidate
+from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.index.db import Database
 from ormah.index.graph import GraphIndex
 
@@ -226,11 +227,11 @@ class TestReviewPythonFilter:
 class TestReviewBlockInBuildWhisperContext:
     """Integration tests for review mechanism inside build_whisper_context."""
 
-    def _make_mock_engine(self, conn=None, threshold=0.70):
+    def _make_mock_engine(self, conn=None, threshold=0.70, maintenance_enabled=False):
         engine = MagicMock()
         settings = MagicMock()
         settings.affinity_similarity_threshold = threshold
-        settings.claude_maintenance_enabled = False
+        settings.claude_maintenance_enabled = maintenance_enabled
         engine.settings = settings
         # Disable embedding/search paths so they don't interfere
         engine._get_hybrid_search.return_value = None
@@ -241,6 +242,17 @@ class TestReviewBlockInBuildWhisperContext:
                 yield conn
             engine.db.transaction = _fake_transaction
         return engine
+
+    @staticmethod
+    def _admitted_ordinary_result(node_id="node-selected"):
+        """A final ordinary selection that permits the optional review append."""
+        node = _make_node_dict(
+            node_id,
+            "Current authentication design",
+            space="myspace",
+            content="Authentication uses scoped tokens for the current application.",
+        )
+        return {"node": node, "score": 0.80, "source": "hybrid"}
 
     def _insert_whisper_row(self, conn, node_id, prompt_text="how does auth work", prompt_vec_bytes=b""):
         cursor = conn.execute(
@@ -259,12 +271,14 @@ class TestReviewBlockInBuildWhisperContext:
         conn.commit()
 
         engine = self._make_mock_engine(conn)
+        engine.recall_search_structured.return_value = [self._admitted_ordinary_result()]
         builder = ContextBuilder(mock_graph, engine=engine)
         result = builder.build_whisper_context(
             prompt="how does auth work", recent_prompts=None, session_id="test-session-123"
         )
 
         assert "one thing to review when you get a chance" in result
+        assert "Current authentication design" in result
         assert "Auth token storage" in result
         assert f"whisper_log_id: {whisper_log_id}" in result
         assert f"whisper_log_id={whisper_log_id}" in result
@@ -278,6 +292,7 @@ class TestReviewBlockInBuildWhisperContext:
         conn.commit()
 
         engine = self._make_mock_engine(conn)
+        engine.recall_search_structured.return_value = [self._admitted_ordinary_result()]
         builder = ContextBuilder(mock_graph, engine=engine)
         builder.build_whisper_context(
             prompt="how does auth work", recent_prompts=None, session_id="test-session-456"
@@ -318,6 +333,7 @@ class TestReviewBlockInBuildWhisperContext:
         conn.commit()
 
         engine = self._make_mock_engine(conn)
+        engine.recall_search_structured.return_value = [self._admitted_ordinary_result()]
         builder = ContextBuilder(mock_graph, engine=engine)
         result = builder.build_whisper_context(
             prompt="how does auth work",
@@ -326,6 +342,7 @@ class TestReviewBlockInBuildWhisperContext:
         )
 
         assert "one thing to review when you get a chance" not in result
+        assert "Current authentication design" in result
 
     def test_prompt_text_truncated_to_300(self, mock_graph):
         """Long prompt_text is truncated at word boundary to ≤300 chars + ellipsis."""
@@ -341,6 +358,7 @@ class TestReviewBlockInBuildWhisperContext:
         conn.commit()
 
         engine = self._make_mock_engine(conn)
+        engine.recall_search_structured.return_value = [self._admitted_ordinary_result()]
         builder = ContextBuilder(mock_graph, engine=engine)
         result = builder.build_whisper_context(
             prompt="how does auth work", recent_prompts=None, session_id="test-session-truncate"
@@ -356,3 +374,159 @@ class TestReviewBlockInBuildWhisperContext:
             snippet_end = review_portion.find('"', snippet_start)
             snippet = review_portion[snippet_start:snippet_end]
             assert len(snippet) <= 301  # 300 chars + "…"
+
+    def _seed_same_space_review_candidate(self, conn, node_id="node-review-history"):
+        node = _make_node_dict(
+            node_id,
+            "Held-back authentication history",
+            space="myspace",
+        )
+        _insert_node(conn, node)
+        whisper_log_id = self._insert_whisper_row(conn, node_id)
+        conn.commit()
+        # This verifies the fixture is actually eligible before the silent
+        # selection below proves it does not consult the review mechanism.
+        candidate = _find_review_candidate(conn, threshold=0.70)
+        assert candidate is not None
+        assert candidate["node_id"] == node_id
+        return whisper_log_id
+
+    @pytest.mark.parametrize(
+        ("prompt", "session_id", "recent_prompts"),
+        [
+            pytest.param("Thanks, that helps.", None, None, id="sessionless-acknowledgement"),
+            pytest.param("Thanks, that helps.", "first-session", None, id="first-session-turn"),
+            pytest.param("Thanks, that helps.", "after-gap", None, id="after-session-gap"),
+            pytest.param(
+                "What is the boiling point of ethanol at sea level?",
+                None,
+                None,
+                id="unrelated-question",
+            ),
+            pytest.param("Thanks, that helps.", "same-space", None, id="same-space-history"),
+        ],
+    )
+    def test_no_candidates_do_not_lookup_or_log_review(
+        self, mock_graph, prompt, session_id, recent_prompts
+    ):
+        """A silent final selection stays silent even with eligible history."""
+        conn = mock_graph.conn
+        self._seed_same_space_review_candidate(conn)
+        engine = self._make_mock_engine(conn)
+        builder = ContextBuilder(mock_graph, engine=engine)
+
+        with patch("ormah.engine.context_builder._find_review_candidate") as review_lookup:
+            result = builder.build_whisper_context(
+                prompt=prompt,
+                space="myspace",
+                recent_prompts=recent_prompts,
+                session_id=session_id,
+            )
+
+        assert result == ""
+        review_lookup.assert_not_called()
+        assert conn.execute("SELECT COUNT(*) FROM review_log").fetchone()[0] == 0
+        outcome = conn.execute(
+            "SELECT outcome, injected_count FROM whisper_decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert tuple(outcome) == ("silent_no_candidates", 0)
+
+    def test_gate_rejected_candidates_do_not_lookup_or_log_review(self, mock_graph):
+        """A non-empty retrieval pool that fails the final gate is still silence."""
+        conn = mock_graph.conn
+        self._seed_same_space_review_candidate(conn)
+        engine = self._make_mock_engine(conn)
+        engine.recall_search_structured.return_value = [self._admitted_ordinary_result()]
+        builder = ContextBuilder(mock_graph, engine=engine)
+
+        with patch("ormah.engine.context_builder._find_review_candidate") as review_lookup:
+            result = builder.build_whisper_context(
+                prompt="how does auth work",
+                space="myspace",
+                recent_prompts=None,
+                session_id="gate-rejected",
+                injection_gate=0.90,
+            )
+
+        assert result == ""
+        review_lookup.assert_not_called()
+        assert conn.execute("SELECT COUNT(*) FROM review_log").fetchone()[0] == 0
+        outcome = conn.execute(
+            "SELECT outcome, injected_count FROM whisper_decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert tuple(outcome) == ("silent_gate", 0)
+
+    def test_maintenance_only_output_does_not_trigger_review(self, mock_graph):
+        """Rendered maintenance text must not stand in for an admitted memory."""
+        conn = mock_graph.conn
+        self._seed_same_space_review_candidate(conn)
+        engine = self._make_mock_engine(conn, maintenance_enabled=True)
+        builder = ContextBuilder(mock_graph, engine=engine)
+
+        with patch("ormah.engine.context_builder._find_review_candidate") as review_lookup:
+            result = builder.build_whisper_context(
+                prompt="Thanks, that helps.",
+                space="myspace",
+                recent_prompts=None,
+                session_id="maintenance-only",
+            )
+
+        assert result == MAINTENANCE_DUE_SIGNAL
+        review_lookup.assert_not_called()
+        assert conn.execute("SELECT COUNT(*) FROM review_log").fetchone()[0] == 0
+
+    def test_short_prompt_stays_silent_without_review(self, mock_graph):
+        """The existing short-prompt silence contract precedes review lookup."""
+        conn = mock_graph.conn
+        self._seed_same_space_review_candidate(conn)
+        engine = self._make_mock_engine(conn)
+        builder = ContextBuilder(mock_graph, engine=engine)
+
+        with patch("ormah.engine.context_builder._find_review_candidate") as review_lookup:
+            result = builder.build_whisper_context(
+                prompt="ok",
+                space="myspace",
+                recent_prompts=None,
+                session_id="short-prompt",
+            )
+
+        assert result == ""
+        review_lookup.assert_not_called()
+        assert conn.execute("SELECT COUNT(*) FROM review_log").fetchone()[0] == 0
+
+    def test_preference_only_selection_allows_review_with_exact_attribution(self, mock_graph):
+        """An admitted preference is a final candidate and can carry a review."""
+        conn = mock_graph.conn
+        whisper_log_id = self._seed_same_space_review_candidate(conn)
+        preference = _make_node_dict(
+            "node-preference",
+            "Prefer concise architecture",
+            space="myspace",
+            content="Keep architecture decisions concise and written down.",
+        )
+        preference["type"] = "preference"
+        engine = self._make_mock_engine(conn)
+        engine.has_searchable_preferences.return_value = True
+        engine.recall_search_structured.side_effect = [
+            [],
+            [{"node": preference, "score": 0.65, "source": "hybrid"}],
+        ]
+        builder = ContextBuilder(mock_graph, engine=engine)
+        mock_cross_encoder = MagicMock()
+        mock_cross_encoder.rerank.return_value = [3.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_cross_encoder):
+            result = builder.build_whisper_context(
+                prompt="plan this architecture change",
+                space="myspace",
+                recent_prompts=None,
+                session_id="preference-only",
+                reranker_enabled=True,
+                preference_applicability_enabled=True,
+                preference_applicability_gate=0.40,
+            )
+
+        assert "Prefer concise architecture" in result
+        assert "one thing to review when you get a chance" in result
+        assert f"whisper_log_id: {whisper_log_id}" in result
+        assert f"whisper_log_id={whisper_log_id}" in result
