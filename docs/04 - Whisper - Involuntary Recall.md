@@ -174,7 +174,7 @@ maintenance_due
 Two important notes:
 
 - `maintenance_due` is appended as a bare line when enabled and due
-- on the first message of a session, Ormah may also append a review block for an older gated-out candidate
+- on the first message of a session, Ormah may also append a review block for an older gated-out candidate, but only when the final main, preference, or exploration selection already contains an admitted memory; maintenance output never qualifies
 
 ## Session Hook Flow
 

@@ -1111,8 +1111,10 @@ class ContextBuilder:
                     logger.warning("Failed to compute maintenance_due: %s", e)
 
         # First-message review: surface a gated-out whisper candidate for feedback.
+        # Keep a normal silence decision silent: reviews only piggyback on a
+        # final ordinary selection, not on formatting or maintenance output.
         # recent_prompts is None only on the first message of a session (buffer just created).
-        if recent_prompts is None and self.engine is not None:
+        if recent_prompts is None and final_candidate_count > 0 and self.engine is not None:
             settings = getattr(self.engine, "settings", None)
             try:
                 threshold = getattr(settings, "affinity_similarity_threshold", 0.70) if settings else 0.70
