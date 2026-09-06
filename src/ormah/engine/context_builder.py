@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
+from ormah.engine.prompt_classifier import PromptIntent, is_clear_acknowledgement
 from ormah.index.graph import GraphIndex
 from ormah.text.tokens import distinctive_tokens
 
@@ -383,6 +384,28 @@ class ContextBuilder:
             self._log_decision(
                 session_id=session_id, space=space, prompt=prompt,
                 intent=None, outcome="silent_short",
+            )
+            if _return_debug:
+                return "", _injected_ids
+            return ""
+
+        # This control must run before classifier/enrichment: an embedding
+        # classifier can mistake a clear acknowledgement for a continuation,
+        # which would attach the prior substantive prompt to this turn and
+        # re-inject already served context. The same small predicate also
+        # keeps silence correct if the classifier/model is unavailable.
+        if is_clear_acknowledgement(prompt):
+            intent = PromptIntent(categories=["acknowledgement"])
+            logger.info(
+                "Whisper diagnostics: prompt=%r acknowledgement_intent -> skip",
+                prompt_snippet,
+            )
+            self._log_decision(
+                session_id=session_id,
+                space=space,
+                prompt=prompt,
+                intent=intent,
+                outcome="silent_acknowledgement",
             )
             if _return_debug:
                 return "", _injected_ids
