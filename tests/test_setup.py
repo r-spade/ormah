@@ -692,14 +692,16 @@ class TestClaudeCodeWirePluginGuard:
             patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
             patch("ormah.setup.configure_claude_hooks") as configure_hooks,
             patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
-            patch("ormah.setup.install_claude_agents"),
-            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_agents") as install_agents,
+            patch("ormah.setup.install_claude_commands") as install_commands,
             patch("ormah.setup.install_claude_md"),
         ):
             _claude_code_wire()
 
         configure_hooks.assert_called_once_with("/usr/bin/ormah")
         configure_mcp.assert_called_once_with("/usr/bin/ormah")
+        install_agents.assert_called_once()  # no plugin: the CLI copies stay
+        install_commands.assert_called_once()
 
     def test_project_scoped_plugin_wires_normally(self, tmp_path):
         """Deliberate: the CLI hooks are global and serve every other project."""
