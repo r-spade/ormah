@@ -6,6 +6,23 @@ from datetime import datetime, timedelta, timezone
 from ormah.models.node import Connection, EdgeType, MemoryNode, NodeType, Tier
 
 
+# ``IndexBuilder.full_rebuild`` owns node/index cleanup. These are the
+# case-scoped diagnostics, feedback, and session records it does not own.
+# Keep the dependency order explicit: feedback/lifecycle children go before
+# whisper_log, which must go before its retrieval_events parent (RESTRICT).
+_CASE_STATE_RESET_TABLES = (
+    "confirmed_use_claims",
+    "signals",
+    "affinity",
+    "whisper_log",
+    "retrieval_events",
+    "whisper_decisions",
+    "review_log",
+    "audit_log",
+    "auto_link_checked",
+)
+
+
 def _parse_dt(val: str) -> datetime:
     """Parse an ISO/RFC3339 datetime string into a timezone-aware UTC datetime.
 
@@ -110,20 +127,12 @@ def clear_eval_db(engine, *, preserve_self: bool = False) -> None:
     engine.file_store._cache_built = False
     engine.builder.full_rebuild()
     with engine.db.transaction() as conn:
-        # full_rebuild clears nodes/edges/fts; we also clear tables that can
-        # leak state across runs and affect scoring (affinity boost, logs, etc).
-        for table in (
-            "node_vectors",
-            "whisper_log",
-            "affinity",
-            "review_log",
-            "audit_log",
-            "auto_link_checked",
-        ):
-            try:
-                conn.execute(f"DELETE FROM {table}")
-            except Exception:
-                pass
+        # Keep startup metadata (including onboarding state) intact. The
+        # builder already clears node_vectors when it is available; these
+        # explicit tables are all created by the current SQLite schema, so a
+        # failure here must surface instead of silently producing a tainted eval.
+        for table in _CASE_STATE_RESET_TABLES:
+            conn.execute(f"DELETE FROM {table}")
 
     if preserve_self:
         # Recreate self node (engine.startup() does this normally).

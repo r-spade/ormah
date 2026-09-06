@@ -38,6 +38,13 @@ Prompt expectations: `should_inject` (a.k.a. `must_include`), `may_include`,
 (a.k.a. `must_be_silent`). Prompts may carry `session_id` and
 `recent_prompts` for session-context probes.
 
+## Isolation between cases
+
+The runner reuses one isolated eval database, but each case resets the prior
+fixture's nodes plus its retrieval, decision, and feedback diagnostics. This
+keeps per-case evidence attributable to the current fixture while preserving
+intentional startup metadata and the case's `preserve_self` behavior.
+
 ## Case-design rules
 
 1. **Labels are set from ground-truth judgment BEFORE the first eval run of a
