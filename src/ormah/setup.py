@@ -2824,25 +2824,29 @@ def _claude_code_wire() -> None:
     # The plugin registers the same UserPromptSubmit/PreCompact/SessionEnd hooks
     # and the same MCP server. Wiring them again in ~/.claude/settings.json runs
     # both copies: the whisper fires twice per human turn, and no merge can dedupe
-    # across the two files. The agent and slash command are namespaced by the
-    # plugin (ormah:maintenance vs ormah-maintenance), so they are not duplicate
-    # registrations — they stay installed, as does CLAUDE.md, which no plugin can
-    # write.
+    # across the two files. The plugin also ships the maintenance agent and the
+    # slash command, and the CLI copies must go with the CLI server: they call
+    # `mcp__ormah__run_maintenance`, the name of the server removed just below
+    # (the plugin's is `mcp__plugin_ormah_ormah__run_maintenance`), and
+    # ~/.claude/agents/ resolves ahead of plugin agents, so a stale copy there
+    # shadows the plugin's. Only CLAUDE.md stays: no plugin can write it.
     if _claude_code_plugin_provides_hooks():
         _remove_claude_hooks()
         _remove_mcp_from_json(Path.home() / ".claude.json")
+        _remove_claude_agents()
+        _remove_claude_commands()
         info(
-            "Claude Code plugin already provides the hooks and MCP server "
-            "— removed redundant CLI wiring"
+            "Claude Code plugin already provides the hooks, MCP server, agent "
+            "and slash command — removed redundant CLI wiring"
         )
     else:
         ormah_bin = get_ormah_bin_path()
         configure_claude_hooks(ormah_bin)
         configure_claude_code_mcp(ormah_bin)
+        install_claude_agents()
+        install_claude_commands()
 
     install_claude_md()
-    install_claude_agents()
-    install_claude_commands()
 
 
 def _claude_code_unwire() -> None:
