@@ -45,6 +45,10 @@ That is what makes Ormah feel like memory instead of search. Search waits to be 
 
 Silence is better than noise. Ormah should whisper, not shout.
 
+Brief, self-contained acknowledgements such as "Thanks, that helps" are kept
+silent, even in an active session. They do not re-run recall using the prior
+question; a thank-you that includes a new command or question still does.
+
 ## Install
 
 ### Desktop App

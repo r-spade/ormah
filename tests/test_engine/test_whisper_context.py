@@ -535,6 +535,57 @@ class TestWhisperIntentAware:
         # Should not even attempt a search
         mock_engine.recall_search_structured.assert_not_called()
 
+    @pytest.mark.parametrize("prompt", ["Thanks, that helps.", "THAT HELPS!"])
+    def test_acknowledgement_returns_empty_before_classifier_or_search(self, mock_graph, prompt):
+        """Acknowledgements stay silent even without a session continuation."""
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        builder._classifier = MagicMock()
+
+        result = builder.build_whisper_context(prompt=prompt, min_score=0.1)
+
+        assert result == ""
+        builder._classifier.classify.assert_not_called()
+        mock_engine.recall_search_structured.assert_not_called()
+
+    def test_acknowledgement_is_silent_when_classifier_is_unavailable(self, mock_graph):
+        """The guard must not depend on local embedding-model availability."""
+        mock_engine = MagicMock()
+        mock_engine._get_hybrid_search.return_value = None
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        result = builder.build_whisper_context(prompt="Thanks, that helps.", min_score=0.1)
+
+        assert result == ""
+        mock_engine.recall_search_structured.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("prompt", "title"),
+        [
+            ("Thanks, now explain the cache.", "Cache invalidation"),
+            ("Done with that; start the deployment.", "Deployment checklist"),
+        ],
+    )
+    def test_substantive_prompt_with_acknowledgement_words_still_searches(
+        self, mock_graph, prompt, title,
+    ):
+        """Acknowledgement words must not swallow a new useful request."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["general"])
+        node = _make_node_dict("substantive-1", title)
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.8, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(prompt=prompt, min_score=0.1)
+
+        assert title in result
+        mock_engine.recall_search_structured.assert_called_once()
+
     def test_general_intent_searches_normally(self, mock_graph):
         """General intent should use normal search behavior."""
         mock_engine = MagicMock()
@@ -1387,6 +1438,33 @@ class TestWhisperContextBuffer:
         assert "eval results" in query
         assert "what about the metrics side?" in query
 
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "and the second one?",
+            "and how often does that run?",
+            "continue where we left off",
+        ],
+    )
+    def test_prelabelled_continuations_still_enrich_search_query(self, mock_graph, prompt):
+        """Acknowledgement handling must not regress useful short follow-ups."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
+        mock_engine.recall_search_structured.return_value = []
+
+        builder.build_whisper_context(
+            prompt=prompt,
+            min_score=0.1,
+            recent_prompts=["how does the scheduler work?"],
+        )
+
+        query = mock_engine.recall_search_structured.call_args.kwargs["query"]
+        assert query == f"how does the scheduler work? {prompt}"
+
     def test_reranker_judges_context_enhanced_followup_query(self, mock_graph):
         """The reranker must score the same context-enhanced query that search
         ran on, not the bare prompt. Its ce_absolute drives the injection gate,
@@ -1560,6 +1638,139 @@ class TestSessionBufferRoute:
         assert [p for p, _ in _session_buffers["session-2"]] == ["session2 prompt"]
 
         _session_buffers.clear()
+
+    def test_acknowledgement_does_not_reinject_served_context(self, tmp_path):
+        """The real route must not enrich an acknowledgement with its prior turn.
+
+        The deterministic classifier deliberately labels the acknowledgement as
+        ``continuation`` to reproduce the old failure.  The first route call
+        writes an injected whisper_log event for the seeded Markdown decision;
+        the second call uses the same session buffer and must remain silent.
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from ormah.api.routes_agent import _session_buffers, router
+        from ormah.engine.prompt_classifier import PromptIntent
+        from ormah.index.db import Database
+
+        _session_buffers.clear()
+        db = Database(tmp_path / "index.db")
+        db.init_schema()
+        graph = GraphIndex(db.conn)
+        node = _make_node_dict("markdown-choice", "Markdown source of truth", space="nova")
+        node["content"] = (
+            "Nova stores memories as Markdown because people can read, edit, version and "
+            "move them between tools. SQLite is a derived search index that can be rebuilt."
+        )
+        _insert_node(db.conn, node)
+        db.conn.commit()
+
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        engine = MagicMock()
+        engine.settings = _make_settings_mock()
+        engine.db = db
+        encoder = MagicMock()
+        encoder.encode.return_value = prompt_vec
+        encoder.encode_query.return_value = prompt_vec
+        hybrid_search = MagicMock()
+        hybrid_search.encoder = encoder
+        engine._get_hybrid_search.return_value = hybrid_search
+        engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.9, "source": "hybrid", "raw_cosine": 0.9},
+        ]
+        builder = ContextBuilder(graph, engine=engine)
+        builder._classifier = MagicMock()
+        builder._classifier.classify.side_effect = [
+            PromptIntent(categories=["general"]),
+            PromptIntent(categories=["continuation"]),
+        ]
+
+        def get_whisper_context(**kwargs):
+            return builder.build_whisper_context(
+                **kwargs,
+                min_score=0.1,
+                injection_gate=0.55,
+                topic_shift_enabled=True,
+                topic_shift_threshold=0.75,
+            )
+
+        engine.get_whisper_context.side_effect = get_whisper_context
+        app = FastAPI()
+        app.include_router(router)
+        app.state.engine = engine
+
+        try:
+            with TestClient(app) as client:
+                first = client.post(
+                    "/agent/whisper",
+                    json={
+                        "prompt": "Why did we choose Markdown as the source of truth?",
+                        "space": "nova",
+                        "session_id": "ack-later",
+                    },
+                )
+                assert first.status_code == 200
+                assert "Markdown source of truth" in first.json()["text"]
+                served = db.conn.execute(
+                    "SELECT was_injected FROM whisper_log WHERE session_id = ? AND node_id = ?",
+                    ("ack-later", "markdown-choice"),
+                ).fetchone()
+                assert served is not None and served["was_injected"] == 1
+
+                acknowledgement = client.post(
+                    "/agent/whisper",
+                    json={
+                        "prompt": "Thanks, that helps.",
+                        "space": "nova",
+                        "session_id": "ack-later",
+                    },
+                )
+
+            assert acknowledgement.status_code == 200
+            assert acknowledgement.json()["text"] == ""
+            assert engine.recall_search_structured.call_count == 1
+            whisper_log_count = db.conn.execute(
+                "SELECT COUNT(*) FROM whisper_log WHERE session_id = ?",
+                ("ack-later",),
+            ).fetchone()[0]
+            assert whisper_log_count == 1
+        finally:
+            _session_buffers.clear()
+            db.close()
+
+    def test_session_gap_drops_acknowledgement_history(self):
+        """A stale buffer cannot make an acknowledgement a follow-up query."""
+        from collections import deque
+        import time
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from ormah.api.routes_agent import _session_buffers, router
+        from ormah.config import settings as global_settings
+
+        _session_buffers.clear()
+        gap_seconds = global_settings.whisper_session_gap_minutes * 60
+        _session_buffers["expired-ack"] = deque(
+            [("Why did we choose Markdown?", time.time() - gap_seconds - 1)],
+            maxlen=global_settings.whisper_context_buffer_size,
+        )
+        engine = MagicMock()
+        engine.get_whisper_context.return_value = ""
+        app = FastAPI()
+        app.include_router(router)
+        app.state.engine = engine
+
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/agent/whisper",
+                    json={"prompt": "Thanks, that helps.", "session_id": "expired-ack"},
+                )
+
+            assert response.status_code == 200
+            assert engine.get_whisper_context.call_args.kwargs["recent_prompts"] is None
+        finally:
+            _session_buffers.clear()
 
 
 class TestWhisperTopicShift:

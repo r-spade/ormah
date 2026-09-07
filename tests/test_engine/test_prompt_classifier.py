@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 
 from ormah.engine.prompt_classifier import (
     PromptClassifier,
@@ -282,6 +283,43 @@ class TestClassificationLogic:
         intent = classifier.classify("what did you learn about me recently")
         assert "temporal" in intent.categories
         assert "identity" in intent.categories
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "Thanks, that helps.",
+            "THANK YOU!",
+            "that helps...",
+            "Got it.",
+            "DONE",
+        ],
+    )
+    def test_clear_acknowledgements_have_a_distinct_intent(self, prompt):
+        """Clear acknowledgements bypass embedding continuation matching."""
+        encoder = MagicMock()
+        classifier = PromptClassifier(encoder)
+
+        intent = classifier.classify(prompt)
+
+        assert intent.categories == ["acknowledgement"]
+        encoder.encode.assert_not_called()
+        encoder.encode_batch.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "Thanks, now explain the cache.",
+            "Done with that; start the deployment.",
+            "and the second one?",
+            "and how often does that run?",
+            "continue where we left off",
+        ],
+    )
+    def test_substantive_and_follow_up_controls_are_not_acknowledgements(self, prompt):
+        """Only a self-contained acknowledgement should be suppressed."""
+        from ormah.engine.prompt_classifier import is_clear_acknowledgement
+
+        assert not is_clear_acknowledgement(prompt)
 
 
 # ---------------------------------------------------------------------------

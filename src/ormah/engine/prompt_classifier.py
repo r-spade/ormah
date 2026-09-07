@@ -113,6 +113,39 @@ _DANGLING_PREP_RE = re.compile(
     r"\b(?:in|during|from|over|for)\s+(?:the\s+)?(?=\s*$|\s*,)", re.IGNORECASE
 )
 
+# Acknowledgements are distinct from conversational turns: when they follow a
+# useful answer, embedding similarity can otherwise label them as a
+# continuation and cause the prior question to be searched again. Keep this
+# grammar deliberately small and anchored so a new request that contains a
+# thank-you ("Thanks, now explain the cache") keeps its substantive intent.
+_ACKNOWLEDGEMENT_RE = re.compile(
+    r"""
+    ^\s*
+    (?:
+        (?:thanks|thank\s+you)
+        (?:\s*,?\s*(?:that|this|it)\s+(?:helps?|was\s+helpful))?
+        | (?:that|this|it)\s+(?:helps?|was\s+helpful)
+        | got\s+it
+        | makes\s+sense
+        | all\s+set
+        | that(?:'s|\s+is)\s+all
+        | done
+    )
+    [\s.!?…]*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def is_clear_acknowledgement(prompt: str) -> bool:
+    """Return whether *prompt* is a self-contained acknowledgement or closure.
+
+    This intentionally recognizes only complete acknowledgement phrases. It is
+    not a general sentiment detector: commands and questions containing words
+    such as "thanks" or "done" must still be eligible for useful recall.
+    """
+    return bool(_ACKNOWLEDGEMENT_RE.match(prompt))
+
 
 def has_temporal_phrases(prompt: str) -> bool:
     """Return True if *prompt* contains explicit temporal phrases.
@@ -267,6 +300,12 @@ class PromptClassifier:
 
     def classify(self, prompt: str) -> PromptIntent:
         """Classify *prompt* and return an intent with search-param overrides."""
+        # Recognise explicit acknowledgement/closure before embedding matching.
+        # Their semantic proximity to continuation examples is not a retrieval
+        # request, and must not cause a buffered prior prompt to be re-used.
+        if is_clear_acknowledgement(prompt):
+            return PromptIntent(categories=["acknowledgement"])
+
         self._ensure_archetypes()
         assert self._archetype_vecs is not None
 
