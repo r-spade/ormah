@@ -6,10 +6,17 @@ import pytest
 
 
 @pytest.fixture
-def tmp_engine(tmp_path):
+def tmp_engine(tmp_path, monkeypatch):
     from eval.whisper.cli import _EVAL_SETTINGS_OVERRIDES
     from ormah.config import Settings
     from ormah.engine.memory_engine import MemoryEngine
+
+    # Seeder coverage exercises SQLite/file reset behavior, not embedding or
+    # reranking. Keep these tests independent of model downloads while using
+    # the real MemoryEngine schema and its foreign-key constraints.
+    monkeypatch.setattr(MemoryEngine, "_index_embedding", lambda self, node: None)
+    monkeypatch.setattr(MemoryEngine, "_warmup_embedder", lambda self: None)
+    monkeypatch.setattr(MemoryEngine, "_warmup_reranker", lambda self: None)
 
     (tmp_path / "nodes").mkdir()
     settings = Settings(memory_dir=tmp_path, **_EVAL_SETTINGS_OVERRIDES)
@@ -40,6 +47,118 @@ _CASE = {
         },
     ],
 }
+
+
+_REUSED_ID_CASE = {
+    "id": "t-002",
+    "memories": [
+        {
+            "node_id": "aaa-portfact",
+            "title": "Replacement fact",
+            "content": "The replacement fixture has different content.",
+            "type": "fact",
+            "tier": "working",
+            "space": "ormah",
+        },
+    ],
+}
+
+
+_CASE_SCOPED_DIAGNOSTIC_TABLES = (
+    "retrieval_events",
+    "whisper_log",
+    "affinity",
+    "signals",
+    "confirmed_use_claims",
+    "whisper_decisions",
+)
+
+
+def _insert_case_diagnostics(engine, node_id: str) -> None:
+    """Record linked feedback/diagnostics using the production SQLite schema."""
+    with engine.db.transaction() as conn:
+        event = conn.execute(
+            "INSERT INTO retrieval_events "
+            "(surface, session_id, space, prompt_hash, prompt_text, prompt_vec, logged_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("whisper", "case-a", "ormah", "case-a-hash", "case A prompt", b"1234", "2026-01-01T00:00:00Z"),
+        )
+        whisper_log = conn.execute(
+            "INSERT INTO whisper_log "
+            "(session_id, space, prompt_hash, prompt_text, prompt_vec, node_id, score, "
+            "was_injected, logged_at, retrieval_event_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "case-a",
+                "ormah",
+                "case-a-hash",
+                None,
+                b"",
+                node_id,
+                0.8,
+                1,
+                "2026-01-01T00:00:00Z",
+                event.lastrowid,
+            ),
+        )
+        whisper_log_id = whisper_log.lastrowid
+        conn.execute(
+            "INSERT INTO affinity "
+            "(prompt_vec, prompt_text, node_id, signal, source, confirmed_at, space, session_id, whisper_log_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                b"1234",
+                "case A prompt",
+                node_id,
+                1,
+                "implicit",
+                "2026-01-01T00:00:00Z",
+                "ormah",
+                "case-a",
+                whisper_log_id,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO signals "
+            "(whisper_log_id, node_id, signal_type, polarity, strength, source, session_id, "
+            "surface, space, prompt_hash, evidence, created) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                whisper_log_id,
+                node_id,
+                "implicit_confirmation",
+                1,
+                1.0,
+                "agent",
+                "case-a",
+                "whisper",
+                "ormah",
+                "case-a-hash",
+                "case A evidence",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at) "
+            "VALUES (?, ?, ?)",
+            (whisper_log_id, node_id, "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO whisper_decisions "
+            "(session_id, space, prompt_hash, intent, outcome, candidate_count, injected_count, "
+            "max_gate_score, logged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "case-a",
+                "ormah",
+                "case-a-hash",
+                "factual",
+                "injected",
+                1,
+                1,
+                0.8,
+                "2026-01-01T00:00:00Z",
+            ),
+        )
 
 
 class TestSeedCase:
@@ -185,6 +304,85 @@ class TestSeedCase:
         for table in ("whisper_log", "affinity", "review_log", "audit_log", "auto_link_checked"):
             row = tmp_engine.db.conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
             assert row["n"] == 0
+
+    def test_seed_case_clears_linked_diagnostics_before_same_id_fixture_reuse(self, tmp_engine):
+        """A later fixture must not retain evidence tied to the old fixture's node ID."""
+        from eval.whisper.seeder import seed_case
+
+        seed_case(tmp_engine, _CASE)
+        _insert_case_diagnostics(tmp_engine, "aaa-portfact")
+
+        for table in _CASE_SCOPED_DIAGNOSTIC_TABLES:
+            row = tmp_engine.db.conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+            assert row["n"] == 1
+
+        # Case B intentionally reuses A's node ID. A stale row would look valid
+        # after the reset, so checking only for orphaned node IDs would miss it.
+        seed_case(tmp_engine, _REUSED_ID_CASE)
+
+        for table in _CASE_SCOPED_DIAGNOSTIC_TABLES:
+            row = tmp_engine.db.conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+            assert row["n"] == 0
+
+        node = tmp_engine.file_store.load("aaa-portfact")
+        assert node is not None
+        assert node.content == "The replacement fixture has different content."
+        assert tmp_engine.db.conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    @pytest.mark.parametrize("preserve_self", [False, True])
+    def test_clear_eval_db_is_idempotent_without_diagnostics_and_preserves_metadata(
+        self, tmp_engine, preserve_self
+    ):
+        from eval.whisper.seeder import clear_eval_db
+
+        with tmp_engine.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
+            )
+
+        # The second invocation starts with no case nodes or diagnostics.
+        clear_eval_db(tmp_engine, preserve_self=preserve_self)
+        clear_eval_db(tmp_engine, preserve_self=preserve_self)
+
+        row = tmp_engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'onboarding_prompted'"
+        ).fetchone()
+        assert row is not None
+        assert row["value"] == "1"
+        assert tmp_engine.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == (
+            1 if preserve_self else 0
+        )
+        for table in _CASE_SCOPED_DIAGNOSTIC_TABLES:
+            assert tmp_engine.db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        assert tmp_engine.db.conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    def test_runner_results_are_unchanged_by_prior_diagnostics(self, tmp_engine, monkeypatch):
+        from eval.whisper.runner import run_whisper_eval
+
+        case = {
+            **_REUSED_ID_CASE,
+            "prompts": [
+                {
+                    "text": "What does this fixture contain?",
+                    "category": "factual",
+                    "expected": {"should_inject": ["aaa-portfact"]},
+                }
+            ],
+        }
+        monkeypatch.setattr(tmp_engine.context_builder, "_get_classifier", lambda: None)
+        monkeypatch.setattr(
+            tmp_engine,
+            "get_whisper_context",
+            lambda **kwargs: ("fixture context", ["aaa-portfact"]),
+        )
+
+        baseline = run_whisper_eval([case], tmp_engine)
+        _insert_case_diagnostics(tmp_engine, "aaa-portfact")
+        after_prior_diagnostics = run_whisper_eval([case], tmp_engine)
+
+        assert after_prior_diagnostics == baseline
+        for table in _CASE_SCOPED_DIAGNOSTIC_TABLES:
+            assert tmp_engine.db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
 
     def test_clear_eval_db_can_preserve_self_node(self, tmp_engine):
         from eval.whisper.seeder import clear_eval_db, seed_case
