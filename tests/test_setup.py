@@ -629,13 +629,19 @@ class TestClaudeCodeWirePluginGuard:
 
     def test_working_plugin_strips_hooks_and_mcp_and_writes_no_wiring(self, tmp_path):
         claude_dir = self._seed_working_plugin(tmp_path)
+        # Left behind by a pre-plugin `ormah setup`. Both call the CLI-registered
+        # `ormah` MCP server this very run removes, and ~/.claude/agents/ shadows
+        # the plugin's own agent — so they must go, not be rewritten.
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
 
         with (
             patch("ormah.setup.Path.home", return_value=tmp_path),
             patch("ormah.setup.configure_claude_hooks") as configure_hooks,
             patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
-            patch("ormah.setup.install_claude_agents") as install_agents,
-            patch("ormah.setup.install_claude_commands") as install_commands,
             patch("ormah.setup.install_claude_md") as install_md,
         ):
             _claude_code_wire()
@@ -648,10 +654,9 @@ class TestClaudeCodeWirePluginGuard:
 
         configure_hooks.assert_not_called()
         configure_mcp.assert_not_called()
-        # not duplicate registrations — the plugin namespaces these
-        install_md.assert_called_once()
-        install_agents.assert_called_once()
-        install_commands.assert_called_once()
+        install_md.assert_called_once()                             # no plugin can write CLAUDE.md
+        assert not stale_agent.exists()                             # the plugin ships its own
+        assert not stale_command.exists()                           # /ormah:maintenance
 
     def test_strip_preserves_third_party_hooks(self, tmp_path):
         claude_dir = self._seed_working_plugin(tmp_path)
@@ -687,14 +692,16 @@ class TestClaudeCodeWirePluginGuard:
             patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
             patch("ormah.setup.configure_claude_hooks") as configure_hooks,
             patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
-            patch("ormah.setup.install_claude_agents"),
-            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_agents") as install_agents,
+            patch("ormah.setup.install_claude_commands") as install_commands,
             patch("ormah.setup.install_claude_md"),
         ):
             _claude_code_wire()
 
         configure_hooks.assert_called_once_with("/usr/bin/ormah")
         configure_mcp.assert_called_once_with("/usr/bin/ormah")
+        install_agents.assert_called_once()  # no plugin: the CLI copies stay
+        install_commands.assert_called_once()
 
     def test_project_scoped_plugin_wires_normally(self, tmp_path):
         """Deliberate: the CLI hooks are global and serve every other project."""
@@ -1245,6 +1252,28 @@ class TestClaudePluginDocs:
 
         assert 'subagent_type="ormah-maintenance"' in content
         assert "run_in_background=True" in content
+
+    def test_maintenance_agent_binds_the_plugin_scoped_tool_only(self):
+        """The plugin's `.mcp.json` names the server `ormah`, so Claude Code exposes
+        its tools as `mcp__plugin_ormah_ormah__*`. `mcp__ormah__*` is the CLI-registered
+        server, which plugin-mode setup removes."""
+        root = Path(__file__).resolve().parents[1]
+        content = (
+            root / "integrations" / "claude-plugin" / "agents" / "ormah-maintenance.md"
+        ).read_text()
+        frontmatter = content.split("---")[1]
+
+        assert "tools: mcp__plugin_ormah_ormah__run_maintenance" in frontmatter
+        assert "mcp__ormah__run_maintenance" not in content
+
+    def test_cli_channel_agent_keeps_the_cli_tool_name(self):
+        """Not a copy of the plugin agent: `install_claude_agents()` ships this one for
+        installs without the plugin, where the server really is named `ormah`."""
+        root = Path(__file__).resolve().parents[1]
+        content = (root / "src" / "ormah" / "agents" / "ormah-maintenance.md").read_text()
+
+        assert "mcp__ormah__run_maintenance" in content
+        assert "mcp__plugin_ormah_ormah__" not in content
 
 
 # --- CLI tests ---
