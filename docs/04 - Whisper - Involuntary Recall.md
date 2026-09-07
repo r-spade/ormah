@@ -171,10 +171,7 @@ full content and related memories.
 maintenance_due
 ```
 
-Two important notes:
-
-- `maintenance_due` is appended as a bare line when enabled and due
-- ordinary whisper never appends retrospective review assignments; it contains only current-task context plus the maintenance signal when due
+`maintenance_due` is appended as a bare line when maintenance is enabled and due.
 
 ## Session Hook Flow
 

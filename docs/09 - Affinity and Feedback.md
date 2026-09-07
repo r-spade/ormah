@@ -200,10 +200,6 @@ flowchart LR
 
 It can rescue a borderline candidate or slightly suppress a noisy one, but it is capped.
 
-## Historical Review Records
-
-Ordinary whisper does not scan historical held-back candidates or append retrospective review assignments. Existing `review_log` rows remain for compatibility: explicit feedback still marks matching rows as answered, and historical `whisper_log` IDs remain valid for exact feedback attribution. Any future dedicated review workflow must operate outside the ordinary whisper path.
-
 ## Walkthrough Example
 
 1. whisper surfaces a node during a prompt about database decisions

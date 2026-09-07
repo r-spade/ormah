@@ -112,8 +112,6 @@ When an agent knows it needs something, it can explicitly search memory. But mem
 
 Whisper evaluates standing preferences through a separate applicability path. This lets a rule govern a task even when it does not read like a passage that directly answers the prompt, without allowing preference guesses to suppress ordinary factual retrieval.
 
-Whisper contains context selected for the current task; it never appends historical memory-review assignments. Existing feedback records remain available to `submit_feedback` for exact historical attribution.
-
 Whisper feedback can learn from transcript files after they stop changing: a local heuristic records clear usage for free, and an optional LLM judge can classify ambiguous turns into positive, negative, or uncertain retrieval signals.
 
 Read more: [Whisper - Involuntary Recall](https://www.ormah.me/docs/how-ormah-works/whisper), [Search and Ranking](https://www.ormah.me/docs/how-ormah-works/search-and-ranking), [Affinity and Feedback](https://www.ormah.me/docs/operations/affinity-and-feedback)
