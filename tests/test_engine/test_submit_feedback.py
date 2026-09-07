@@ -160,7 +160,7 @@ class TestSubmitFeedbackBasic:
         assert engine.db.conn.execute("SELECT COUNT(*) FROM affinity").fetchone()[0] == 0
         assert engine.db.conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 0
 
-    def test_exact_feedback_accepts_active_review_held_back_event(self, engine):
+    def test_exact_feedback_accepts_historical_held_back_event(self, engine):
         node_id = "node-active-review-001"
         whisper_log_id = _insert_whisper_log(
             engine.db.conn,

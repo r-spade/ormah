@@ -42,7 +42,7 @@ flowchart TB
     OVERLAP --> GATE[Injection gate]
     GATE --> EXPLORE[Optional exploration slot]
     EXPLORE --> FORMAT[Flat markdown formatter]
-    FORMAT --> EXTRA[Append maintenance_due and/or review block]
+    FORMAT --> EXTRA[Append maintenance_due when due]
     EXTRA --> RESULT[additionalContext]
 ```
 
@@ -171,10 +171,7 @@ full content and related memories.
 maintenance_due
 ```
 
-Two important notes:
-
-- `maintenance_due` is appended as a bare line when enabled and due
-- on the first message of a session, Ormah may also append a review block for an older gated-out candidate
+`maintenance_due` is appended as a bare line when maintenance is enabled and due.
 
 ## Session Hook Flow
 

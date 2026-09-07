@@ -200,21 +200,6 @@ flowchart LR
 
 It can rescue a borderline candidate or slightly suppress a noisy one, but it is capped.
 
-## Review Loop
-
-On the first message of a session, whisper may surface one held-back candidate as a review suggestion. That review block asks the client/agent to call `submit_feedback(...)` later if the relevance can be judged.
-
-This remains one bridge between whisper behavior and future affinity learning. The transcript
-watcher now provides a second bridge by mining completed transcripts for clear memory usage.
-
-The review candidate is selected from recent `whisper_log` rows where:
-
-- `was_injected = 0`
-- the node has not also been injected recently
-- there is no strong existing affinity signal for similar prompts
-- it has not been surfaced for review too recently
-- it is not already "exhausted" with too many unanswered review prompts
-
 ## Walkthrough Example
 
 1. whisper surfaces a node during a prompt about database decisions
