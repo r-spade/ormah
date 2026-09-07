@@ -2821,12 +2821,11 @@ class MemoryEngine:
         Fail-closed: an unqualified signal, a source outside the allowlist, a
         missing whisper_log_id, or an event that was never injected claims
         nothing. was_injected = 1 is the provenance test: only a memory the
-        agent actually saw can have been used. The session-start review path
-        (_find_review_candidate, _REVIEW_FRAMING) deliberately hands the agent a
-        was_injected = 0 event and asks whether it *would* have been useful, and
-        that answer is relevance, not use. The other two callers already satisfy
-        this — _log_feedback_candidates hardcodes was_injected = 1 and the
-        session watcher filters on it — so the condition costs them nothing.
+        agent actually saw can have been used. Historical held-back events have
+        was_injected = 0, so feedback on them can be relevance evidence but is
+        never use. The other two callers already satisfy this —
+        _log_feedback_candidates hardcodes was_injected = 1 and the session
+        watcher filters on it — so the condition costs them nothing.
 
         Enforced in SQL rather than by the caller so a future fourth caller
         cannot reopen the hole. changes() returns 0 both for a non-injected

@@ -1,4 +1,4 @@
-"""API regressions for the review mechanism's silent first-turn inputs."""
+"""API regression coverage for retired retrospective review notes."""
 
 from __future__ import annotations
 
@@ -12,22 +12,23 @@ from ormah.api import routes_agent
 from ormah.config import settings as global_settings
 
 
-def test_whisper_route_marks_sessionless_first_and_gap_turns_as_first(monkeypatch):
-    """All first-turn shapes pass ``recent_prompts=None`` to the builder.
+def test_whisper_route_preserves_context_across_first_gap_and_ongoing_turns(monkeypatch):
+    """Every route shape leaves the builder free to return only current context.
 
-    The review guard receives these exact route inputs.  Its context-builder
-    regressions cover the eligible same-space history and assert that silence
-    performs no review lookup or write.
+    The builder regression seeds historical withheld/review rows and asserts
+    that none of these session shapes can append a retrospective assignment.
+    This route test pins the exact ``recent_prompts`` inputs for sessionless,
+    first, post-gap, and ongoing requests.
     """
     routes_agent._session_buffers.clear()
     engine = MagicMock()
-    engine.get_whisper_context.return_value = ""
+    engine.get_whisper_context.return_value = "# Ormah whispers\n\nCurrent task context"
     app = FastAPI()
     app.include_router(routes_agent.router)
     app.state.engine = engine
 
     monkeypatch.setattr(global_settings, "whisper_session_gap_minutes", 10)
-    clock = iter([1000.0, 1601.0])
+    clock = iter([1000.0, 1001.0, 1602.0])
     monkeypatch.setattr(routes_agent, "time", SimpleNamespace(time=lambda: next(clock)))
 
     try:
@@ -39,7 +40,15 @@ def test_whisper_route_marks_sessionless_first_and_gap_turns_as_first(monkeypatc
             first_turn = client.post(
                 "/agent/whisper",
                 json={
-                    "prompt": "Thanks, that helps.",
+                    "prompt": "First task request with enough words.",
+                    "space": "myspace",
+                    "session_id": "review-gap",
+                },
+            )
+            ongoing = client.post(
+                "/agent/whisper",
+                json={
+                    "prompt": "Ongoing task request with enough words.",
                     "space": "myspace",
                     "session_id": "review-gap",
                 },
@@ -47,22 +56,26 @@ def test_whisper_route_marks_sessionless_first_and_gap_turns_as_first(monkeypatc
             after_gap = client.post(
                 "/agent/whisper",
                 json={
-                    "prompt": "Thanks, that helps.",
+                    "prompt": "Post gap task request with enough words.",
                     "space": "myspace",
                     "session_id": "review-gap",
                 },
             )
 
-        assert sessionless.json() == {"text": "", "node_id": None}
-        assert first_turn.json() == {"text": "", "node_id": None}
-        assert after_gap.json() == {"text": "", "node_id": None}
+        expected = {"text": "# Ormah whispers\n\nCurrent task context", "node_id": None}
+        assert sessionless.json() == expected
+        assert first_turn.json() == expected
+        assert ongoing.json() == expected
+        assert after_gap.json() == expected
         assert [call.kwargs["recent_prompts"] for call in engine.get_whisper_context.call_args_list] == [
             None,
             None,
+            ["First task request with enough words."],
             None,
         ]
         assert [call.kwargs["session_id"] for call in engine.get_whisper_context.call_args_list] == [
             "",
+            "review-gap",
             "review-gap",
             "review-gap",
         ]

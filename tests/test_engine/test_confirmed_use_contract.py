@@ -552,15 +552,15 @@ def test_recall_node_does_not_reinforce_without_an_event_to_claim(engine):
     )
 
 
-# --- Review relevance is not confirmed use (2026-08-16 council round) -------
+# --- Held-back relevance is not confirmed use (2026-08-16 council round) ----
 
 def _seed_held_back_whisper_log(engine, node_id, prompt="what about caching?"):
-    """Insert the kind of event the session-start review hands to the agent.
+    """Insert a historical event for a memory whisper held back.
 
-    _find_review_candidate selects rows with was_injected = 0 — memories Ormah
-    held back and never surfaced — and _REVIEW_FRAMING hands that id to the
-    agent asking for source="implicit" feedback. _seed_whisper_log cannot be
-    used here: it goes through recall_search, which writes was_injected = 1.
+    The automatic retrospective review producer is retired, but existing
+    was_injected = 0 rows remain valid feedback provenance. _seed_whisper_log
+    cannot be used here: it goes through recall_search, which writes
+    was_injected = 1.
 
     logged_at is a Python ISO timestamp, not SQLite's datetime('now'), because
     _log_feedback_candidates writes ISO and the fallback orders by this column
@@ -582,15 +582,12 @@ def _seed_held_back_whisper_log(engine, node_id, prompt="what about caching?"):
     return cursor.lastrowid
 
 
-def test_review_relevance_feedback_does_not_confirm_use(engine):
+def test_held_back_relevance_feedback_does_not_confirm_use(engine):
     """Contract 11: judging a held-back memory relevant is not using it.
 
-    The review path deliberately surfaces an event with was_injected = 0 and
-    asks "would this have been useful?" — a relevance adjudication, not a use.
-    _claim_confirmed_use allowlists "implicit" and checks no provenance, so the
-    claim is taken and the lifecycle advances on a memory the agent never saw.
-    That is fabricated retention entering through the review door, which is what
-    issue #220 exists to close.
+    Historical feedback may still be attached to a was_injected = 0 event, but
+    the memory was never shown to the agent. Treating the judgment as use would
+    fabricate retention, which issue #220 forbids.
     """
     ids = _make_nodes(engine, count=1)
     target = ids[0]

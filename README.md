@@ -112,7 +112,7 @@ When an agent knows it needs something, it can explicitly search memory. But mem
 
 Whisper evaluates standing preferences through a separate applicability path. This lets a rule govern a task even when it does not read like a passage that directly answers the prompt, without allowing preference guesses to suppress ordinary factual retrieval.
 
-On a first turn, Whisper can append one held-back memory for review only when its final ordinary selection already admitted a memory. Review never turns an otherwise silent retrieval decision into unrelated context.
+Whisper contains context selected for the current task; it never appends historical memory-review assignments. Existing feedback records remain available to `submit_feedback` for exact historical attribution.
 
 Whisper feedback can learn from transcript files after they stop changing: a local heuristic records clear usage for free, and an optional LLM judge can classify ambiguous turns into positive, negative, or uncertain retrieval signals.
 

@@ -200,20 +200,9 @@ flowchart LR
 
 It can rescue a borderline candidate or slightly suppress a noisy one, but it is capped.
 
-## Review Loop
+## Historical Review Records
 
-On the first message of a session, whisper may surface one held-back candidate as a review suggestion. That review block asks the client/agent to call `submit_feedback(...)` later if the relevance can be judged.
-
-This remains one bridge between whisper behavior and future affinity learning. The transcript
-watcher now provides a second bridge by mining completed transcripts for clear memory usage.
-
-The review candidate is selected from recent `whisper_log` rows where:
-
-- `was_injected = 0`
-- the node has not also been injected recently
-- there is no strong existing affinity signal for similar prompts
-- it has not been surfaced for review too recently
-- it is not already "exhausted" with too many unanswered review prompts
+Ordinary whisper does not scan historical held-back candidates or append retrospective review assignments. Existing `review_log` rows remain for compatibility: explicit feedback still marks matching rows as answered, and historical `whisper_log` IDs remain valid for exact feedback attribution. Any future dedicated review workflow must operate outside the ordinary whisper path.
 
 ## Walkthrough Example
 
