@@ -31,16 +31,18 @@ def _serialized_store_operation(method):
 class FileStore:
     """Manages memory node files on disk.
 
-    Maintains an in-memory ``id → Path`` cache so that lookups are O(1)
+    Maintains an in-memory ``Full id → Path`` cache so that lookups are O(1)
     after the first scan, instead of falling back to an O(N) grep over
-    every markdown file.
+    every markdown file. Only a Full id is ever a key, and only once the file
+    at that path has confirmed it: a Short id lookup re-resolves on each call,
+    and a miss caches nothing.
     """
 
     def __init__(self, nodes_dir: Path, operation_lock=None) -> None:
         self.nodes_dir = nodes_dir
         self._operation_lock = operation_lock or threading.RLock()
         self.nodes_dir.mkdir(parents=True, exist_ok=True)
-        # id -> Path cache, populated lazily on first miss
+        # Full id -> Path cache, populated lazily on first miss
         self._id_cache: dict[str, Path] = {}
         self._cache_built = False
 
@@ -90,8 +92,8 @@ class FileStore:
         path = self._find_file(node_id)
         if path is None:
             return False
+        self._forget(path)  # while the file is still there to name its Full id
         path.unlink()
-        self._id_cache.pop(node_id, None)
         return True
 
     @_serialized_store_operation
@@ -116,8 +118,8 @@ class FileStore:
         deleted_dir = self.nodes_dir.parent / "deleted"
         deleted_dir.mkdir(parents=True, exist_ok=True)
         dest = deleted_dir / path.name
+        self._forget(path)  # while the file is still there to name its Full id
         path.rename(dest)
-        self._id_cache.pop(node_id, None)
         return True
 
     @_serialized_store_operation
@@ -161,13 +163,39 @@ class FileStore:
         filename = f"{node.type.value}_{slug}_{node.short_id}.md"
         return self.nodes_dir / filename
 
+    def _forget(self, path: Path) -> None:
+        """Drop the cache entry for the node stored at ``path``.
+
+        The cache is keyed by Full id, but a caller may have addressed the node by
+        its Short id, so the key cannot be read off the reference — only off the
+        file. Call this while the file is still on disk. A file that will not parse
+        leaves nothing behind that the next lookup's existence check will not clear.
+        """
+        try:
+            self._id_cache.pop(self._load_path(path).id, None)
+        except Exception:
+            pass
+
     def _find_file(self, node_id: str) -> Path | None:
-        """Find the file for a given node ID.
+        """Find the file for a Node reference — a Full id, or the 8-character Short id
+        the Whisper showed the agent.
 
         Lookup order:
-        1. In-memory cache (O(1))
-        2. Glob on short_id suffix (fast for single file)
+        1. In-memory cache, keyed by Full id (O(1)), validated by file existence
+        2. Glob on the Short id suffix, accepting a candidate only once the Full id
+           in its own frontmatter confirms the reference
         3. Full cache rebuild from disk (one-time O(N), then O(1) forever)
+
+        The glob narrows; it never decides. A filename carries the Short id, which is
+        not unique, so the first match may be a stranger's memory — the file has to
+        state its Full id before the store hands it back (ADR-0007). An ambiguous
+        Short id resolves to nothing, with a warning: the load contract is nullable
+        and the background jobs branch only on "is it None", so raising would trade
+        silent corruption for a crashed sleep cycle.
+
+        A cache hit stays validated by file existence alone. Re-parsing on every hit
+        would destroy the O(1) the cache exists for. A file replaced behind the
+        store's back is the watcher's territory, and is accepted here.
         """
         # 1. Cache hit
         cached = self._id_cache.get(node_id)
@@ -177,12 +205,36 @@ class FileStore:
             # Stale entry — remove and fall through
             del self._id_cache[node_id]
 
-        # 2. Glob on short_id
+        # 2. Glob on the Short id, then confirm each candidate against its own Full id.
+        #    Width stays at 8: filenames end in the 8-character Short id, so any other
+        #    width would force a full directory scan to serve a caller that does not exist.
         short_id = node_id.split("-")[0]
-        matches = list(self.nodes_dir.glob(f"*_{short_id}.md"))
-        if matches:
-            self._id_cache[node_id] = matches[0]
-            return matches[0]
+        if len(short_id) == 8:
+            confirmed: list[tuple[str, Path]] = []
+            for path in sorted(self.nodes_dir.glob(f"*_{short_id}.md")):
+                try:
+                    candidate = self._load_path(path)
+                except Exception:
+                    continue  # a file that will not parse confirms nothing
+                # A bare Short id has no dashes, so the split above is a no-op and
+                # it equals itself — that is what tells the two lookups apart.
+                if candidate.id == node_id or (
+                    node_id == short_id and candidate.short_id == short_id
+                ):
+                    confirmed.append((candidate.id, path))
+            if len(confirmed) == 1:
+                full_id, found = confirmed[0]
+                # Keyed by Full id, and written only after the file confirmed it.
+                self._id_cache[full_id] = found
+                return found
+            if len(confirmed) > 1:
+                logger.warning(
+                    "Node reference %s is an ambiguous Short id: %d nodes share it. "
+                    "Resolving to nothing rather than to an arbitrary one of them.",
+                    node_id,
+                    len(confirmed),
+                )
+                return None
 
         # 3. Build full cache once if not already done
         if not self._cache_built:
