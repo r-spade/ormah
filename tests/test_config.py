@@ -344,3 +344,54 @@ def test_importance_recency_half_life_must_be_finite():
 
 def test_importance_recency_half_life_accepts_the_default():
     assert _settings().importance_recency_half_life_days == 14.0
+
+
+# --- Temporal locales ---
+
+def test_temporal_locales_default_is_en_and_pt_br(monkeypatch):
+    monkeypatch.delenv("ORMAH_TEMPORAL_LOCALES", raising=False)
+    s = Settings(memory_dir="/tmp/ormah_test")
+    assert s.temporal_locales == "en,pt-BR"
+    assert s.temporal_locale_codes == ("en", "pt-BR")
+
+
+def test_temporal_locales_env_splits_and_trims(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en, pt-BR")
+    s = Settings(memory_dir="/tmp/ormah_test")
+    assert s.temporal_locale_codes == ("en", "pt-BR")
+
+
+def test_temporal_locales_env_preserves_the_order_it_names(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "pt-BR,en")
+    s = Settings(memory_dir="/tmp/ormah_test")
+    assert s.temporal_locale_codes == ("pt-BR", "en")
+
+
+def test_temporal_locales_env_dedupes_keeping_first_seen_order(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "pt-BR,en,pt-BR")
+    s = Settings(memory_dir="/tmp/ormah_test")
+    assert s.temporal_locale_codes == ("pt-BR", "en")
+
+
+def test_temporal_locales_env_rejects_an_unknown_code(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en,klingon")
+    with pytest.raises(ValidationError, match="unknown temporal locale"):
+        Settings(memory_dir="/tmp/ormah_test")
+
+
+def test_temporal_locales_env_is_case_sensitive(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en,pt-br")
+    with pytest.raises(ValidationError, match="unknown temporal locale"):
+        Settings(memory_dir="/tmp/ormah_test")
+
+
+def test_temporal_locales_env_rejects_an_empty_value(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "")
+    with pytest.raises(ValidationError, match="must name at least one locale"):
+        Settings(memory_dir="/tmp/ormah_test")
+
+
+def test_temporal_locales_env_rejects_only_separators(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", ",")
+    with pytest.raises(ValidationError, match="must name at least one locale"):
+        Settings(memory_dir="/tmp/ormah_test")
