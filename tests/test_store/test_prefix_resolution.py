@@ -20,6 +20,7 @@ reader for tombstones, so the soft-delete case reads the `deleted/` file itself.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import frontmatter
 
@@ -100,6 +101,77 @@ def test_short_id_matching_exactly_one_node_resolves_via_load(file_store):
 
     assert loaded is not None
     assert loaded.id == node.id
+
+
+def test_a_unique_short_id_stops_resolving_once_a_collider_is_born(file_store):
+    """A Short id is never a cache key, so a second node sharing it turns a
+    previously unique reference ambiguous on the very next call.
+
+    This is the transition the original bug lived in: `_find_file` used to cache
+    the *requested* key, so the first lookup's answer outlived the arrival of the
+    collider and kept naming the first node forever.
+    """
+    first = _collider("a", "First node", "the only node with this short id, at first")
+    file_store.save(first)
+
+    assert file_store.load(COLLIDING_SHORT_ID).id == first.id
+    assert COLLIDING_SHORT_ID not in file_store._id_cache  # declared exception, as above
+
+    file_store.save(_collider("b", "Second node", "the collider that arrives later"))
+
+    assert file_store.load(COLLIDING_SHORT_ID) is None
+
+
+def test_an_ambiguous_short_id_resolves_again_once_only_one_node_is_left(file_store):
+    """The inverse transition: ambiguity is recomputed, never remembered.
+
+    A negative cache would keep answering None after the pair became a single
+    node, losing a resolution that is valid again.
+    """
+    first = _collider("a", "Collision A", "first colliding node")
+    second = _collider("b", "Collision B", "second colliding node")
+    file_store.save(first)
+    file_store.save(second)
+
+    assert file_store.load(COLLIDING_SHORT_ID) is None
+
+    assert file_store.delete(first.id) is True
+
+    survivor = file_store.load(COLLIDING_SHORT_ID)
+    assert survivor is not None
+    assert survivor.id == second.id
+
+
+def test_a_read_failure_while_deleting_does_not_leave_the_id_resolvable(file_store, monkeypatch):
+    """`delete` must drop the cache entry even when the file will not read.
+
+    The cache is keyed by Full id, but the key cannot come from re-reading the
+    file: a transient OSError there used to be swallowed, leaving the entry
+    pointing at a path `delete` then unlinks. `_path_for` is deterministic, so
+    the next node with the same type, title and Short id lands on that exact
+    path — and the existence-only cache hit hands the deleted id the new node.
+    """
+    doomed = _collider("a", "Same title", "the node being deleted")
+    file_store.save(doomed)
+    file_store.load(doomed.id)  # warm the cache so the entry exists to go stale
+    assert file_store._id_cache[doomed.id].exists()
+
+    real_read_text = Path.read_text
+
+    def read_text_failing_once(self, *args, **kwargs):
+        if self.name == file_store._id_cache[doomed.id].name:
+            raise OSError("transient read failure")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text_failing_once)
+    assert file_store.delete(doomed.id) is True
+    monkeypatch.undo()
+
+    # Same type, same title, same Short id — so _path_for regenerates the freed path.
+    successor = _collider("b", "Same title", "an unrelated node reusing the filename")
+    file_store.save(successor)
+
+    assert file_store.load(doomed.id) is None
 
 
 def test_short_id_matching_two_nodes_resolves_to_none_and_warns(file_store, caplog):

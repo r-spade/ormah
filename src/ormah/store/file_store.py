@@ -92,7 +92,7 @@ class FileStore:
         path = self._find_file(node_id)
         if path is None:
             return False
-        self._forget(path)  # while the file is still there to name its Full id
+        self._forget(path)  # by path: eviction must not depend on reading the file
         path.unlink()
         return True
 
@@ -118,7 +118,7 @@ class FileStore:
         deleted_dir = self.nodes_dir.parent / "deleted"
         deleted_dir.mkdir(parents=True, exist_ok=True)
         dest = deleted_dir / path.name
-        self._forget(path)  # while the file is still there to name its Full id
+        self._forget(path)  # by path: eviction must not depend on reading the file
         path.rename(dest)
         return True
 
@@ -164,17 +164,18 @@ class FileStore:
         return self.nodes_dir / filename
 
     def _forget(self, path: Path) -> None:
-        """Drop the cache entry for the node stored at ``path``.
+        """Drop every cache entry naming ``path``.
 
         The cache is keyed by Full id, but a caller may have addressed the node by
-        its Short id, so the key cannot be read off the reference — only off the
-        file. Call this while the file is still on disk. A file that will not parse
-        leaves nothing behind that the next lookup's existence check will not clear.
+        its Short id, so the key cannot be read off the reference. Reading it off
+        the file instead would make eviction depend on that read succeeding: a
+        transient OSError leaves the entry pointing at a path the caller is about
+        to unlink, and `_path_for` is deterministic, so the next node with the same
+        type, title and Short id lands on exactly that path and inherits the entry
+        through the existence-only cache hit. Comparing paths needs no file at all.
         """
-        try:
-            self._id_cache.pop(self._load_path(path).id, None)
-        except Exception:
-            pass
+        for key in [k for k, v in self._id_cache.items() if v == path]:
+            del self._id_cache[key]
 
     def _find_file(self, node_id: str) -> Path | None:
         """Find the file for a Node reference — a Full id, or the 8-character Short id
