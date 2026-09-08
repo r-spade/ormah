@@ -70,5 +70,11 @@ LOCALE = TemporalLocale(
         "mê": "month",  # "mês" -> "mê"
         "me": "month",  # "mes" -> "me"
     },
-    cleanup_patterns=(re.compile(r"\b(?:na|no|nos|nas|em)\s+", re.IGNORECASE),),
+    # Both boundaries are written out. The trailing `\b` is redundant *here*
+    # — a word character followed by `\s` already implies one — but the
+    # parser's flush rule does not supply it: that rule only requires the match
+    # to END at the vacated span, so a cleanup pattern not ending in `\s+`
+    # would happily cut a word in half ("ano" + gap, with a bare `no`, leaves
+    # "a"). A pack author owes their own boundaries on both sides.
+    cleanup_patterns=(re.compile(r"\b(?:na|no|nos|nas|em)\b\s+", re.IGNORECASE),),
 )

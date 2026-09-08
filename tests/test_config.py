@@ -9,10 +9,18 @@ from ormah.config import Settings
 
 
 def _settings(**overrides) -> Settings:
-    """Create settings with overrides, using a temp dir for memory_dir."""
+    """Create settings with overrides, using a temp dir for memory_dir.
+
+    ``_env_file=None`` cuts the operator's ``~/.config/ormah/.env`` and any
+    local ``.env`` out of the construction. Without it a default assertion
+    reads whatever the machine running the suite happens to have configured:
+    ``ORMAH_TEMPORAL_LOCALES=en`` in that file turned
+    ``test_temporal_locales_default_is_en_and_pt_br`` red. Setting the variable
+    instead would stop that test exercising the default at all.
+    """
     defaults = {"memory_dir": "/tmp/ormah_test"}
     defaults.update(overrides)
-    return Settings(**defaults)
+    return Settings(_env_file=None, **defaults)
 
 
 # --- Port ---
@@ -74,7 +82,7 @@ def test_llm_num_predict_default():
 
 def test_llm_num_predict_env(monkeypatch):
     monkeypatch.setenv("ORMAH_LLM_NUM_PREDICT", "1024")
-    s = Settings(memory_dir="/tmp/ormah_test")
+    s = _settings()
     assert s.llm_num_predict == 1024
 
 
@@ -350,48 +358,48 @@ def test_importance_recency_half_life_accepts_the_default():
 
 def test_temporal_locales_default_is_en_and_pt_br(monkeypatch):
     monkeypatch.delenv("ORMAH_TEMPORAL_LOCALES", raising=False)
-    s = Settings(memory_dir="/tmp/ormah_test")
+    s = _settings()
     assert s.temporal_locales == "en,pt-BR"
     assert s.temporal_locale_codes == ("en", "pt-BR")
 
 
 def test_temporal_locales_env_splits_and_trims(monkeypatch):
     monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en, pt-BR")
-    s = Settings(memory_dir="/tmp/ormah_test")
+    s = _settings()
     assert s.temporal_locale_codes == ("en", "pt-BR")
 
 
 def test_temporal_locales_env_preserves_the_order_it_names(monkeypatch):
     monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "pt-BR,en")
-    s = Settings(memory_dir="/tmp/ormah_test")
+    s = _settings()
     assert s.temporal_locale_codes == ("pt-BR", "en")
 
 
 def test_temporal_locales_env_dedupes_keeping_first_seen_order(monkeypatch):
     monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "pt-BR,en,pt-BR")
-    s = Settings(memory_dir="/tmp/ormah_test")
+    s = _settings()
     assert s.temporal_locale_codes == ("pt-BR", "en")
 
 
 def test_temporal_locales_env_rejects_an_unknown_code(monkeypatch):
     monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en,klingon")
     with pytest.raises(ValidationError, match="unknown temporal locale"):
-        Settings(memory_dir="/tmp/ormah_test")
+        _settings()
 
 
 def test_temporal_locales_env_is_case_sensitive(monkeypatch):
     monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en,pt-br")
     with pytest.raises(ValidationError, match="unknown temporal locale"):
-        Settings(memory_dir="/tmp/ormah_test")
+        _settings()
 
 
 def test_temporal_locales_env_rejects_an_empty_value(monkeypatch):
     monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "")
     with pytest.raises(ValidationError, match="must name at least one locale"):
-        Settings(memory_dir="/tmp/ormah_test")
+        _settings()
 
 
 def test_temporal_locales_env_rejects_only_separators(monkeypatch):
     monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", ",")
     with pytest.raises(ValidationError, match="must name at least one locale"):
-        Settings(memory_dir="/tmp/ormah_test")
+        _settings()

@@ -54,9 +54,11 @@ LOCALE = TemporalLocale(
         ),
         # Strip-only: "recent" lives in today's strip list and not in the
         # keyword table, so it is removed from the query but never selects a
-        # window and never makes temporal detection true. Sharing priority 10
-        # with "recently|lately" keeps it where today's single alternation put
-        # it in the strip order.
+        # window and never makes temporal detection true. Its `priority` is
+        # inert: the parser reads priorities only to order the *windowed*
+        # entries, and the strip order follows declaration order instead. The
+        # 10 it shares with "recently|lately" is bookkeeping, not placement —
+        # move this entry to change where it strips.
         StaticPhrase(
             pattern=re.compile(r"\brecent\b", re.IGNORECASE),
             probe="show me recent changes",

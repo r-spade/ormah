@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 import numpy as np
 
+from ormah.config import Settings
 from ormah.embeddings.base import EmbeddingAdapter
+from ormah.engine.temporal import TemporalParser, resolve_locales
 
 logger = logging.getLogger(__name__)
 
@@ -74,71 +76,6 @@ ARCHETYPES: dict[str, list[str]] = {
     ],
 }
 
-# Maps time-reference keywords to (days_start, days_end | None).
-# days_start = how far back the window starts (created_after = now - days_start).
-# days_end   = how far back the window ends   (created_before = now - days_end).
-#              None means "now" (i.e. the window extends to the present).
-_TIME_KEYWORDS: list[tuple[re.Pattern, int, int | None]] = [
-    (re.compile(r"\btoday\b", re.IGNORECASE), 1, None),           # 24h ago → now
-    (re.compile(r"\bhoje\b", re.IGNORECASE), 1, None),            # 24h ago → now
-    (re.compile(r"\byesterday\b", re.IGNORECASE), 2, 1),          # 48h ago → 24h ago
-    (re.compile(r"\bontem\b", re.IGNORECASE), 2, 1),              # 48h ago → 24h ago
-    (re.compile(r"\blast\s+week\b", re.IGNORECASE), 14, 7),       # 14d ago → 7d ago
-    (re.compile(r"\bsemana\s+passada\b", re.IGNORECASE), 14, 7),  # 14d ago → 7d ago
-    (re.compile(r"\bthis\s+week\b", re.IGNORECASE), 7, None),     # 7d ago → now
-    (re.compile(r"\b(?:esta|essa|nesta|nessa)\s+semana\b", re.IGNORECASE), 7, None),
-    (re.compile(r"\blast\s+month\b", re.IGNORECASE), 60, 30),     # 60d ago → 30d ago
-    (re.compile(r"\bm[êe]s\s+passado\b", re.IGNORECASE), 60, 30),  # 60d ago → 30d ago
-    (re.compile(r"\brecently\b|\blately\b", re.IGNORECASE), 3, None),  # 3d ago → now
-    (re.compile(r"\brecentemente\b|\bultimamente\b", re.IGNORECASE), 3, None),  # 3d → now
-]
-
-_NUMERIC_TIME_RE = re.compile(
-    r"\b(?:last|past|[úu]ltim[oa]s?)\s+(\d+)\s+"
-    r"(hours?|days?|weeks?|months?|horas?|dias?|semanas?|meses|m[êe]s)\b",
-    re.IGNORECASE,
-)
-
-_UNIT_TO_DAYS: dict[str, float] = {"hour": 1 / 24, "day": 1, "week": 7, "month": 30}
-
-# PT-BR unit -> canonical English key, applied after the caller has lowercased
-# and stripped the plural "s". Without this, _UNIT_TO_DAYS.get(unit, 1) silently
-# falls back to 1 day, so "últimas 2 semanas" would mean 2 days, and the
-# rolling-window branch (which tests for "week"/"month") would never fire.
-_UNIT_ALIASES: dict[str, str] = {
-    "hora": "hour",
-    "dia": "day",
-    "semana": "week",
-    "mese": "month",  # "meses" -> "mese"
-    "mê": "month",  # "mês" -> "mê"
-    "me": "month",  # "mes" -> "me"
-}
-
-_DEFAULT_TEMPORAL_DAYS = 3
-
-# Regex to match all temporal phrases for stripping from search queries.
-# Combines _TIME_KEYWORDS patterns + _NUMERIC_TIME_RE into one list.
-_TEMPORAL_STRIP_PATTERNS: list[re.Pattern] = [
-    re.compile(r"\btoday\b", re.IGNORECASE),
-    re.compile(r"\bhoje\b", re.IGNORECASE),
-    re.compile(r"\byesterday\b", re.IGNORECASE),
-    re.compile(r"\bontem\b", re.IGNORECASE),
-    re.compile(r"\blast\s+week\b", re.IGNORECASE),
-    re.compile(r"\bsemana\s+passada\b", re.IGNORECASE),
-    re.compile(r"\bthis\s+week\b", re.IGNORECASE),
-    re.compile(r"\b(?:esta|essa|nesta|nessa)\s+semana\b", re.IGNORECASE),
-    re.compile(r"\blast\s+month\b", re.IGNORECASE),
-    re.compile(r"\bm[êe]s\s+passado\b", re.IGNORECASE),
-    re.compile(r"\brecently\b|\blately\b|\brecent\b", re.IGNORECASE),
-    re.compile(r"\brecentemente\b|\bultimamente\b", re.IGNORECASE),
-    _NUMERIC_TIME_RE,
-]
-
-# Dangling prepositions left after temporal phrase removal.
-_DANGLING_PREP_RE = re.compile(
-    r"\b(?:in|during|from|over|for)\s+(?:the\s+)?(?=\s*$|\s*,)", re.IGNORECASE
-)
-
 # Acknowledgements are distinct from conversational turns: when they follow a
 # useful answer, embedding similarity can otherwise label them as a
 # continuation and cause the prior question to be searched again. Keep this
@@ -173,18 +110,30 @@ def is_clear_acknowledgement(prompt: str) -> bool:
     return bool(_ACKNOWLEDGEMENT_RE.match(prompt))
 
 
+@lru_cache(maxsize=1)
+def _default_parser() -> TemporalParser:
+    """The parser the module-level temporal functions delegate to, built once.
+
+    Built from a **fresh** ``Settings()`` rather than the import-time
+    ``ormah.config.settings`` singleton, which binds the operator's ``.env``
+    at import — long before any test fixture runs. Reading the singleton would
+    make ``_default_parser.cache_clear()`` a no-op and would tie the enabled
+    grammar to whatever the machine happens to have configured.
+    """
+    return TemporalParser(resolve_locales(Settings().temporal_locale_codes))
+
+
 def has_temporal_phrases(prompt: str) -> bool:
     """Return True if *prompt* contains explicit temporal phrases.
 
     Unlike :func:`extract_time_params`, does **not** apply the default
     fallback — only returns True when a concrete time reference is found.
+
+    Derived from the enabled packs' windowed entries and numeric patterns
+    only, never from their strip lists: a strip-only phrase such as "recent"
+    is removed from the query but must not start date-filtering a recall.
     """
-    if _NUMERIC_TIME_RE.search(prompt):
-        return True
-    for pattern, _, _ in _TIME_KEYWORDS:
-        if pattern.search(prompt):
-            return True
-    return False
+    return _default_parser().has_temporal_phrases(prompt)
 
 
 def extract_time_params(prompt: str) -> dict:
@@ -196,52 +145,7 @@ def extract_time_params(prompt: str) -> dict:
     Returns a dict with ``created_after`` (always) and ``created_before``
     (when the window has a bounded end).
     """
-    now = datetime.now(timezone.utc)
-
-    # Dynamic numeric patterns: "last 4 days", "past 2 weeks", etc.
-    m = _NUMERIC_TIME_RE.search(prompt)
-    if m:
-        n = int(m.group(1))
-        # Lowercase before stripping the plural so an uppercased unit still
-        # normalises ("DIAS" -> "dias" -> "dia"), then fold PT-BR onto the
-        # English key the tables below are written in.
-        unit = m.group(2).lower().rstrip("s")
-        unit = _UNIT_ALIASES.get(unit, unit)
-        days_per_unit = _UNIT_TO_DAYS.get(unit, 1)
-        days = n * days_per_unit
-
-        # Rolling previous-period logic for weeks/months with N > 1:
-        # "last 2 weeks" = 4 weeks ago → 2 weeks ago (the previous 2-week window)
-        # Days/hours extend to now (user wants "the last N days" ending now)
-        if unit in ("week", "month") and n > 1:
-            start = now - timedelta(days=days * 2)
-            end = now - timedelta(days=days)
-            return {
-                "created_after": start.isoformat(),
-                "created_before": end.isoformat(),
-            }
-        else:
-            start = now - timedelta(days=days)
-            return {
-                "created_after": start.isoformat(),
-                "created_before": now.isoformat(),
-            }
-
-    for pattern, days_start, days_end in _TIME_KEYWORDS:
-        if pattern.search(prompt):
-            start = now - timedelta(days=days_start)
-            end = (now - timedelta(days=days_end)) if days_end is not None else now
-            return {
-                "created_after": start.isoformat(),
-                "created_before": end.isoformat(),
-            }
-
-    # No specific keyword found — default to 3 days → now
-    start = now - timedelta(days=_DEFAULT_TEMPORAL_DAYS)
-    return {
-        "created_after": start.isoformat(),
-        "created_before": now.isoformat(),
-    }
+    return _default_parser().extract_time_params(prompt)
 
 
 def strip_temporal_phrases(prompt: str) -> str:
@@ -253,16 +157,7 @@ def strip_temporal_phrases(prompt: str) -> str:
         "what did I work on whisper last week"   → "what did I work on whisper"
         "changes to the API in the last 3 days"  → "changes to the API"
     """
-    result = prompt
-    for pat in _TEMPORAL_STRIP_PATTERNS:
-        result = pat.sub("", result)
-
-    # Clean up dangling prepositions left behind
-    result = _DANGLING_PREP_RE.sub("", result)
-
-    # Collapse multiple spaces and strip
-    result = re.sub(r"\s{2,}", " ", result).strip()
-    return result
+    return _default_parser().strip_temporal_phrases(prompt)
 
 
 @dataclass
@@ -391,12 +286,11 @@ class PromptClassifier:
             if stripped != prompt:
                 search_params["search_query"] = stripped
         if "continuation" in matched:
-            # Recent memories in current space — same as temporal default
+            # Recent memories in current space — the same window a prompt with
+            # no temporal phrase gets, taken from the parser so the two cannot
+            # drift apart.
             if "created_after" not in search_params:
-                now = datetime.now(timezone.utc)
-                search_params["created_after"] = (
-                    now - timedelta(days=_DEFAULT_TEMPORAL_DAYS)
-                ).isoformat()
+                search_params["created_after"] = extract_time_params("")["created_after"]
 
         return PromptIntent(
             categories=sorted(matched), search_params=search_params, prompt_vec=prompt_vec

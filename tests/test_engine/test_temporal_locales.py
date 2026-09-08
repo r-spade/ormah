@@ -13,8 +13,6 @@ from ormah.engine.temporal import (
     registered_codes,
     resolve_locales,
 )
-from ormah.engine.prompt_classifier import _TIME_KEYWORDS
-
 
 class TestStaticPhrase:
     def test_windowed_entry_carries_its_window(self):
@@ -93,28 +91,7 @@ def _pack(code: str) -> TemporalLocale:
     return resolve_locales((code,))[0]
 
 
-class TestBuiltInPacksCoverTodaysKeywordTable:
-    def test_every_keyword_entry_is_declared_by_exactly_one_pack(self):
-        for index, (pattern, days_start, days_end) in enumerate(_TIME_KEYWORDS):
-            declared = [
-                (code, phrase)
-                for code, phrase in _all_phrases()
-                if phrase.pattern.pattern == pattern.pattern
-            ]
-            assert len(declared) == 1, f"{pattern.pattern!r} declared {len(declared)} times"
-            _, phrase = declared[0]
-            assert phrase.priority == index, f"{pattern.pattern!r} priority"
-            assert phrase.window == (days_start, days_end), f"{pattern.pattern!r} window"
-
-    def test_no_pack_declares_a_windowed_phrase_outside_the_keyword_table(self):
-        table = {pattern.pattern for pattern, _, _ in _TIME_KEYWORDS}
-        declared = {
-            phrase.pattern.pattern
-            for _, phrase in _all_phrases()
-            if not phrase.is_strip_only
-        }
-        assert declared == table
-
+class TestBuiltInPackDeclarations:
     def test_recent_is_the_only_strip_only_entry_and_lives_in_the_en_pack(self):
         strip_only = [(code, phrase) for code, phrase in _all_phrases() if phrase.is_strip_only]
         assert [code for code, _ in strip_only] == ["en"]

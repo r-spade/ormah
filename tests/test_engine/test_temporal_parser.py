@@ -269,9 +269,12 @@ class TestThePackSetGatesBehaviour:
             parser.strip_temporal_phrases("o que fizemos na semana passada")
             == "o que fizemos na semana passada"
         )
-        assert 2.9 < _days_ago(parser.extract_time_params("o que fizemos ontem")["created_after"]) < 3.1
+        params = parser.extract_time_params("o que fizemos ontem")
+        assert 2.9 < _days_ago(params["created_after"]) < 3.1
 
     def test_a_portuguese_only_parser_does_not_see_english(self):
         parser = _parser(PT)
         assert parser.has_temporal_phrases("what did we do last week") is False
-        assert parser.strip_temporal_phrases("what did we do last week") == "what did we do last week"
+        assert (
+            parser.strip_temporal_phrases("what did we do last week") == "what did we do last week"
+        )
