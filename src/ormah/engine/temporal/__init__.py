@@ -10,6 +10,7 @@ from ormah.engine.temporal.locale import (
     registered_codes,
     resolve_locales,
 )
+from ormah.engine.temporal.parser import TemporalParser
 from ormah.engine.temporal import en, pt_br
 
 # Registration order fixes the tie-break between two static entries of equal
@@ -20,6 +21,7 @@ register(pt_br.LOCALE)
 __all__ = [
     "StaticPhrase",
     "TemporalLocale",
+    "TemporalParser",
     "parse_locale_codes",
     "register",
     "registered_codes",
