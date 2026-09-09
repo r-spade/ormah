@@ -194,6 +194,11 @@ class FileStore:
         and the background jobs branch only on "is it None", so raising would trade
         silent corruption for a crashed sleep cycle.
 
+        None therefore means *confirmed absent*, never *could not tell*. A file that
+        will not parse confirms nothing and is skipped, matching `list_all` and
+        `_build_cache`; an OSError propagates instead, because a caller that reads it
+        as absence goes on to mutate state the file still contradicts.
+
         A cache hit stays validated by file existence alone. Re-parsing on every hit
         would destroy the O(1) the cache exists for. A file replaced behind the
         store's back is the watcher's territory, and is accepted here.
@@ -215,6 +220,13 @@ class FileStore:
             for path in sorted(self.nodes_dir.glob(f"*_{short_id}.md")):
                 try:
                     candidate = self._load_path(path)
+                except OSError:
+                    # Not knowing is not absence. Swallowing this would resolve an
+                    # existing node to None, and `MemoryEngine.delete_node` reads
+                    # None as absence: it drops the index row and reports success
+                    # while the file survives to be reindexed. Before this lookup
+                    # opened candidates at all, the error surfaced from `load`.
+                    raise
                 except Exception:
                     continue  # a file that will not parse confirms nothing
                 # A bare Short id has no dashes, so the split above is a no-op and

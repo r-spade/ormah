@@ -20,6 +20,8 @@ reader for tombstones, so the soft-delete case reads the `deleted/` file itself.
 from __future__ import annotations
 
 import logging
+
+import pytest
 from pathlib import Path
 
 import frontmatter
@@ -256,3 +258,61 @@ def test_cache_hit_stays_validated_by_existence_only_watcher_hole_is_accepted(fi
 
     assert served is not None
     assert served.id == replacement.id
+
+
+def test_a_read_failure_on_a_cold_cache_is_not_reported_as_an_absent_node(
+    file_store, monkeypatch
+):
+    """An unreadable file must not resolve to None: absence and failure are not the same.
+
+    The Short-id glob confirms every candidate by parsing it, so a `continue` on any
+    exception turns "I could not read this file" into "this node does not exist".
+    `MemoryEngine.delete_node` reads that None as absence, falls back to the index,
+    removes the row and its edges, ignores `soft_delete()` returning False, and
+    reports success — while the file is still in nodes/ and the next reindex brings
+    the node back.
+
+    The sibling read-failure test warms the cache before failing the read, so it
+    exercises the cache-hit path and never reaches the glob. This one starts cold.
+
+    An unparseable file keeps confirming nothing — that is the store-wide rule
+    `list_all` and `_build_cache` already follow. Only an OSError is different: it
+    says nothing about what the file contains.
+    """
+    node = _collider("a", "Cold node", "a node whose file will not read")
+    path = file_store.save(node)
+    file_store._id_cache.clear()  # cold: the glob must confirm by parsing
+    file_store._cache_built = False
+
+    real_read_text = Path.read_text
+
+    def read_text_denied(self, *args, **kwargs):
+        if self.name == path.name:
+            raise PermissionError("unreadable")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text_denied)
+
+    assert path.exists()
+    with pytest.raises(OSError):
+        file_store.load(node.id)
+
+
+def test_an_unparseable_file_still_confirms_nothing_on_a_cold_cache(file_store):
+    """The other half of the same branch: a corrupt file is still treated as absent.
+
+    Distinguishing I/O failure from absence must not turn every malformed file into
+    a raise — that would let one corrupt file break lookups for every node sharing
+    its Short id.
+    """
+    live = _collider("a", "Live node", "the node actually being asked for")
+    file_store.save(live)
+    corrupt = file_store.nodes_dir / f"fact_corrupt_{COLLIDING_SHORT_ID}.md"
+    corrupt.write_text("this is not a node", encoding="utf-8")
+    file_store._id_cache.clear()
+    file_store._cache_built = False
+
+    loaded = file_store.load(live.id)
+
+    assert loaded is not None
+    assert loaded.id == live.id
