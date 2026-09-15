@@ -474,6 +474,71 @@ class ContextBuilder:
         if effective_query_vec is not None:
             search_kwargs["query_vec"] = effective_query_vec
 
+        # Affinity is prompt-specific, so keep its rows and computed deltas
+        # local to this whisper call. The preference channel can then reuse a
+        # delta computed for a candidate in the ordinary channel without
+        # applying it twice or carrying feedback into a later request.
+        affinity_rows_cache: dict[str, list[dict]] = {}
+        affinity_boost_cache: dict[str, float] = {}
+        affinity_unavailable = False
+
+        def _apply_affinity_boost(results: list[dict]) -> list[dict]:
+            """Apply the current raw-prompt affinity delta once per candidate.
+
+            The marker makes this helper safe if a caller passes an already
+            adjusted candidate. Lookup/compute errors are intentionally
+            propagated so each channel can retain its established unadjusted
+            fallback independently.
+            """
+            nonlocal affinity_unavailable
+            if not results or prompt_vec is None or affinity_unavailable:
+                return results
+
+            unadjusted = [
+                result for result in results if not result.get("_affinity_applied")
+            ]
+            if not unadjusted:
+                return results
+
+            from ormah.engine.affinity import batch_fetch_affinity, compute_affinity_boost
+
+            node_ids = list(dict.fromkeys(result["node"]["id"] for result in unadjusted))
+            missing_ids = [node_id for node_id in node_ids if node_id not in affinity_rows_cache]
+            if missing_ids:
+                try:
+                    rows_by_node = batch_fetch_affinity(self.graph.conn, missing_ids)
+                    for node_id in missing_ids:
+                        affinity_rows_cache[node_id] = rows_by_node.get(node_id, [])
+                except Exception:
+                    affinity_unavailable = True
+                    raise
+
+            try:
+                for node_id in node_ids:
+                    if node_id not in affinity_boost_cache:
+                        affinity_boost_cache[node_id] = compute_affinity_boost(
+                            prompt_vec,
+                            node_id,
+                            affinity_rows_cache[node_id],
+                            self.engine.settings,
+                        )
+            except Exception:
+                affinity_unavailable = True
+                raise
+
+            return [
+                result
+                if result.get("_affinity_applied")
+                else {
+                    **result,
+                    "score": result["score"] + affinity_boost_cache[result["node"]["id"]],
+                    "_pre_boost_score": result["score"],
+                    "_affinity_boost": affinity_boost_cache[result["node"]["id"]],
+                    "_affinity_applied": True,
+                }
+                for result in results
+            ]
+
         # Always run search — even for identity-only queries, search finds
         # location/work/study nodes that graph neighbors alone miss.
         try:
@@ -587,24 +652,7 @@ class ContextBuilder:
         pre_gate_candidates: list[dict] = []
         if not has_temporal and reranker_enabled and search_results and prompt_vec is not None:
             try:
-                from ormah.engine.affinity import batch_fetch_affinity, compute_affinity_boost
-
-                node_ids = [r["node"]["id"] for r in search_results]
-                affinity_rows_map = batch_fetch_affinity(self.graph.conn, node_ids)
-                boosted = []
-                for r in search_results:
-                    nid = r["node"]["id"]
-                    rows = affinity_rows_map.get(nid, [])
-                    boost = compute_affinity_boost(prompt_vec, nid, rows, self.engine.settings)
-                    boosted.append({
-                        **r,
-                        "score": r["score"] + boost,
-                        "_pre_boost_score": r["score"],
-                        # Tagged separately so the (absolute-signal) gate can
-                        # include learned feedback without inheriting the
-                        # rank-relative blended score.
-                        "_affinity_boost": boost,
-                    })
+                boosted = _apply_affinity_boost(search_results)
                 # Apply 0.40 floor AFTER boost (spec: reranker_min_score is now a post-boost floor).
                 # Use the reranker_min_score parameter (passed from engine.settings); fall back to 0.40.
                 effective_floor = reranker_min_score if reranker_min_score > 0.0 else 0.40
@@ -822,6 +870,20 @@ class ContextBuilder:
                     {**r, "source": "preference_applicability"}
                     for r in applicability_results
                 ]
+                try:
+                    # Preferences use the same raw prompt context as ordinary
+                    # candidates. Apply feedback before their applicability
+                    # gate and sort again so the cap selects by adjusted
+                    # evidence rather than the raw reranker order.
+                    applicability_results = _apply_affinity_boost(applicability_results)
+                except Exception as e:
+                    # A missing vector or affinity failure must not make the
+                    # separate preference channel disappear.
+                    logger.warning(
+                        "Preference affinity boost failed, using unmodified scores: %s",
+                        e,
+                    )
+                applicability_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
                 _record_candidate_versions(applicability_results)
                 for result in applicability_results:
                     trace = candidate_trace[result["node"]["id"]]
@@ -913,7 +975,7 @@ class ContextBuilder:
                     )
                     for node_id, trace in candidate_trace.items():
                         r = trace["latest"]
-                        score = r.get("_pre_boost_score", r.get("score", 0.0))
+                        score = r.get("score", 0.0)
                         was_injected = 1 if node_id in injected_ids else 0
                         cursor = conn.execute(
                             "INSERT INTO whisper_log "
