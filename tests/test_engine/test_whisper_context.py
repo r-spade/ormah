@@ -2603,8 +2603,8 @@ class TestWhisperLog:
         # Temporal results must never be logged
         assert len(rows) == 0
 
-    def test_whisper_log_records_pre_boost_score(self, db_graph):
-        """whisper_log.score should store the pre-boost blended score, not the boosted value."""
+    def test_whisper_log_records_adjusted_score(self, db_graph):
+        """whisper_log.score should include the affinity adjustment."""
         db, graph = db_graph
 
         prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
@@ -2642,15 +2642,11 @@ class TestWhisperLog:
 
         rows = db.conn.execute("SELECT * FROM whisper_log WHERE node_id = 'node-preboost'").fetchall()
         assert len(rows) == 1
-        # Score in the DB should be the pre-boost value, not boosted
-        # The actual blended score from mock reranker will differ, but it should NOT
-        # be the boosted score (pre_boost_score = r.get("_pre_boost_score", r["score"]))
-        # Since we patched compute_affinity_boost to return 0.10, the logged score
-        # should be less than the injected score by ~0.10
+        # The reranker score is 0.4 * (13 / 18) + 0.6 * 0.6. Diagnostics must
+        # retain the +0.10 adjustment applied before the gate.
         logged_score = rows[0]["score"]
-        # The logged score is the pre-boost (CE blended), not boosted
-        # We just verify a row was written — exact value depends on reranker mock
-        assert logged_score >= 0.0
+        expected_score = 0.4 * (13 / 18) + 0.6 * 0.6 + 0.10
+        assert logged_score == pytest.approx(expected_score)
 
     def test_whisper_log_records_candidates_rejected_before_reranking(self, db_graph):
         db, graph = db_graph
