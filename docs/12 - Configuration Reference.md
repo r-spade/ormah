@@ -296,6 +296,17 @@ backup taken before the upgrade.
 | `claude_maintenance_interval_hours` | `24` |
 | `claude_maintenance_batch_size` | `25` |
 
+## Temporal Locales
+
+| Setting | Default |
+|---|---|
+| `temporal_locales` | `en,pt-BR` |
+
+The language packs consulted when a time reference is parsed out of a prompt.
+Comma-separated and order-preserving; the built-in codes are `en` and `pt-BR`,
+and they are case-sensitive. An unknown code is rejected at startup. The
+setting selects packs only — it never carries grammar.
+
 ## Code Anchor
 
 - `src/ormah/config.py`

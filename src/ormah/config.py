@@ -8,6 +8,8 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
+from ormah.engine.temporal import parse_locale_codes
+
 
 _ENV_FILES = [
     Path.home() / ".config" / "ormah" / ".env",  # Fixed global config
@@ -291,6 +293,14 @@ class Settings(BaseSettings):
     claude_maintenance_enabled: bool = False
     claude_maintenance_interval_hours: int = 24  # hours between maintenance runs
     claude_maintenance_batch_size: int = 25  # candidates per type per run
+
+    # Temporal locale packs consulted when parsing a time reference out of a
+    # prompt. Declared as a plain ``str`` and parsed by the validator below,
+    # not as a ``list[str]``: pydantic-settings JSON-decodes complex types from
+    # the environment and would reject the comma-separated form the ``.env``
+    # file uses everywhere else. The setting selects packs; it never carries
+    # grammar.
+    temporal_locales: str = "en,pt-BR"
 
     # --- Validators ---
 
@@ -645,6 +655,17 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError(f"interval must be >= 1 minute, got {v}")
         return v
+
+    @field_validator("temporal_locales")
+    @classmethod
+    def _temporal_locales_known(cls, v: str) -> str:
+        parse_locale_codes(v)  # raises on an empty result or an unregistered code
+        return v
+
+    @property
+    def temporal_locale_codes(self) -> tuple[str, ...]:
+        """The enabled locale codes, ordered, trimmed and de-duplicated."""
+        return parse_locale_codes(self.temporal_locales)
 
     @property
     def llm_enabled(self) -> bool:
