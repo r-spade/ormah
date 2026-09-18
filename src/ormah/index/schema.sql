@@ -204,10 +204,13 @@ CREATE TABLE IF NOT EXISTS whisper_decisions (
     outcome         TEXT NOT NULL,      -- 'injected' | 'silent_short' | 'silent_conversational'
                                         -- | 'silent_topic_shift' | 'silent_no_candidates'
                                         -- | 'silent_gate' | 'silent_blackout' | 'silent_error'
+                                        -- | 'silent_synthetic'
     candidate_count INTEGER DEFAULT 0,  -- results returned by search before filtering
     injected_count  INTEGER DEFAULT 0,  -- memories actually injected
     max_gate_score  REAL,               -- best absolute gate score among candidates
-    logged_at       TEXT NOT NULL
+    logged_at       TEXT NOT NULL,
+    matched_pattern TEXT                -- synthetic pattern source that fired;
+                                        -- NULL unless outcome='silent_synthetic' (#143)
 );
 CREATE INDEX IF NOT EXISTS idx_whisper_decisions_session ON whisper_decisions(session_id);
 CREATE INDEX IF NOT EXISTS idx_whisper_decisions_logged  ON whisper_decisions(logged_at);

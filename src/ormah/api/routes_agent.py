@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from ormah.background.maintenance_manager import MaintenanceManager
+from ormah.engine.prompt_classifier import match_synthetic_pattern
 from ormah.models.node import ConnectRequest, CreateNodeRequest, UpdateNodeRequest
 from ormah.models.proposals import ResolveProposalRequest
 from ormah.models.search import SearchQuery
@@ -136,6 +137,27 @@ async def whisper(request: Request):
     space = body.get("space")
     session_id = body.get("session_id", "")
     engine = request.app.state.engine
+
+    from ormah.config import settings as _settings
+
+    # Machine-generated turn (subagent notification, scheduled task, loop check):
+    # no human will read an injection, so skip BEFORE anything per-turn happens.
+    # This must stay above both the session buffer below (it feeds topic-shift and
+    # continuation for the NEXT human turn) and the engine (whose first statement
+    # consumes the one-time onboarding nudge) — both side effects are irreversible,
+    # so a guard further down cannot undo them (#134).
+    if _settings.whisper_synthetic_filter_enabled:
+        matched = match_synthetic_pattern(
+            prompt, _settings.whisper_synthetic_prompt_patterns
+        )
+        if matched is not None:
+            await anyio.to_thread.run_sync(
+                lambda: engine.note_synthetic_whisper_skip(
+                    prompt=prompt, space=space, session_id=session_id,
+                    matched_pattern=matched,
+                )
+            )
+            return TextResponse(text="")
 
     # Build recent_prompts from session buffer
     recent_prompts: list[str] | None = None
