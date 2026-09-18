@@ -140,6 +140,8 @@ class Settings(BaseSettings):
     auto_link_cross_space_penalty: float = 0.1  # subtracted from similarity for cross-space pairs
     auto_link_max_edges_per_run: int = 500
     auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run
+    duplicate_check_max_nodes_per_run: int = 500  # seed batch per dedup run (#81)
+    conflict_check_max_nodes_per_run: int = 500   # seed batch per conflict run (#81)
 
     # Auto-merge
     auto_merge_threshold: float = 0.85
