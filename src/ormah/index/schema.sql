@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS whisper_decisions (
     outcome         TEXT NOT NULL,      -- 'injected' | 'silent_short' | 'silent_conversational'
                                         -- | 'silent_topic_shift' | 'silent_no_candidates'
                                         -- | 'silent_gate' | 'silent_blackout' | 'silent_error'
+                                        -- | 'silent_synthetic'
     candidate_count INTEGER DEFAULT 0,  -- results returned by search before filtering
     injected_count  INTEGER DEFAULT 0,  -- memories actually injected
     max_gate_score  REAL,               -- best absolute gate score among candidates

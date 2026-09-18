@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,39 @@ import numpy as np
 from ormah.embeddings.base import EmbeddingAdapter
 
 logger = logging.getLogger(__name__)
+
+# Machine-generated turns that reach the UserPromptSubmit hook. Matched ANCHORED
+# at the start of the prompt: a human ASKING about one of these markers is a real
+# prompt and still gets a whisper. Fail-open — when in doubt, whisper.
+# Deliberately excluded: wrapper tags like <ide_opened_file> and <system-reminder>,
+# which PREFIX a real human prompt rather than replace it (issue #134).
+_SYNTHETIC_PATTERNS = (
+    re.compile(r"<task-notification>", re.IGNORECASE),
+    re.compile(r"<scheduled-task\b", re.IGNORECASE),
+    re.compile(r"#\s*Autonomous loop check\b", re.IGNORECASE),
+)
+
+
+def is_synthetic_prompt(prompt: str, extra_patterns: Sequence[str] = ()) -> bool:
+    """True when the prompt was authored by a machine, not a human.
+
+    ``extra_patterns`` carries install-specific regexes from settings; the
+    defaults stay generic to Claude Code. An invalid pattern is logged and
+    ignored — a config typo must never take the whisper down.
+    """
+    text = prompt.lstrip()
+    if not text:
+        return False
+    if any(p.match(text) for p in _SYNTHETIC_PATTERNS):
+        return True
+    for raw in extra_patterns or ():
+        try:
+            if re.match(raw, text):
+                return True
+        except (re.error, TypeError) as e:
+            logger.warning("Ignoring invalid synthetic-prompt pattern %r: %s", raw, e)
+    return False
+
 
 # Archetype prompts per intent category.  More examples = better embedding
 # space coverage for paraphrases the user might actually type.
