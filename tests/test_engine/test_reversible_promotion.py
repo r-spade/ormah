@@ -110,12 +110,13 @@ def test_a_live_superseded_by_still_blocks_promotion(engine):
 def test_a_prefix_collision_is_not_mistaken_for_a_live_replacement(engine):
     """`load(marker) is not None` is not the same question as "the replacement exists".
 
-    FileStore._find_file resolves an id through the 8-character prefix in the
-    filename and returns the first match without checking the id it loaded (#280),
-    so a deleted replacement whose prefix collides with an unrelated node comes
-    back as that node.  The marker then reads as live, the block never lifts, and
-    the memory is buried forever — the failure the dangling-marker branch exists
-    to prevent.  The liveness check has to confirm the complete id."""
+    FileStore._find_file resolves a Node reference by Full id, not by the
+    8-character Short id in the filename alone (#280): an absent Full id whose
+    Short id collides with an unrelated node's filename must resolve to None, not
+    to that unrelated node.  If it resolved to the collider instead, a dangling
+    `superseded_by` marker would read as live, the block would never lift, and the
+    memory would be buried forever — the failure the dangling-marker branch exists
+    to prevent."""
     collider = MemoryNode(
         id="deadbeef-0000-0000-0000-00000000000b",
         type=NodeType.fact,
@@ -124,10 +125,9 @@ def test_a_prefix_collision_is_not_mistaken_for_a_live_replacement(engine):
     engine.builder.index_single(engine.file_store.save(collider))
 
     gone = "deadbeef-0000-0000-0000-00000000000a"
-    collision = engine.file_store.load(gone)
-    assert collision is not None and collision.id != gone, (
-        "precondition: this test needs load() to resolve the prefix to the collider; "
-        "drop this assertion once #280 makes the lookup exact"
+    assert engine.file_store.load(gone) is None, (
+        "a dangling Full id whose Short id collides with a live node's filename "
+        "must not resolve to that unrelated node"
     )
 
     marked = _archive(engine, "superseded by a node that no longer exists", superseded_by=gone)
