@@ -17,8 +17,11 @@ def test_claude_arguments_and_estimate(monkeypatch):
     def fake_run(args, **kwargs):
         assert args[:2] == ["claude", "-p"]
         assert all(
-            flag in args for flag in ["--bare", "--no-session-persistence", "--output-format"]
+            flag in args
+            for flag in ["--safe-mode", "--system-prompt", "--no-session-persistence", "--output-format"]
         )
+        # --bare disables subscription OAuth; it must never come back.
+        assert "--bare" not in args
         assert args[args.index("--tools") + 1] == ""
         assert "ANTHROPIC_API_KEY" not in kwargs["env"]
         assert kwargs["input"] == "question"
@@ -37,8 +40,9 @@ def test_claude_arguments_and_estimate(monkeypatch):
 
 
 def test_codex_arguments_stdin_file_and_usage(monkeypatch):
+    monkeypatch.setattr(CodexProvider, "executable", "/opt/test/codex")
     def fake_run(args, **kwargs):
-        assert args[0] == "/root/agent-tools/codex-0.154.0/node_modules/.bin/codex"
+        assert args[0] == "/opt/test/codex"
         assert "--ignore-user-config" in args
         assert args[args.index("--sandbox") + 1] == "read-only"
         assert args[args.index("--color") + 1] == "never"

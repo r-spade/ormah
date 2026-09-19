@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -14,7 +15,24 @@ from pathlib import Path
 
 from eval.bench.cost import Budget, BudgetExceeded, token_cost
 
-CODEX = "/root/agent-tools/codex-0.154.0/node_modules/.bin/codex"
+
+
+def _default_codex() -> str:
+    """Codex binary: ORMAH_BENCH_CODEX, else the pinned ai-agents build, else PATH."""
+    override = os.environ.get("ORMAH_BENCH_CODEX")
+    if override:
+        return override
+    pinned = "/root/agent-tools/codex-0.154.0/node_modules/.bin/codex"
+    if Path(pinned).exists():
+        return pinned
+    return shutil.which("codex") or "codex"
+
+
+CODEX = _default_codex()
+
+# Neutral system prompt for subscription CLI calls. It replaces Claude Code's
+# agentic coding prompt so answers come from the benchmark prompt alone.
+CLAUDE_CLI_SYSTEM_PROMPT = "You are a careful assistant. Follow the task instructions exactly."
 
 
 @dataclass
@@ -161,7 +179,13 @@ class ClaudeCLIProvider(CLIProvider):
             "-p",
             "--model",
             self.model,
-            "--bare",
+            # --safe-mode, not --bare: --bare skips OAuth, so subscription
+            # login fails with "Not logged in". Safe mode still disables
+            # CLAUDE.md, hooks (e.g. an Ormah whisper hook), plugins, skills
+            # and MCP, which keeps the owner's own memories out of answers.
+            "--safe-mode",
+            "--system-prompt",
+            CLAUDE_CLI_SYSTEM_PROMPT,
             "--no-session-persistence",
             "--output-format",
             "json",
