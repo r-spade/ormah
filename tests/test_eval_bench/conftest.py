@@ -64,6 +64,7 @@ def args():
     return SimpleNamespace(
         dataset="locomo",
         mode="raw",
+        retrieval="recall",
         k=30,
         phase="free",
         limit=None,
