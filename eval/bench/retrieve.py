@@ -3,6 +3,8 @@
 import logging
 import time
 
+from eval.bench.answer import memory_context
+
 
 class _VectorFailure(logging.Handler):
     """Production may fall back to FTS; benchmark scores must expose failures."""
@@ -45,6 +47,9 @@ def retrieve_question(engine, question: str, k: int) -> dict:
     for item in ranked:
         item["node"]["tags"] = sorted(tags.get(item["node"]["id"], []))
     return {
+        "strategy": "recall",
+        "reranker_active": False,
+        "answer_context_chars": len(memory_context(ranked)),
         "ranked": ranked,
         "latency_s": latency,
         "production_gate": engine.settings.recall_min_relevance_score,

@@ -47,13 +47,22 @@ def percentile(values, quantile):
     return values[low] + (values[high] - values[low]) * (pos - low)
 
 
-def aggregate(rows, k, mode):
+def aggregate(rows, k, mode, strategy="recall"):
     metrics, gates, scores, abstentions, latencies = [], [], [], [], []
+    counts, context_chars, whisper_chars, silent_abstentions = [], [], [], []
     for row in rows:
         if row.get("retrieve", {}).get("status") == "ok":
             retrieval = row["retrieve"]["result"]
-            metrics.append(retrieval_metrics(row, retrieval, k, mode))
-            gates.append(retrieval_metrics(row, retrieval, k, mode, gated=True))
+            limit = max(1, len(retrieval["ranked"])) if strategy == "whisper" else k
+            metrics.append(retrieval_metrics(row, retrieval, limit, mode))
+            if strategy == "recall":
+                gates.append(retrieval_metrics(row, retrieval, k, mode, gated=True))
+            counts.append(len(retrieval["ranked"]))
+            context_chars.append(retrieval.get("answer_context_chars"))
+            if strategy == "whisper":
+                whisper_chars.append(retrieval["whisper_context_chars"])
+                if row["dataset"] == "longmemeval" and row["abstention"]:
+                    silent_abstentions.append(int(retrieval["silent"]))
             latencies.append(retrieval["latency_s"])
         if row.get("judge", {}).get("status") == "ok":
             value = int(row["judge"]["result"]["correct"])
@@ -61,7 +70,7 @@ def aggregate(rows, k, mode):
                 abstentions.append(value)
             if row["dataset"] == "longmemeval" or not row["abstention"]:
                 scores.append(value)
-    return {
+    result = {
         "questions": len(rows),
         "retrieved": len(metrics),
         "scored": len(scores),
@@ -69,10 +78,10 @@ def aggregate(rows, k, mode):
         "abstention_questions": sum(row["abstention"] for row in rows),
         "abstention_scored": len(abstentions),
         "abstention_accuracy": mean(abstentions),
-        f"recall@{k}": mean([m["recall"] for m in metrics]),
-        f"ndcg@{k}": mean([m["ndcg"] for m in metrics]),
+        "injection_rate": mean([int(n > 0) for n in counts]),
+        "mean_injected_memories": mean(counts),
+        "mean_answer_context_chars": mean(context_chars),
         "retrieval_labeled": sum(m["recall"] is not None for m in metrics),
-        f"production_recall@{k}": mean([m["recall"] for m in gates]),
         "retrieval_p50_s": percentile(latencies, 0.5),
         "retrieval_p95_s": percentile(latencies, 0.95),
         "errors": {
@@ -80,3 +89,18 @@ def aggregate(rows, k, mode):
             for phase in ("store", "retrieve", "answer", "judge")
         },
     }
+
+    if strategy == "whisper":
+        result.update({
+            "recall@whisper": mean([m["recall"] for m in metrics]),
+            "mean_whisper_context_chars": mean(whisper_chars),
+            "abstention_retrieved": len(silent_abstentions),
+            "abstention_silence_rate": mean(silent_abstentions),
+        })
+    else:
+        result.update({
+            f"recall@{k}": mean([m["recall"] for m in metrics]),
+            f"ndcg@{k}": mean([m["ndcg"] for m in metrics]),
+            f"production_recall@{k}": mean([m["recall"] for m in gates]),
+        })
+    return result

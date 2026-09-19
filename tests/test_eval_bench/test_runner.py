@@ -73,7 +73,8 @@ def test_journal_recovers_only_torn_tail(tmp_path):
         Journal(path)
 
 
-def test_cli_parse(monkeypatch):
+@pytest.mark.parametrize("strategy", [None, "recall", "whisper"])
+def test_cli_parse(monkeypatch, strategy):
     import ormah.cli
 
     handler = Mock()
@@ -94,10 +95,11 @@ def test_cli_parse(monkeypatch):
             "10",
             "--conversation",
             "0",
-        ],
+        ] + (["--retrieval", strategy] if strategy else []),
     )
     ormah.cli.main()
     parsed = handler.call_args.args[0]
+    assert parsed.retrieval == (strategy or "recall")
     assert parsed.judge_provider == "codex"
     assert parsed.answer_provider == "claude-cli"
     assert parsed.limit == 10 and parsed.conversation == 0 and parsed.workers == 4
@@ -115,7 +117,7 @@ def test_provider_errors_are_checkpointed(args, tmp_path, locomo, bench_engine, 
         return provider
 
     report = run(
-        args, base=tmp_path, engine_factory=lambda _: bench_engine, provider_factory=factory
+        args, base=tmp_path, engine_factory=lambda _, **kw: bench_engine, provider_factory=factory
     )
     assert report["overall"]["errors"]["answer"] == 3
     assert report["overall"]["errors"]["judge"] == 3
@@ -178,7 +180,7 @@ def test_api_budget_aborts_run_and_preserves_charge(
     dataset(tmp_path, locomo)
     monkeypatch.setattr(bench_engine, "shutdown", lambda: None)
     args.answer_provider = "anthropic"
-    run(args, base=tmp_path, engine_factory=lambda _: bench_engine)
+    run(args, base=tmp_path, engine_factory=lambda _, **kw: bench_engine)
     args.resume = True
     args.phase = "answer,judge,report"
     args.max_usd = 0.01
@@ -196,7 +198,7 @@ def test_api_budget_aborts_run_and_preserves_charge(
         return FakeProvider("fake", **kwargs)
 
     with pytest.raises(BudgetExceeded):
-        run(args, base=tmp_path, engine_factory=lambda _: bench_engine, provider_factory=factory)
+        run(args, base=tmp_path, engine_factory=lambda _, **kw: bench_engine, provider_factory=factory)
     assert client.messages.create.call_count == 1
     calls = Journal(tmp_path / "artifacts" / "test" / "calls.jsonl").rows
     assert sum(c["usd"] for c in calls) == pytest.approx(0.015)
