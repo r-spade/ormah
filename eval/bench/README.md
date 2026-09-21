@@ -138,7 +138,7 @@ LongMemEval follows the official
 including complete-answer requirements, temporal off-by-one tolerance, updated
 facts and personalization rubrics. Invalid judge output is an error.
 
-This harness uses **k=30**, not Mem0's top-200 managed service; no reranker;
+The default recall track uses **k=30**, not Mem0's top-200 managed service; no reranker;
 no automatic temporal filtering (the production classifier uses wall-clock now,
 not historical `question_date`); raw LongMemEval in the first run; and subscription
 CLI models instead of fixed API models/the official GPT-4o judge. CLI aliases can
@@ -149,3 +149,105 @@ vision-encoded. No dataset gold or evidence enters extraction or answer generati
 Only reviewed summaries go under `results/` for these smoke runs. Raw journals,
 datasets and caches must not be committed. A future published run needs complete
 coverage, pinned models, methodology, the run ID, and owner review of its artifacts.
+
+## Whisper retrieval track
+
+Select `--retrieval whisper` to measure involuntary recall: the answering model
+sees only the memories Ormah chooses to whisper for each question. The default
+`--retrieval recall` retains deliberate top-k retrieval (k=30) and its existing
+answer and judge prompts. Whisper uses the same haystack seeding, but applies the
+full prompt classifier, cross-encoder reranker, production gates and six-node
+cap. `--k` does not change the whisper cap or truncate `recall@whisper`.
+
+```sh
+uv run ormah eval bench run locomo --mode raw --retrieval whisper \
+  --answer-provider codex --answer-model gpt-5.6-terra \
+  --judge-provider codex --judge-model gpt-5.6-terra \
+  --phase all --conversation 0 --limit 30 --workers 4 --run-id whisper-locomo-raw-c0-30
+uv run ormah eval bench run longmemeval --mode raw --retrieval whisper \
+  --answer-provider codex --answer-model gpt-5.6-terra \
+  --judge-provider codex --judge-model gpt-5.6-terra \
+  --phase all --limit 20 --workers 4 --run-id whisper-lme-raw-20
+```
+
+For a matched comparison, repeat with `--retrieval recall` and a separate run ID.
+Strategy is recorded in the manifest and checked on resume; older manifests
+without a strategy are treated as recall. Both tracks reuse identical cached
+embeddings. Whisper settings come from `WHISPER_EVAL_SETTINGS_OVERRIDES`, shared
+with the private whisper eval, including the shared retrieval pins. Startup must
+load the reranker before any question is seeded. A failed model load or a logged
+inference fallback aborts the run; `reranker_active` is recorded in the manifest
+and each retrieval result. It means the model is available, not that every prompt
+runs it: production can skip reranking for silence or identity-only intent.
+
+Each question calls `get_whisper_context(question, space=None,
+recent_prompts=None, session_id=None, _return_debug=True)`. Questions are independent:
+no conversation history, topic suppression across questions, or learned feedback
+is supplied. LoCoMo still shares one seeded haystack per conversation.
+
+The ordered debug IDs are the memory allowlist. The adapter matches each ID's
+rendered title and copies a content preview only if it appears immediately below
+that title and matches the production truncator. Currently only the first two
+memories have previews (up to 600 characters each); later memories retain titles
+and empty content. No title-only memory is expanded from storage. The same dated
+memory formatter and answer prompt are then used for both tracks. Memory dates
+are added from stored metadata, as in recall. Unknown rendering formats fail
+visibly. Framing, onboarding nudges and maintenance signals are excluded from
+memory payloads and counts; raw output is retained separately for audit. A nudge
+with zero debug IDs is **silence** and sends an empty memory list to the answerer.
+There is no fallback retrieval or follow-up recall.
+
+Whisper reports unchanged answer accuracy/J-score plus:
+
+* `injection_rate`: fraction of successful retrievals with at least one memory.
+* `mean_injected_memories` and `mean_whisper_context_chars`: mean counts and
+  memory-only rendered whisper characters, including zero for silent questions.
+* `mean_answer_context_chars`: actual dated memory payload characters sent to the
+  answerer, excluding prompt instructions. Also reported for recall, along with
+  its nonempty-context rate and memory count, for a direct context-budget comparison.
+* `recall@whisper`: macro recall over the entire injected set, session-level for
+  LongMemEval and exact turn-level for LoCoMo raw. The existing exclusions apply:
+  no LongMemEval abstentions/missing gold, and no invented LoCoMo extract provenance.
+* `abstention_silence_rate`: silence among successfully retrieved LongMemEval
+  abstention questions, with `abstention_retrieved` exposing the denominator.
+  This differs from judged abstention accuracy: unrelated injections can still
+  lead to a correct abstention. A sample without abstentions reports null.
+
+Failed retrievals are excluded from these means and exposed by error/coverage
+counts; silence is a successful retrieval with zero context. Artifacts include
+ordered IDs, raw and stripped whisper text, counts, context sizes, reference
+date, reranker status and latency of the whisper call (excluding seeding and
+adapter formatting).
+
+### Historical dates
+
+The production classifier's temporal and continuation intents use wall-clock
+UTC. Automatic temporal parsing inside recall uses the same parser even if the
+classifier did not identify temporal intent. For example, `last week` resolves
+to the rolling window 14 to 7 days before now; historical 2023 memories would be
+excluded on this node. A temporal classification without an explicit time phrase
+falls back to the preceding three days; continuation also defaults to three days.
+
+The benchmark scopes a context-local reference clock around the whisper call,
+using LongMemEval's question date or LoCoMo's latest session date (its questions
+have no query timestamps). Only these temporal interpretation sites use the
+reference clock, and it resets even on exceptions. Production defaults, ranking,
+gates, output, recency scoring and FSRS clocks are unchanged. Recall continues
+to disable automatic temporal filtering. Thus the tracks differ in temporal
+filtering as well as reranking and budget. Historical interpretation is still
+limited by the shipped heuristics: windows are rolling rather than calendar
+periods, classification can impose a recent window on a historical question,
+and LoCoMo's inferred reference date may differ from the intended query time.
+
+### What this number means
+
+Deliberate retrieval benchmarks, including the top-k comparisons described above,
+measure answering after an explicit memory search with a fixed retrieval budget.
+This track measures answering from Ormah's automatic, gated pre-prompt injection,
+including its decision to spend no context. It tests a different operating point;
+it is not a like-for-like leaderboard comparison or a claim that no other system
+has evaluated automatic injection. Report accuracy together with injection rate,
+context size, retrieval recall, coverage, models and run ID. Tiny ordered smoke
+samples diagnose behavior; they are not full-dataset accuracy estimates. This
+track also differs from the private whisper eval, which scores expected injection
+and suppression directly rather than downstream answers on public datasets.

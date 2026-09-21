@@ -29,7 +29,7 @@ from eval.bench.store import (
     prepare_memories,
     seed_memories,
 )
-from eval.settings import RETRIEVAL_EVAL_SETTINGS_OVERRIDES
+from eval.settings import RETRIEVAL_EVAL_SETTINGS_OVERRIDES, WHISPER_EVAL_SETTINGS_OVERRIDES
 
 BASE = Path(__file__).parent
 BENCH_SETTINGS_OVERRIDES = {
@@ -55,12 +55,18 @@ def phases_for(args):
     return phases
 
 
-def make_engine(db_dir):
+def settings_for(retrieval):
+    if retrieval == "whisper":
+        return {**BENCH_SETTINGS_OVERRIDES, **WHISPER_EVAL_SETTINGS_OVERRIDES}
+    return dict(BENCH_SETTINGS_OVERRIDES)
+
+
+def make_engine(db_dir, retrieval="recall"):
     from ormah.config import Settings
     from ormah.engine.memory_engine import MemoryEngine
 
     (db_dir / "nodes").mkdir(parents=True, exist_ok=True)
-    settings = Settings(memory_dir=db_dir, **BENCH_SETTINGS_OVERRIDES)
+    settings = Settings(memory_dir=db_dir, **settings_for(retrieval))
     engine = MemoryEngine(settings)
     engine.startup()
     return engine
@@ -87,6 +93,7 @@ def parameters(args):
         for k in (
             "dataset",
             "mode",
+            "retrieval",
             "k",
             "limit",
             "question_type",
@@ -103,6 +110,8 @@ def parameters(args):
 
 
 def validate(args):
+    if args.retrieval not in {"recall", "whisper"}:
+        raise ValueError("--retrieval must be recall or whisper")
     if args.k <= 0 or args.workers <= 0 or (args.limit is not None and args.limit <= 0):
         raise ValueError("--k, --workers and --limit must be positive")
     if args.conversation is not None and args.conversation < 0:
@@ -175,6 +184,7 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
         if not args.resume:
             raise ValueError("Run exists; use --resume or a new --run-id")
         manifest = json.loads(manifest_path.read_text())
+        manifest["parameters"].setdefault("retrieval", "recall")
         if manifest["parameters"] != parameters(args) or manifest["dataset_sha256"] != fingerprint:
             raise ValueError("Resume parameters/dataset differ from the saved manifest")
     else:
@@ -187,7 +197,9 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
             "ormah_version": importlib.metadata.version("ormah"),
             "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
             "git_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], text=True)),
-            "settings": BENCH_SETTINGS_OVERRIDES,
+            "settings": settings_for(args.retrieval),
+            "reranker_active": False,
+            "temporal_reference": "question_date" if args.retrieval == "whisper" else "disabled",
             "embedding_model": RETRIEVAL_EVAL_SETTINGS_OVERRIDES["embedding_model"],
             "embedding_batch_size": 16,
             "runtime": {
@@ -247,7 +259,19 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
         from ormah.background.llm_client import reset_adapter, set_adapter
         from eval.bench.retrieve import retrieve_question
 
-        engine = engine_factory(base / "eval_db" / run_id)
+        from eval.bench.whisper import RerankerUnavailable, require_reranker, retrieve_whisper
+
+        engine = engine_factory(base / "eval_db" / run_id, retrieval=args.retrieval)
+        if args.retrieval == "whisper":
+            try:
+                require_reranker(engine)
+            except RerankerUnavailable:
+                manifest["reranker_active"] = False
+                write_json(manifest_path, manifest)
+                engine.shutdown()
+                raise
+            manifest["reranker_active"] = True
+            write_json(manifest_path, manifest)
         cache = EmbeddingCache(
             base / "artifacts" / "cache" / "embeddings.sqlite",
             f"{engine.settings.embedding_provider}:{engine.settings.embedding_model}:"
@@ -320,8 +344,20 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
                     try:
                         row["retrieve"] = {
                             "status": "ok",
-                            "result": retrieve_question(engine, q.question, args.k),
+                            "result": (
+                                retrieve_whisper(engine, q.question, q.question_date)
+                                if args.retrieval == "whisper"
+                                else retrieve_question(engine, q.question, args.k)
+                            ),
                         }
+                    except RerankerUnavailable as exc:
+                        row["retrieve"] = {
+                            "status": "error", "error": str(exc), "reranker_active": False
+                        }
+                        manifest["reranker_active"] = False
+                        save(dict(row))
+                        elapsed("retrieve", start)
+                        raise
                     except Exception as exc:
                         row["retrieve"] = {"status": "error", "error": str(exc)}
                     save(dict(row))
