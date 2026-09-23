@@ -41,7 +41,7 @@ from ormah.models.node import (
     Tier,
     UpdateNodeRequest,
 )
-from ormah.store.file_store import FileStore
+from ormah.store.file_store import FileStore, UnresolvedNodeReference
 from ormah.text.tokens import STOP_WORDS
 
 logger = logging.getLogger(__name__)
@@ -1115,22 +1115,33 @@ class MemoryEngine:
     @_serialized_memory_operation
     def delete_node(self, node_id: str) -> str | None:
         """Delete a memory node from disk and index. Returns confirmation or None."""
-        if node_id == self.user_node_id:
-            return "Cannot delete the user self node."
-
-        # Load full node from disk for audit snapshot
-        full_node = self.file_store.load(node_id)
+        # Load full node from disk for audit snapshot. Only a confirmed absence may
+        # fall back to the index: an ambiguous Short id or an unparseable file is not
+        # one, and the index lookup would pick a row the store could not vouch for.
+        try:
+            full_node = self.file_store.resolve(node_id)
+        except UnresolvedNodeReference as exc:
+            return f"Cannot delete {node_id}: {exc} Nothing was deleted."
         if full_node is None:
-            # Fall back to graph index to check existence
+            # Fall back to graph index to check existence. Exact Full id only:
+            # `get_node` answers a prefix with one arbitrary row of many, and the store
+            # has just confirmed that no file holds this reference.
             node = self.graph.get_node(node_id)
-            if node is None:
+            if node is None or node["id"] != node_id:
                 return None
             title = node.get("title") or node.get("content", "")[:60]
             snapshot = json.dumps(node)
+            node_type = node.get("type", "unknown")
+            node_id = node["id"]
         else:
             title = full_node.title or full_node.content[:60]
             snapshot = json.dumps(full_node.model_dump(mode="json"))
-            node = self.graph.get_node(node_id)
+            node_type = full_node.type.value
+            node_id = full_node.id  # the caller may have passed a Short id
+
+        # After resolution, so a Short id cannot slip past it.
+        if node_id == self.user_node_id:
+            return "Cannot delete the user self node."
 
         # Audit log before deletion
         self._write_audit_log(
@@ -1150,7 +1161,6 @@ class MemoryEngine:
         # Soft-delete from disk (move to deleted/ directory)
         self.file_store.soft_delete(node_id)
 
-        node_type = full_node.type.value if full_node else node.get("type", "unknown") if node else "unknown"
         return f"Deleted [{node_type}]: {title}\nID: {node_id}"
 
     @_serialized_memory_operation
