@@ -13,6 +13,7 @@ class ProposalType(str, Enum):
     merge = "merge"
     conflict = "conflict"
     decay = "decay"
+    pattern = "pattern"  # synthetic-prompt pattern correction (#143)
 
 
 class ProposalStatus(str, Enum):

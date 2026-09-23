@@ -1190,6 +1190,26 @@ class MemoryEngine:
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
 
+    def note_synthetic_whisper_skip(
+        self,
+        prompt: str,
+        space: str | None = None,
+        session_id: str | None = None,
+        matched_pattern: str | None = None,
+    ) -> None:
+        """Record a whisper call skipped because the prompt was machine-generated.
+
+        Called from the ``/agent/whisper`` boundary instead of ``get_whisper_context``:
+        the skip has to happen before this engine runs at all (its first statement
+        consumes the one-time onboarding nudge), so the decision row is written here
+        to keep ``whisper_decisions`` one-row-per-call (#134).
+        """
+        self.context_builder._log_decision(
+            session_id=session_id, space=space, prompt=prompt,
+            intent=None, outcome="silent_synthetic",
+            matched_pattern=matched_pattern,
+        )
+
     def get_whisper_context(
         self,
         prompt: str,
