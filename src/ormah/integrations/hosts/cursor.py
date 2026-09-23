@@ -1,10 +1,12 @@
 """Cursor deliberate MCP support; prompt-time whisper is explicitly blocked."""
+import os
 from pathlib import Path
 
 from ormah.integrations import common
 from ormah.integrations.ownership import Installation
 
 HOST = "cursor"
+ENV_KEYS = ("ORMAH_URL", "ORMAH_PORT", "ORMAH_SPACE", "ORMAH_WORKSPACE", "ORMAH_AUTH_TOKEN", "ORMAH_WHISPER_TIMEOUT")
 DETAIL = (
     "MCP tools only. Cursor beforeSubmitPrompt cannot return model context; "
     "automatic prompt-time whisper is blocked. Use project setup for workspace scope."
@@ -22,7 +24,8 @@ def connect(project: Path | None = None) -> None:
     command = common.mcp_command(HOST, str(project) if project else None)
     install = Installation(common.receipt(HOST, project))
     install.value(directory / "mcp.json", ["mcpServers", "ormah"], {
-        "command": command[0], "args": command[1:],
+        "type": "stdio", "command": command[0], "args": command[1:],
+        "env": {key: "${env:" + key + "}" for key in ENV_KEYS if key in os.environ},
     })
     if project:
         install.file(directory / "rules" / "ormah.mdc",

@@ -59,3 +59,15 @@ def test_corrupt_cursor_config_is_not_overwritten(tmp_path):
     with pytest.raises(ValueError):
         cursor.connect()
     assert (root / 'mcp.json').read_text() == '{broken'
+
+
+def test_explicit_transport_and_runtime_variable_references(tmp_path, monkeypatch):
+    monkeypatch.setenv('ORMAH_URL', 'http://scratch-daemon:9876')
+    monkeypatch.setenv('ORMAH_AUTH_TOKEN', 'scratch-secret-never-serialized')
+    cursor.connect(tmp_path)
+    config = (tmp_path / '.cursor/mcp.json').read_text()
+    server = json_config.get(config, ['mcpServers', 'ormah'])[1]
+    assert server['type'] == 'stdio'
+    assert server['env']['ORMAH_URL'] == '${env:ORMAH_URL}'
+    assert server['env']['ORMAH_AUTH_TOKEN'] == '${env:ORMAH_AUTH_TOKEN}'
+    assert 'scratch-secret-never-serialized' not in config

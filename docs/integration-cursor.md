@@ -18,6 +18,11 @@ Start Ormah separately, then reload Cursor and inspect its MCP tools. Keep the
 normal MCP approval policy; setup does not change it. The existing remember,
 recall, feedback and two-call maintenance tools are available. The MCP server
 also advertises portable memory guidance. No named maintenance agent is required.
+For custom daemon URL/auth/space, set the relevant `ORMAH_*` variables before
+setup and in Cursor's launch environment. Setup writes documented `${env:NAME}`
+references (not secret values) plus explicit `type: "stdio"`. Disconnect/connect
+to add variable names later. An unbound user connection also accepts explicit
+`ORMAH_WORKSPACE`. This avoids relying on unspecified MCP subprocess inheritance.
 See [shared runtime options and ownership](agent-integrations.md).
 
 ## Whisper investigation (2026-09-23)
