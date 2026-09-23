@@ -42,12 +42,8 @@ def test_detect_clients_none(tmp_path):
         patch("platform.system", return_value="Darwin"),
     ):
         d = setup.detect_clients()
-    assert d == {
-        "claude_code": False,
-        "codex": False,
-        "claude_desktop": False,
-        "pi": False,
-    }
+    assert {"claude_code", "codex", "claude_desktop", "pi"} <= d.keys()
+    assert not any(d.values())
 
 
 def test_detect_clients_claude_code(tmp_path):
