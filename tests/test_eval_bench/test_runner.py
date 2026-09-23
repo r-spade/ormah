@@ -211,3 +211,78 @@ def test_budget_must_be_finite_and_positive(args, amount):
     args.max_usd = amount
     with pytest.raises(ValueError, match="finite and positive"):
         validate(args)
+
+
+@pytest.mark.parametrize("change", ["settings", "environment", "source", "runtime", "legacy"])
+def test_resume_rejects_changed_experiment_before_mutating_artifacts(
+    args, tmp_path, locomo, bench_engine, monkeypatch, change
+):
+    import eval.bench.runner as runner
+
+    dataset(tmp_path, locomo)
+    monkeypatch.setattr(bench_engine, "shutdown", lambda: None)
+    run(args, base=tmp_path, engine_factory=Mock(return_value=bench_engine))
+    run_dir = tmp_path / "artifacts/test"
+    # Simulate an interrupted retrieval so resuming would otherwise mix results.
+    journal = Journal(run_dir / "questions.jsonl")
+    row = journal.latest()["locomo:0:2"]
+    row.pop("retrieve")
+    journal.append(row)
+    if change == "settings":
+        monkeypatch.setitem(runner.BENCH_SETTINGS_OVERRIDES, "fts_weight", 0.99)
+    elif change == "environment":
+        monkeypatch.setenv("ORMAH_ACTIVATION_DECAY", "0.12345")
+    elif change in {"source", "runtime"}:
+        original = runner.experiment_fingerprint
+
+        def changed(*a, **kw):
+            result = original(*a, **kw)
+            result["source_sha256" if change == "source" else "runtime"] = "changed"
+            return result
+
+        monkeypatch.setattr(runner, "experiment_fingerprint", changed)
+    else:
+        path = run_dir / "manifest.json"
+        manifest = json.loads(path.read_text())
+        del manifest["experiment_fingerprint"]
+        path.write_text(json.dumps(manifest))
+        # Reporting historical artifacts needs no new provenance or model calls.
+        from eval.bench.report import build_report
+
+        assert build_report(run_dir)["overall"]["questions"] == 3
+
+    before = {p: p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+    engine_factory, provider_factory = Mock(), Mock()
+    args.resume = True
+    args.phase = "all"
+    with pytest.raises(ValueError, match="new --run-id"):
+        run(args, base=tmp_path, engine_factory=engine_factory, provider_factory=provider_factory)
+    engine_factory.assert_not_called()
+    provider_factory.assert_not_called()
+    assert {p: p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("change", ["model", "version"])
+def test_resume_rejects_changed_resolved_provider(args, tmp_path, locomo, bench_engine, monkeypatch, change):
+    dataset(tmp_path, locomo)
+    monkeypatch.setattr(bench_engine, "shutdown", lambda: None)
+    args.phase = "all"
+    def factory(*a, **kw):
+        return FakeProvider("resolved-v1", **kw)
+
+    run(args, base=tmp_path, engine_factory=Mock(return_value=bench_engine), provider_factory=factory)
+    run_dir = tmp_path / "artifacts/test"
+    before = {p: p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+
+    def changed_provider(*a, **kw):
+        provider = FakeProvider("resolved-v2" if change == "model" else "resolved-v1", **kw)
+        if change == "version":
+            provider.version = lambda: "new-cli-version"
+        provider.complete = Mock(side_effect=AssertionError("must not call changed provider"))
+        return provider
+
+    args.resume = True
+    args.phase = "answer,judge,report"
+    with pytest.raises(ValueError, match="provider/model/version differs"):
+        run(args, base=tmp_path, provider_factory=changed_provider)
+    assert {p: p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before

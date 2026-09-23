@@ -2569,7 +2569,6 @@ class MemoryEngine:
 
     # --- Conversation ingestion ---
 
-    @_serialized_memory_operation
     def ingest_conversation(
         self,
         content: str,
@@ -2583,10 +2582,26 @@ class MemoryEngine:
         Uses the configured LLM to identify memorable information,
         deduplicates against existing memories, and creates nodes.
 
-        When *dry_run* is True, runs extraction and dedup but skips storage.
+        When *dry_run* is True, runs extraction without dedup or storage.
+        Dry runs only read settings and normalize LLM output, so they can run
+        concurrently. Normal ingestion holds the memory-operation lock across
+        extraction, deduplication and storage, including restore exclusion.
         Returns list of dicts with extracted/created memory info,
         or an error string if the LLM is unavailable.
         """
+        if dry_run:
+            return self._ingest_conversation(content, space, agent_id, True, extra_tags)
+        with self._memory_operation_lock:
+            return self._ingest_conversation(content, space, agent_id, False, extra_tags)
+
+    def _ingest_conversation(
+        self,
+        content: str,
+        space: str | None,
+        agent_id: str | None,
+        dry_run: bool,
+        extra_tags: list[str] | None,
+    ) -> list[dict] | str:
         if len(content.strip()) < 50:
             return []
 

@@ -40,7 +40,7 @@ def test_claude_arguments_and_estimate(monkeypatch):
 
 
 def test_codex_arguments_stdin_file_and_usage(monkeypatch):
-    monkeypatch.setattr(CodexProvider, "executable", "/opt/test/codex")
+    monkeypatch.setenv("ORMAH_BENCH_CODEX", "/opt/test/codex")
     def fake_run(args, **kwargs):
         assert args[0] == "/opt/test/codex"
         assert "--ignore-user-config" in args
@@ -57,6 +57,47 @@ def test_codex_arguments_stdin_file_and_usage(monkeypatch):
     result = CodexProvider("default").complete("question")
     assert result.text == "yes"
     assert result.usage["input_tokens"] == 8
+
+
+def test_import_does_not_discover_codex(monkeypatch):
+    import runpy
+    import eval.bench.providers as providers
+
+    # CI cannot traverse /root, and retrieval-only users need no Codex install.
+    original_exists = Path.exists
+
+    def restricted_exists(path):
+        if str(path).startswith("/root/"):
+            raise PermissionError(str(path))
+        return original_exists(path)
+
+    discovery = Mock(side_effect=AssertionError("discovery at import time"))
+    monkeypatch.setattr(Path, "exists", restricted_exists)
+    monkeypatch.setattr(providers.shutil, "which", discovery)
+    runpy.run_path(providers.__file__)
+    discovery.assert_not_called()
+
+
+def test_codex_discovery_is_lazy_and_respects_override(monkeypatch):
+    import eval.bench.providers as providers
+
+    which = Mock(return_value="/usr/local/bin/codex")
+    monkeypatch.setattr(providers.shutil, "which", which)
+    monkeypatch.delenv("ORMAH_BENCH_CODEX", raising=False)
+    assert CodexProvider("test").executable == "/usr/local/bin/codex"
+    monkeypatch.setenv("ORMAH_BENCH_CODEX", "/opt/pinned/codex")
+    assert CodexProvider("test").executable == "/opt/pinned/codex"
+    which.assert_called_once_with("codex")
+
+
+@pytest.mark.parametrize("result", [None, PermissionError("inaccessible PATH")])
+def test_codex_discovery_handles_missing_or_inaccessible_path(monkeypatch, result):
+    import eval.bench.providers as providers
+
+    monkeypatch.delenv("ORMAH_BENCH_CODEX", raising=False)
+    which = Mock(side_effect=result) if isinstance(result, Exception) else Mock(return_value=result)
+    monkeypatch.setattr(providers.shutil, "which", which)
+    assert CodexProvider("test").executable == "codex"
 
 
 def test_provider_error_recorded(monkeypatch, tmp_path):

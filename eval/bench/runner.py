@@ -19,6 +19,7 @@ from eval.bench.artifacts import Journal, write_json
 from eval.bench.cost import Budget, BudgetExceeded, token_cost
 from eval.bench.datasets import SOURCES, load_questions, sha256_file
 from eval.bench.providers import make_provider
+from eval.bench.provenance import experiment_fingerprint, validate_resume
 from eval.bench.report import build_report
 from eval.bench.store import (
     ClaudeCLIAdapter,
@@ -171,12 +172,22 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
     if not path.exists():
         raise ValueError(f"Dataset missing: {path}; run 'ormah eval bench download'")
     fingerprint = sha256_file(path)
+    runtime = {
+        "python": __import__("platform").python_version(),
+        "sqlite": __import__("sqlite3").sqlite_version,
+        "sqlite_vec": importlib.metadata.version("sqlite-vec"),
+        "fastembed": importlib.metadata.version("fastembed"),
+        "numpy": importlib.metadata.version("numpy"),
+        "onnxruntime": importlib.metadata.version("onnxruntime"),
+    }
+    experiment = experiment_fingerprint(BENCH_SETTINGS_OVERRIDES, runtime)
     if manifest_path.exists():
         if not args.resume:
             raise ValueError("Run exists; use --resume or a new --run-id")
         manifest = json.loads(manifest_path.read_text())
         if manifest["parameters"] != parameters(args) or manifest["dataset_sha256"] != fingerprint:
             raise ValueError("Resume parameters/dataset differ from the saved manifest")
+        validate_resume(manifest, experiment)
     else:
         manifest = {
             "run_id": run_id,
@@ -187,15 +198,11 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
             "ormah_version": importlib.metadata.version("ormah"),
             "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
             "git_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], text=True)),
-            "settings": BENCH_SETTINGS_OVERRIDES,
+            "settings": dict(BENCH_SETTINGS_OVERRIDES),
+            "experiment_fingerprint": experiment,
             "embedding_model": RETRIEVAL_EVAL_SETTINGS_OVERRIDES["embedding_model"],
             "embedding_batch_size": 16,
-            "runtime": {
-                "python": __import__("platform").python_version(),
-                "sqlite": __import__("sqlite3").sqlite_version,
-                "sqlite_vec": importlib.metadata.version("sqlite-vec"),
-                "fastembed": importlib.metadata.version("fastembed"),
-            },
+            "runtime": runtime,
             "prompt_hashes": {name: sha256_file(BASE / name) for name in ("answer.py", "judge.py")},
             "phase_wall_s": {},
             "providers": {},
@@ -211,7 +218,6 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
             "embedding_length_sorted": True,
         }
     )
-    write_json(manifest_path, manifest)
     print(f"Run id: {run_id}", flush=True)
     journal = Journal(run_dir / "questions.jsonl")
     rows = journal.latest()
@@ -227,11 +233,18 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
             budget=budget,
         )
         providers[phase] = provider
-        manifest["providers"][phase] = {
+        identity = {
             "provider": provider.name,
             "model": provider.model,
             "version": provider.version(),
         }
+        previous = manifest["providers"].get(phase)
+        if previous is not None and previous != identity:
+            raise ValueError(
+                f"Resume {phase} provider/model/version differs from the saved manifest; "
+                "use a new --run-id."
+            )
+        manifest["providers"][phase] = identity
     write_json(manifest_path, manifest)
 
     def save(row):
