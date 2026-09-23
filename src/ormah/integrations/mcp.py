@@ -9,6 +9,7 @@ import uuid
 from mcp.server.stdio import stdio_server
 
 from ormah.adapters.mcp_adapter import create_mcp_server
+from .common import instructions
 from .runtime import base_url, headers, session_key, space_for
 
 
@@ -19,7 +20,7 @@ async def run(host: str, workspace: str | None) -> None:
     server = create_mcp_server(
         base_url(), default_space=await space_for(workspace),
         session_id=session_key(host, f"mcp:{uuid.uuid4()}", workspace),
-        headers=headers(),
+        headers=headers(), instructions=instructions(),
     )
     async with stdio_server() as (read, write):
         await server.run(read, write, server.create_initialization_options())

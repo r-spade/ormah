@@ -62,9 +62,10 @@ def create_mcp_server(
     default_space: str | None = None,
     session_id: str | None = None,
     headers: dict[str, str] | None = None,
+    instructions: str | None = None,
 ) -> Server:
     """Create an MCP server that delegates to the HTTP API."""
-    server = Server("ormah")
+    server = Server("ormah", instructions=instructions)
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
