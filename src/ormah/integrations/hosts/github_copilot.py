@@ -10,6 +10,7 @@ from ormah.integrations import common
 from ormah.integrations.ownership import Installation
 
 HOST = "github_copilot"
+ENV_KEYS = ("ORMAH_URL", "ORMAH_PORT", "ORMAH_SPACE", "ORMAH_WORKSPACE", "ORMAH_AUTH_TOKEN", "ORMAH_WHISPER_TIMEOUT")
 
 
 def user_directory() -> Path:
@@ -33,6 +34,7 @@ def connect(project: Path | None = None) -> None:
     command = common.mcp_command(HOST, str(project) if project else "${workspaceFolder}")
     install.value(config, ["servers", "ormah"], {
         "type": "stdio", "command": command[0], "args": command[1:],
+        "env": {key: "${env:" + key + "}" for key in ENV_KEYS if key in os.environ},
     })
     command = [sys.executable, "-m", "ormah.integrations.github_copilot_hook"]
     if project:

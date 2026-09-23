@@ -34,6 +34,11 @@ exit code 0. Success returns `hookSpecificOutput.additionalContext` for the Loca
 model request, never an approval decision. Cancellation is handled by the host
 terminating the hook process; retrieval also has a bounded deadline.
 
+Set custom `ORMAH_*` runtime variables before setup and in VS Code's launch
+environment. MCP configuration records `${env:NAME}` references only for names
+present during setup; no secret values are written. Disconnect/connect when
+adding variables later. The hook inherits its host environment.
+
 See [shared options](agent-integrations.md) for URL/auth/space/deadlines and
 ownership. MCP exposes deliberate recall, saving, feedback, and maintenance.
 Instructions use the two-call maintenance protocol without an assumed custom

@@ -68,3 +68,14 @@ async def test_offline_and_explicit_workspace(tmp_path, httpx_mock):
     httpx_mock.add_exception(httpx.ConnectError('offline'))
     assert await handle({'hook_event_name':'UserPromptSubmit', 'prompt':'x',
                          'session_id':'s', 'cwd':'/wrong'}, str(tmp_path)) == {}
+
+
+def test_mcp_custom_runtime_env_is_explicit(tmp_path, monkeypatch):
+    monkeypatch.setenv('ORMAH_URL', 'http://scratch-daemon:9876')
+    monkeypatch.setenv('ORMAH_AUTH_TOKEN', 'scratch-secret-never-serialized')
+    host.connect(tmp_path)
+    config = (tmp_path / '.vscode/mcp.json').read_text()
+    server = jc.get(config, ['servers','ormah'])[1]
+    assert server['env']['ORMAH_URL'] == '${env:ORMAH_URL}'
+    assert server['env']['ORMAH_AUTH_TOKEN'] == '${env:ORMAH_AUTH_TOKEN}'
+    assert 'scratch-secret-never-serialized' not in config
