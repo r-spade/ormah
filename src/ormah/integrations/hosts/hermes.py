@@ -49,7 +49,7 @@ def connect(project: Path | None = None) -> None:
     })
     install.item(path, ["plugins", "enabled"], "ormah")
     root = home() / "plugins/ormah"
-    source = files("ormah.integrations").joinpath("assets/hermes/plugin.py").read_text()
+    source = files("ormah.integrations").joinpath("assets/hermes/plugin.py.in").read_text()
     for key, value in (("__ORMAH_PYTHON__", sys.executable), ("__ORMAH_WORKSPACE__", str(project) if project else None),
                        ("__ORMAH_PROFILE__", str(home())), ("__ORMAH_ENV_KEYS__", names)):
         source = source.replace(key, repr(value))
