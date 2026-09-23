@@ -26,16 +26,16 @@ def instructions() -> str:
     return files("ormah.integrations").joinpath("assets/instructions.md").read_text()
 
 
-def disconnect(host: str, project: Path | None = None) -> None:
-    preserved = Installation(receipt(host, project)).disconnect()
+def disconnect(host: str, project: Path | None = None, *, json5: bool = False) -> None:
+    preserved = Installation(receipt(host, project), json5=json5).disconnect()
     if preserved:
         print("Preserved user-edited Ormah artifacts: " + ", ".join(preserved), file=sys.stderr)
 
 
 def capability(host: str, *, whisper: str, detail: str,
-               project: Path | None = None) -> dict:
+               project: Path | None = None, json5: bool = False) -> dict:
     try:
-        installation = Installation(receipt(host, project))
+        installation = Installation(receipt(host, project), json5=json5)
         tools = installation.intact("value")
         intact = installation.intact()
     except (OSError, ValueError, KeyError, TypeError):

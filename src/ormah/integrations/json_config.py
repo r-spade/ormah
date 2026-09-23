@@ -7,12 +7,19 @@ No reserialization of a user's whole configuration, comments, or key order.
 from __future__ import annotations
 
 import json
+import json5 as json5_parser
 import re
 from dataclasses import dataclass, field
 
 _TOKEN = re.compile(
     r'\s+|//[^\n]*|/\*[\s\S]*?\*/|"(?:[^"\\\x00-\x1f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*"'
     r'|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null|[{}\[\]:,]'
+)
+
+_TOKEN5 = re.compile(
+    r"\s+|//[^\n]*|/\*[\s\S]*?\*/|'(?:\\[\s\S]|[^'\\])*'"
+    r'|"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:,]|[^\s{}\[\]:,]+ '
+    .rstrip()
 )
 
 
@@ -26,10 +33,12 @@ class Node:
     comma: int | None = None
 
 
-def parse(text: str) -> Node:
+def parse(text: str, *, json5: bool = False) -> Node:
+    if json5:
+        json5_parser.loads(text, allow_duplicate_keys=False)
     tokens = []
     pos = 0
-    for match in _TOKEN.finditer(text):
+    for match in (_TOKEN5 if json5 else _TOKEN).finditer(text):
         if match.start() != pos:
             raise ValueError(f"Invalid JSONC at character {pos}")
         pos = match.end()
@@ -49,7 +58,7 @@ def parse(text: str) -> Node:
         index += 1
         if token not in ("{", "["):
             try:
-                return Node(start, end, json.loads(token))
+                return Node(start, end, json5_parser.loads(token) if json5 else json.loads(token))
             except (ValueError, TypeError) as exc:
                 raise ValueError(f"Invalid JSONC value at {start}") from exc
         mapping = token == "{"
@@ -60,9 +69,10 @@ def parse(text: str) -> Node:
             key = None
             if mapping:
                 raw, key_start, _ = tokens[index]
-                if not raw.startswith('"'):
+                if not json5 and not raw.startswith('"'):
                     raise ValueError("JSONC object keys must be quoted")
-                key = json.loads(raw)
+                key = (next(iter(json5_parser.loads("{" + raw + ":0}")))
+                       if json5 else json.loads(raw))
                 if key in children:
                     raise ValueError(f"Duplicate JSONC key: {key}")
                 index += 1
@@ -94,8 +104,8 @@ def parse(text: str) -> Node:
     return root
 
 
-def get(text: str, keys: list[str]) -> tuple[bool, object]:
-    node = parse(text)
+def get(text: str, keys: list[str], *, json5: bool = False) -> tuple[bool, object]:
+    node = parse(text, json5=json5)
     for key in keys:
         if not isinstance(node.value, dict):
             raise ValueError(f"Expected object at {key}")
@@ -105,11 +115,12 @@ def get(text: str, keys: list[str]) -> tuple[bool, object]:
     return True, node.value
 
 
-def put(text: str, keys: list[str], value: object, *, delete: bool = False) -> str:
+def put(text: str, keys: list[str], value: object, *, delete: bool = False,
+        json5: bool = False) -> str:
     """Set/delete a leaf. Newly needed parent objects are created, never clobbered."""
     if not keys:
         raise ValueError("Cannot replace configuration root")
-    node = parse(text)
+    node = parse(text, json5=json5)
     for i, key in enumerate(keys):
         if not isinstance(node.value, dict):
             raise ValueError(f"Expected object at {key}")
@@ -121,7 +132,7 @@ def put(text: str, keys: list[str], value: object, *, delete: bool = False) -> s
                 nested = value
                 for part in reversed(keys[i + 1:]):
                     nested = {part: nested}
-                return put(text, keys[:i + 1], nested)
+                return put(text, keys[:i + 1], nested, json5=json5)
             node = child
             continue
         if child is not None:
@@ -155,13 +166,13 @@ def put(text: str, keys: list[str], value: object, *, delete: bool = False) -> s
     raise AssertionError("unreachable")
 
 
-def append(text: str, keys: list[str], value: object) -> str:
-    found, current = get(text, keys)
+def append(text: str, keys: list[str], value: object, *, json5: bool = False) -> str:
+    found, current = get(text, keys, json5=json5)
     if not found:
-        return put(text, keys, [value])
+        return put(text, keys, [value], json5=json5)
     if not isinstance(current, list):
         raise ValueError("Expected hook/plugin array")
-    node = parse(text)
+    node = parse(text, json5=json5)
     for key in keys:
         node = node.children[key]
     insert = node.end - 1
@@ -172,11 +183,11 @@ def append(text: str, keys: list[str], value: object) -> str:
     return text[:insert] + "\n  " + json.dumps(value, ensure_ascii=False) + "\n" + text[insert:]
 
 
-def remove_item(text: str, keys: list[str], value: object) -> str:
-    found, current = get(text, keys)
+def remove_item(text: str, keys: list[str], value: object, *, json5: bool = False) -> str:
+    found, current = get(text, keys, json5=json5)
     if not found or not isinstance(current, list) or value not in current:
         return text
-    node = parse(text)
+    node = parse(text, json5=json5)
     for key in keys:
         node = node.children[key]
     index = current.index(value)

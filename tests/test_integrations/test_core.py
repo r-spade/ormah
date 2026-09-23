@@ -139,3 +139,19 @@ async def test_mcp_explicit_null_bypasses_project_default(args, expected_space, 
     assert ('default_space' in request.url.params) == has_default
     assert json.loads(request.content).get('space') == expected_space
     assert request.headers['authorization'] == 'Bearer scratch'
+
+
+def test_json5_ownership_preserves_native_host_syntax(tmp_path):
+    config, receipt = tmp_path / 'host.json', tmp_path / 'receipt.json'
+    text = "{ // host comment\n model: 'chosen', nested: { value: 0x20, }, list: ['mine'],}"
+    config.write_text(text)
+    install = Installation(receipt, json5=True)
+    install.value(config, ['mcp', 'ormah'], {'command': 'python'})
+    install.item(config, ['list'], 'ormah')
+    install.commit()
+    assert Installation(receipt, json5=True).intact()
+    Installation(receipt, json5=True).disconnect()
+    result = config.read_text()
+    assert "model: 'chosen'" in result and 'value: 0x20' in result
+    assert '// host comment' in result
+    assert jc.get(result, ['list'], json5=True)[1] == ['mine']

@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from functools import partial
+from types import SimpleNamespace
 from pathlib import Path
 
 from . import json_config
@@ -31,7 +33,11 @@ class Installation:
     safely retried or disconnected. Unrelated changes to shared files survive.
     """
 
-    def __init__(self, receipt: Path):
+    def __init__(self, receipt: Path, *, json5: bool = False):
+        self.editor = SimpleNamespace(**{
+            name: partial(getattr(json_config, name), json5=json5)
+            for name in ("get", "put", "append", "remove_item")
+        })
         self.receipt = receipt
         self.records = json.loads(receipt.read_text()) if receipt.exists() else []
         if not isinstance(self.records, list):
@@ -57,12 +63,12 @@ class Installation:
         record = dict(kind="value", path=str(path), keys=keys, value=value)
         owned = self._record(record)
         text = self._read(path)
-        found, current = json_config.get(text, keys)
+        found, current = self.editor.get(text, keys)
         if found:
             if owned and current == value:
                 return
             raise ValueError(f"Preserving existing configuration: {path}: {'.'.join(keys)}")
-        self.pending[path] = json_config.put(text, keys, value)
+        self.pending[path] = self.editor.put(text, keys, value)
         if not owned:
             self.records.append(record)
 
@@ -70,7 +76,7 @@ class Installation:
         record = dict(kind="item", path=str(path), keys=keys, value=value)
         owned = self._record(record)
         text = self._read(path)
-        found, current = json_config.get(text, keys)
+        found, current = self.editor.get(text, keys)
         if found and not isinstance(current, list):
             raise ValueError(f"Expected array in {path}: {'.'.join(keys)}")
         if found and value in current:
@@ -79,7 +85,7 @@ class Installation:
             raise ValueError(f"Preserving unowned registration: {path}")
         if owned:
             raise ValueError(f"Ormah registration was edited in {path}; disconnect first")
-        self.pending[path] = json_config.append(text, keys, value)
+        self.pending[path] = self.editor.append(text, keys, value)
         self.records.append(record)
 
     def file(self, path: Path, content: str) -> None:
@@ -116,16 +122,16 @@ class Installation:
                     preserved.append(str(path))
                 continue
             keys, value = record["keys"], record["value"]
-            found, current = json_config.get(text, keys)
+            found, current = self.editor.get(text, keys)
             if not found:
                 continue
             if record["kind"] == "item":
                 if isinstance(current, list) and value in current:
-                    self.pending[path] = json_config.remove_item(text, keys, value)
+                    self.pending[path] = self.editor.remove_item(text, keys, value)
                 else:
                     preserved.append(str(path))
             elif current == value:
-                self.pending[path] = json_config.put(text, keys, None, delete=True)
+                self.pending[path] = self.editor.put(text, keys, None, delete=True)
             else:
                 preserved.append(str(path))
         # All config has been parsed before any mutation (including corrupt files).
@@ -148,7 +154,7 @@ class Installation:
                     if text != record["value"]:
                         return False
                 else:
-                    found, current = json_config.get(text, record["keys"])
+                    found, current = self.editor.get(text, record["keys"])
                     if not found:
                         return False
                     if record["kind"] == "item":
