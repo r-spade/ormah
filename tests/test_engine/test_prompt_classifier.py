@@ -581,3 +581,92 @@ class TestContinuationIntent:
         intent = classifier.classify("continue where we left off")
         assert "continuation" in intent.categories
         assert "created_after" in intent.search_params
+
+
+class TestTemporalGateSplit:
+    """Temporal search constraints and broad-recap relaxation are separate.
+
+    Embedding-inferred temporal intent may narrow the search window, but only a
+    high-confidence broad-recap match may grant whisper's relevance-gate
+    exceptions (upstream issue #304).
+    """
+
+    DIM = 8
+    NOISE_DIM = 7
+
+    @staticmethod
+    def _classifier(sim: float) -> tuple[PromptClassifier, ControlledEncoder]:
+        """Encoder whose prompt vector hits *sim* cosine on temporal only."""
+        from ormah.engine.prompt_classifier import ARCHETYPES
+        from ormah.engine.temporal import TemporalParser, load_locales
+
+        cat_list = list(ARCHETYPES)
+        temporal_idx = cat_list.index("temporal")
+        dim = TestTemporalGateSplit.DIM
+
+        encoder = ControlledEncoder(dim=dim)
+        encoder.set_batch_results(
+            [_unit_vec(dim, cat_list.index(cat)) for cat in cat_list for _ in ARCHETYPES[cat]]
+        )
+        classifier = PromptClassifier(
+            encoder,
+            threshold=0.65,
+            temporal_parser=TemporalParser(load_locales(("en",))),
+        )
+
+        # Blend the temporal direction with orthogonal noise so the cosine
+        # against temporal is exactly *sim* and ~0 against every other category.
+        prompt_vec = np.zeros(dim, dtype=np.float32)
+        prompt_vec[temporal_idx] = sim
+        prompt_vec[TestTemporalGateSplit.NOISE_DIM] = float(np.sqrt(1.0 - sim * sim))
+        encoder.set_encode_result(prompt_vec)
+        return classifier, encoder
+
+    def test_inferred_temporal_grants_search_window_but_not_recap_relaxation(self):
+        """The #304 repro: an ordinary work prompt grazing the temporal threshold.
+
+        It keeps the inferred time window as a search constraint, but must not
+        claim broad-recap relaxation — that is what bypassed every gate.
+        """
+        classifier, _ = self._classifier(sim=0.69)
+        intent = classifier.classify("wrap this up and save the work")
+        assert "temporal" in intent.categories
+        assert "created_after" in intent.search_params
+        assert intent.temporal_explicit is False
+        assert intent.broad_recap is False
+
+    def test_high_confidence_temporal_sets_broad_recap(self):
+        """A near-archetype recap paraphrase keeps the relaxed-gate behaviour."""
+        classifier, _ = self._classifier(sim=0.92)
+        intent = classifier.classify("catch me up on everything we did")
+        assert "temporal" in intent.categories
+        assert intent.broad_recap is True
+
+    def test_explicit_time_phrase_marks_temporal_explicit(self):
+        classifier, _ = self._classifier(sim=0.92)
+        intent = classifier.classify("what did we do yesterday")
+        assert intent.temporal_explicit is True
+        assert intent.broad_recap is True
+        assert intent.search_params["search_query"] == "what did we do"
+
+    def test_topical_time_bounded_search_keeps_gates(self):
+        """A subject-scoped time-bounded query narrows search, not gates."""
+        classifier, _ = self._classifier(sim=0.69)
+        intent = classifier.classify("the bug we fixed yesterday")
+        assert "temporal" in intent.categories
+        assert intent.temporal_explicit is True
+        assert intent.broad_recap is False
+        assert intent.search_params["search_query"] == "the bug we fixed"
+
+
+class TestRecapConfidenceBoundary:
+    """The broad-recap cut sits exactly at _RECAP_CONFIDENCE."""
+
+    @pytest.mark.parametrize(
+        ("sim", "expected"),
+        [(0.7799, False), (0.78, True), (0.7801, True)],
+    )
+    def test_boundary(self, sim, expected):
+        classifier, _ = TestTemporalGateSplit._classifier(sim=sim)
+        intent = classifier.classify("what did we do yesterday")
+        assert intent.broad_recap is expected
