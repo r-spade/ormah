@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="118" viewBox="0 0 960 118" role="img" aria-labelledby="title desc">
+<title id="title">Watch the original demo</title><desc id="desc">Opens the existing Ormah video on YouTube. This link is separate from the illustrative storyboard.</desc>
+<style>text{font-family:Arial,Helvetica,sans-serif} .mono{font-family:monospace}</style>
+<rect x="0" y="0" width="960" height="118" rx="10" fill="#101110"/>
+<rect x="0.5" y="0.5" width="959" height="117" rx="10" fill="none" stroke="#393b34"/>
+<circle cx="57" cy="59" r="25" fill="#30291f"/>
+<path d="M51 48 L68 59 L51 70 Z" fill="#d4a574"/>
+<text x="103" y="56" fill="#eee9e1" font-size="24" font-weight="500">Watch the original demo</text>
+<text x="104" y="83" fill="#b4afa5" font-size="14" font-weight="400">Ormah · YouTube</text>
+<text x="883" y="65" fill="#d4a574" font-size="28" font-weight="400">↗</text>
+<circle cx="674" cy="39" r="2" fill="#7e694f"/>
+<path d="M709 76 L674 39" stroke="#393b34" fill="none"/>
+<circle cx="709" cy="76" r="2" fill="#7e694f"/>
+<path d="M753 32 L709 76" stroke="#393b34" fill="none"/>
+<circle cx="753" cy="32" r="3" fill="#85b9aa"/>
+<path d="M785 84 L753 32" stroke="#393b34" fill="none"/>
+<circle cx="785" cy="84" r="2" fill="#7e694f"/>
+<path d="M818 48 L785 84" stroke="#393b34" fill="none"/>
+<circle cx="818" cy="48" r="2" fill="#7e694f"/>
+</svg>

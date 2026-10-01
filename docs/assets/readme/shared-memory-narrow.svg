@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="864" viewBox="0 0 400 864" role="img" aria-labelledby="title desc">
+<title id="title">One decision, across agents</title><desc id="desc">The same three-scene story in a vertical layout: Codex saves, Ormah keeps, Claude Code receives Whisper before replying.</desc>
+<style>text{font-family:Arial,Helvetica,sans-serif} .mono{font-family:monospace}</style>
+<rect x="0" y="0" width="400" height="864" rx="12" fill="#101110"/>
+<rect x="0.5" y="0.5" width="399" height="863" rx="12" fill="none" stroke="#393b34"/>
+<path d="M29 57 L29 782" stroke="#66543f" fill="none"/>
+<circle cx="29" cy="46" r="7" fill="#101110"/>
+<circle cx="29" cy="46" r="3.5" fill="#d4a574"/>
+<text x="51" y="54" fill="#eee9e1" font-size="24" font-weight="500">Codex</text>
+<text x="338" y="51" fill="#b4afa5" font-size="13" font-weight="400" letter-spacing="1">01</text>
+<rect x="51" y="76" width="326" height="185" rx="8" fill="#171916" stroke="#393b34"/>
+<circle cx="29" cy="314" r="7" fill="#101110"/>
+<circle cx="29" cy="314" r="3.5" fill="#d4a574"/>
+<text x="51" y="322" fill="#d4a574" font-size="24" font-weight="500">ormah</text>
+<text x="338" y="319" fill="#b4afa5" font-size="13" font-weight="400" letter-spacing="1">02</text>
+<rect x="51" y="344" width="326" height="185" rx="8" fill="#171916" stroke="#393b34"/>
+<circle cx="29" cy="578" r="7" fill="#101110"/>
+<circle cx="29" cy="578" r="3.5" fill="#d4a574"/>
+<text x="51" y="586" fill="#eee9e1" font-size="24" font-weight="500">Claude Code</text>
+<text x="338" y="583" fill="#b4afa5" font-size="13" font-weight="400" letter-spacing="1">03</text>
+<rect x="51" y="608" width="326" height="213" rx="8" fill="#171916" stroke="#393b34"/>
+<text x="70" y="106" fill="#b4afa5" font-size="17" font-weight="600" letter-spacing="1.4">YOU DECIDE</text>
+<text x="70" y="142" fill="#eee9e1" font-size="21" font-weight="400">“Checkout retries reuse</text><text x="70" y="173" fill="#eee9e1" font-size="21" font-weight="400">the same idempotency key.”</text>
+<path d="M70 199 L358 199" stroke="#393b34" fill="none"/>
+<text x="70" y="230" fill="#d4a574" font-size="19" font-weight="400">Saved with remember</text>
+<text x="70" y="374" fill="#b4afa5" font-size="17" font-weight="600" letter-spacing="1.4">PROJECT MEMORY</text>
+<rect x="69" y="390" width="290" height="89" rx="6" fill="#22251e" stroke="#6e6048"/>
+<circle cx="86" cy="413" r="3" fill="#85b9aa"/>
+<text x="98" y="419" fill="#d4a574" font-size="18" font-weight="400">decision · checkout</text>
+<text x="85" y="454" fill="#eee9e1" font-size="23" font-weight="400">Reuse the same key.</text>
+<text x="70" y="513" fill="#b4afa5" font-size="19" font-weight="400">Available across sessions</text>
+<text x="70" y="638" fill="#b4afa5" font-size="17" font-weight="600" letter-spacing="1.4">YOU ASK</text>
+<text x="70" y="672" fill="#eee9e1" font-size="23" font-weight="400">“Fix the checkout retry.”</text>
+<rect x="65" y="689" width="298" height="64" rx="6" fill="#25352f"/>
+<circle cx="82" cy="708" r="3" fill="#85b9aa"/>
+<text x="95" y="713" fill="#85b9aa" font-size="17" font-weight="600" letter-spacing="0.3">WHISPER · BEFORE REPLY</text>
+<text x="81" y="739" fill="#eee9e1" font-size="21" font-weight="400">Reuse the same key.</text>
+<text x="70" y="792" fill="#eee9e1" font-size="21" font-weight="400">“I’ll keep the key stable.”</text>
+<text x="51" y="839" fill="#b4afa5" font-size="15" font-weight="400">A useful decision reaches the next task.</text>
+</svg>

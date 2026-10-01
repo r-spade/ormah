@@ -5,10 +5,16 @@ Verified against the current repository state on 2026-04-07.
 Ormah exposes the same core memory engine through several adapter layers:
 
 - MCP for supported MCP clients such as Claude Code and Codex
+- a Pi extension with native memory tools and lifecycle hooks over HTTP
 - a synchronous CLI HTTP adapter
 - an OpenAI-style schema exporter for tool-calling agents
 
 The core engine is not Claude-specific. What differs between clients is mostly setup and transport glue.
+
+For installation and current per-client automation, see the
+[client matrix](<11 - Setup and Installation.md#hooks>). Pi's extension setup is
+documented in [its own guide](../integrations/pi-plugin/SETUP.md). These entry
+points were checked against `b56eda99` on 2026-10-01.
 
 ## Adapter Architecture
 

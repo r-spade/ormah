@@ -9,6 +9,17 @@ These are two separate watcher systems:
 
 They are separate from the node-store watcher in `src/ormah/store/watcher.py`, which is not started by the app runtime.
 
+Both paths extract memories through `engine.ingest_conversation`, which needs
+a configured Ormah LLM provider. With `ORMAH_LLM_PROVIDER=none`, extraction
+does not produce memories. Local recall, Whisper retrieval, and direct agent
+memory tools still work. Choosing agent-backed maintenance during setup leaves
+that provider set to `none`; enable a provider separately if you want these
+extraction paths. This provider distinction was checked against `b56eda99`
+on 2026-10-01.
+
+Pi uses its extension's lifecycle capture rather than these default transcript
+directories. See the [Pi setup guide](../integrations/pi-plugin/SETUP.md).
+
 ## Hippocampus
 
 **Code**: `src/ormah/background/hippocampus.py`

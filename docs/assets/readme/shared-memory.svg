@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="406" viewBox="0 0 960 406" role="img" aria-labelledby="title desc">
+<title id="title">One decision, across agents</title><desc id="desc">Illustrative story: Codex saves a checkout retry decision to Ormah. Ormah keeps it as project memory. A later prompt in Claude Code receives that decision through Whisper before the reply.</desc>
+<style>text{font-family:Arial,Helvetica,sans-serif} .mono{font-family:monospace}</style>
+<rect x="0" y="0" width="960" height="406" rx="12" fill="#101110"/>
+<rect x="0.5" y="0.5" width="959" height="405" rx="12" fill="none" stroke="#393b34"/>
+<path d="M46 49 L914 49" stroke="#66543f" fill="none"/>
+<rect x="63" y="30" width="90" height="38" rx="0" fill="#101110"/>
+<circle cx="47" cy="49" r="15" fill="#101110"/>
+<circle cx="47" cy="49" r="3.5" fill="#d4a574"/>
+<text x="71" y="56" fill="#eee9e1" font-size="23" font-weight="500">Codex</text>
+<rect x="32" y="84" width="272" height="272" rx="9" fill="#171916" stroke="#393b34"/>
+<text x="52" y="114" fill="#b4afa5" font-size="12" font-weight="400" letter-spacing="2">01</text>
+<rect x="375" y="30" width="90" height="38" rx="0" fill="#101110"/>
+<circle cx="359" cy="49" r="15" fill="#101110"/>
+<circle cx="359" cy="49" r="3.5" fill="#d4a574"/>
+<text x="383" y="56" fill="#d4a574" font-size="23" font-weight="500">ormah</text>
+<rect x="344" y="84" width="272" height="272" rx="9" fill="#171916" stroke="#393b34"/>
+<text x="364" y="114" fill="#b4afa5" font-size="12" font-weight="400" letter-spacing="2">02</text>
+<rect x="687" y="30" width="165" height="38" rx="0" fill="#101110"/>
+<circle cx="671" cy="49" r="15" fill="#101110"/>
+<circle cx="671" cy="49" r="3.5" fill="#d4a574"/>
+<text x="695" y="56" fill="#eee9e1" font-size="23" font-weight="500">Claude Code</text>
+<rect x="656" y="84" width="272" height="272" rx="9" fill="#171916" stroke="#393b34"/>
+<text x="676" y="114" fill="#b4afa5" font-size="12" font-weight="400" letter-spacing="2">03</text>
+<text x="52" y="149" fill="#b4afa5" font-size="12" font-weight="600" letter-spacing="1.5">YOU DECIDE</text>
+<text x="52" y="187" fill="#eee9e1" font-size="21" font-weight="400">“Checkout retries</text><text x="52" y="216" fill="#eee9e1" font-size="21" font-weight="400">must reuse the same</text><text x="52" y="245" fill="#eee9e1" font-size="21" font-weight="400">idempotency key.”</text>
+<path d="M52 291 L284 291" stroke="#393b34" fill="none"/>
+<text x="52" y="327" fill="#d4a574" font-size="17" font-weight="400">Saved with remember</text>
+<text x="364" y="149" fill="#b4afa5" font-size="12" font-weight="600" letter-spacing="1.5">PROJECT MEMORY</text>
+<rect x="364" y="168" width="232" height="108" rx="6" fill="#22251e" stroke="#6e6048"/>
+<circle cx="383" cy="192" r="3" fill="#85b9aa"/>
+<text x="395" y="198" fill="#d4a574" font-size="14" font-weight="400">decision · checkout</text>
+<text x="381" y="229" fill="#eee9e1" font-size="20" font-weight="400">Reuse the same</text><text x="381" y="256" fill="#eee9e1" font-size="20" font-weight="400">idempotency key.</text>
+<path d="M364 291 L596 291" stroke="#393b34" fill="none"/>
+<text x="364" y="327" fill="#b4afa5" font-size="17" font-weight="400">Available across sessions</text>
+<text x="676" y="149" fill="#b4afa5" font-size="12" font-weight="600" letter-spacing="1.5">YOU ASK</text>
+<text x="676" y="184" fill="#eee9e1" font-size="21" font-weight="400">“Fix the checkout</text><text x="676" y="213" fill="#eee9e1" font-size="21" font-weight="400">retry.”</text>
+<rect x="672" y="238" width="240" height="58" rx="6" fill="#25352f"/>
+<circle cx="688" cy="255" r="3" fill="#85b9aa"/>
+<text x="700" y="260" fill="#85b9aa" font-size="12" font-weight="600" letter-spacing="0.4">WHISPER · BEFORE REPLY</text>
+<text x="684" y="281" fill="#eee9e1" font-size="16" font-weight="400">Reuse the same key.</text>
+<text x="676" y="327" fill="#eee9e1" font-size="17" font-weight="400">“I’ll keep the key stable.”</text>
+<text x="32" y="386" fill="#b4afa5" font-size="15" font-weight="400">A useful decision reaches the next task.</text>
+</svg>
