@@ -71,6 +71,7 @@ def mock_graph(tmp_path):
 
 def _make_mock_engine(conn, *, maintenance_enabled=False):
     engine = MagicMock()
+    engine.maintenance_is_active = None
     engine.settings = SimpleNamespace(
         claude_maintenance_enabled=maintenance_enabled,
         claude_maintenance_interval_hours=24,
@@ -338,3 +339,20 @@ def test_selected_context_and_maintenance_signal_remain_intact_without_review(mo
     assert _REVIEW_HEADING not in result
     assert held_back["title"] not in result
     assert _review_rows(conn) == before
+
+
+def test_maintenance_signal_is_suppressed_by_active_reservation(mock_graph):
+    conn = mock_graph.conn
+    _seed_historical_review_data(conn)
+    engine = _make_mock_engine(conn, maintenance_enabled=True)
+    engine.maintenance_is_active = MagicMock(return_value=True)
+
+    result = ContextBuilder(mock_graph, engine=engine).build_whisper_context(
+        prompt="an unrelated question with enough words",
+        space="myspace",
+        recent_prompts=None,
+        session_id="reserved-maintenance",
+    )
+
+    assert MAINTENANCE_DUE_SIGNAL not in result
+    engine.maintenance_is_active.assert_called_once_with()

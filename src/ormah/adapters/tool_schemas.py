@@ -220,21 +220,30 @@ TOOLS = [
         "description": (
             "Maintain the memory graph by linking, conflict-checking, deduplicating, and "
             "consolidating memories. Uses a two-call protocol:\n\n"
-            "**Phase 1** — call with no arguments to get pending work. Returns four batches:\n"
+            "**Phase 1** — call with no arguments to reserve pending work. Returns a job_id and four batches:\n"
             "  - link_candidates: pairs of memories to classify (supports/part_of/etc./none)\n"
             "  - conflict_candidates: belief pairs to check for contradictions or evolutions\n"
             "  - merge_candidates: near-duplicate pairs to merge\n"
             "  - consolidation_clusters: groups of similar memories to synthesize into one\n\n"
-            "**Phase 2** — analyze all four batches in-context, then call again with 'results':\n"
+            "**Phase 2** — analyze all four batches in-context, then call again with that exact 'job_id' and 'results':\n"
             "  - edges: list of {node_a_id, node_b_id, edge_type, reason} — use 'none' to skip\n"
             "  - merges: list of {keep_id, discard_id, merged_content, merged_title}\n"
             "  - consolidations: list of {node_ids, title, content, type}\n\n"
+            "The reservation expires 30 minutes after preparation by default. "
+            "A job_id-only call polls that assignment without renewing it. "
+            "On busy, stop; another run is underway. On expired/replaced/failed/lost, "
+            "discard stale analysis and stop. Do not retry results or acquire in a loop. "
             "Use when whisper or another Ormah signal indicates maintenance is due. "
             "No separate API key needed — the calling LLM performs the analysis."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "job_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Assignment receipt from Phase 1. Required with results; alone polls that job.",
+                },
                 "results": {
                     "type": "object",
                     "description": (

@@ -207,7 +207,7 @@ def test_maintenance_runs_in_background_and_stats_stay_available(client):
         release.set()
 
 
-def test_maintenance_reuses_single_inflight_job(client):
+def test_maintenance_rejects_competing_claim(client):
     app = client.app
     release = threading.Event()
     original = app.state.engine.get_maintenance_batches
@@ -228,8 +228,10 @@ def test_maintenance_reuses_single_inflight_job(client):
         second = client.post("/agent/maintenance", json={})
 
         assert first.status_code == 202
-        assert second.status_code == 202
-        assert first.json()["job_id"] == second.json()["job_id"]
+        assert second.status_code == 200
+        assert second.json()["status"] == "busy"
+        assert "job_id" not in second.json()
+        assert "batches" not in second.json()
     finally:
         app.state.engine.get_maintenance_batches = original
         release.set()

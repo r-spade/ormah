@@ -15,7 +15,7 @@ interface MaintenanceCall {
 interface RegisteredTool {
 	execute: (
 		id: string,
-		params: { results?: MaintenanceResults },
+		params: { job_id?: string; results?: MaintenanceResults },
 		signal: AbortSignal | undefined,
 		onUpdate: undefined,
 		ctx: ExtensionContext,
@@ -29,7 +29,7 @@ function context(sessionFile: string): ExtensionContext {
 	} as unknown as ExtensionContext;
 }
 
-test("maintenance phase two reuses the phase one job id per session", async () => {
+test("maintenance phase two forwards the explicit receipt even in a shared session", async () => {
 	const tools = new Map<string, RegisteredTool>();
 	const pi = {
 		registerTool: (tool: RegisteredTool & { name: string }) => {
@@ -55,7 +55,7 @@ test("maintenance phase two reuses the phase one job id per session", async () =
 	const maintenance = tools.get("ormah_run_maintenance");
 	assert.ok(maintenance);
 	const sessionA = context("/tmp/session-a.jsonl");
-	const sessionB = context("/tmp/session-b.jsonl");
+	const sessionB = sessionA;
 
 	await maintenance.execute(
 		"phase-1-a",
@@ -73,7 +73,7 @@ test("maintenance phase two reuses the phase one job id per session", async () =
 	);
 	await maintenance.execute(
 		"phase-2-a",
-		{ results: { edges: [] } },
+		{ job_id: "maintenance-job-1", results: { edges: [] } },
 		new AbortController().signal,
 		undefined,
 		sessionA,

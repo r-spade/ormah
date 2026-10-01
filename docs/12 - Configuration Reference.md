@@ -295,6 +295,14 @@ backup taken before the upgrade.
 | `claude_maintenance_enabled` | `false` |
 | `claude_maintenance_interval_hours` | `24` |
 | `claude_maintenance_batch_size` | `25` |
+| `maintenance_timeout_minutes` | `30` |
+
+`ORMAH_MAINTENANCE_TIMEOUT_MINUTES` is a positive integer, in minutes. It limits
+agent analysis starting when batches become ready. Preparation already reserves
+maintenance; server-side application keeps the reservation until success or failure,
+even past the analysis deadline. Polling never extends the deadline. Expiry releases
+abandoned analysis and restores `maintenance_due` if the existing interval is overdue.
+Only successful application records `last_maintenance_run`.
 
 ## Temporal Locales
 

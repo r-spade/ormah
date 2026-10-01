@@ -4343,3 +4343,38 @@ class TestConfigureCodexHooksMerge:
         assert hp.read_text() == before  # unchanged
         enable.assert_not_called()  # feature flag NOT enabled on abort
         assert "Codex hooks installed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("template", [
+    "src/ormah/agents/ormah-maintenance.md",
+    "src/ormah/agents/ormah-pi-maintenance.md",
+    "integrations/claude-plugin/agents/ormah-maintenance.md",
+    "integrations/pi-plugin/agents/ormah-maintenance.md",
+])
+def test_maintenance_templates_show_explicit_receipt_protocol(template):
+    import json
+    from pathlib import Path
+
+    from ormah.adapters.tool_schemas import TOOLS
+
+    content = (Path(__file__).resolve().parents[1] / template).read_text()
+    example = json.loads(content.split("```json\n", 1)[1].split("```", 1)[0])
+    schema = next(tool["parameters"] for tool in TOOLS if tool["name"] == "run_maintenance")
+    assert "job_id" in schema["properties"]
+    assert example["job_id"]
+    assert set(example["results"]) == {"edges", "merges", "consolidations"}
+    assert "30 minutes" in content
+    assert "discard stale analysis" in content
+    assert "busy" in content
+
+
+def test_codex_maintenance_template_requires_receipt_and_terminal_handling():
+    import tomllib
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "src/ormah/agents/ormah-maintenance.toml"
+    instructions = tomllib.loads(path.read_text())["developer_instructions"]
+    assert '{"job_id": "<receipt>", "results": {}}' in instructions
+    assert "30 minutes" in instructions
+    assert "discard stale analysis" in instructions
+    assert "On busy" in instructions

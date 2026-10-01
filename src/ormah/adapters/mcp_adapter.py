@@ -23,7 +23,6 @@ _BASE_URL = f"http://localhost:{settings.port}"
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 _MAINTENANCE_TIMEOUT_SECONDS = 300.0
 _MAINTENANCE_POLL_INTERVAL_SECONDS = 1.0
-_MAINTENANCE_JOB_IDS: dict[str, str] = {}
 
 
 def _coerce_list(value):
@@ -51,10 +50,6 @@ def _format_timeout_error(name: str) -> str:
     """Return a user-facing timeout message for a tool call."""
     timeout = _timeout_for_tool(name)
     return f"Error: request to Ormah server timed out after {timeout:.0f}s while running tool '{name}'"
-
-
-def _maintenance_key(session_id: str | None) -> str:
-    return session_id or "default"
 
 
 def create_mcp_server(
@@ -117,11 +112,15 @@ def _handle_error(resp: httpx.Response) -> str:
     return f"Error: {resp.status_code} {detail}"
 
 
-def _format_maintenance_batches(batches: dict) -> str:
+def _format_maintenance_batches(batches: dict, job_id: str, expires_at: str | None) -> str:
     """Format Phase 1 maintenance batches as readable text for the agent."""
     lines: list[str] = []
     summary = batches.get("summary", "nothing to process")
     lines.append(f"Maintenance batches ready: {summary}")
+    lines.append(f"job_id: {job_id}")
+    if expires_at:
+        lines.append(f"Analysis expires at: {expires_at}")
+    lines.append("Echo this exact job_id alongside results in Phase 2, including empty results {}.")
     lines.append(
         "Submit ALL evaluated pairs via the edges list in Phase 2 — "
         "use edge_type 'none' for pairs with no relationship (including non-duplicate merge pairs). "
@@ -386,35 +385,42 @@ async def _dispatch(
             return resp.json()["text"]
 
         elif name == "run_maintenance":
-            body = {}
-            key = _maintenance_key(session_id)
-            if args.get("job_id"):
-                body["job_id"] = args["job_id"]
-            elif key in _MAINTENANCE_JOB_IDS:
-                body["job_id"] = _MAINTENANCE_JOB_IDS[key]
-            if args.get("results"):
-                body["results"] = args["results"]
+            submitting = "results" in args
+            job_id = args.get("job_id")
+            if submitting and not job_id:
+                return "Error: job_id is required with results; echo the Phase 1 assignment receipt."
+            body = {k: args[k] for k in ("job_id", "results") if k in args}
             resp = await client.post("/agent/maintenance", json=body)
             if not resp.is_success:
                 return _handle_error(resp)
             data = resp.json()
-            job_id = data.get("job_id")
-            if job_id:
-                _MAINTENANCE_JOB_IDS[key] = job_id
+            # Validate a supplied receipt even on the initial POST response.
+            if job_id and data.get("job_id") != job_id:
+                return (
+                    "Error: Maintenance assignment was lost or replaced. "
+                    "Discard stale analysis; stop this run."
+                )
+            if job_id and not submitting:
+                # Observe this assignment, including an application already in progress.
+                # This does not claim that a new payload was accepted or applied.
+                if data.get("status") == "awaiting_results":
+                    return _format_maintenance_batches(
+                        data["batches"], job_id, data.get("expires_at"),
+                    )
+                return json.dumps(data)
             data = await _poll_maintenance_until_ready(
-                client,
-                data,
-                expect_apply_summary="results" in args,
+                client, data, expect_apply_summary=submitting,
             )
-            if data.get("job_id"):
-                _MAINTENANCE_JOB_IDS[key] = data["job_id"]
-            if "results" in args:
-                _MAINTENANCE_JOB_IDS.pop(key, None)
-                return json.dumps({"status": "applied", "summary": data.get("apply_summary", {})})
-            batches = data.get("batches")
-            if isinstance(batches, dict):
-                return _format_maintenance_batches(batches)
-            return resp.text
+            if data.get("status") == "busy":
+                return json.dumps(data)
+            if submitting:
+                return json.dumps({
+                    "status": "applied", "job_id": data["job_id"],
+                    "summary": data["apply_summary"],
+                })
+            return _format_maintenance_batches(
+                data["batches"], data["job_id"], data.get("expires_at"),
+            )
 
         else:
             return f"Unknown tool: {name}"
@@ -433,19 +439,31 @@ async def _poll_maintenance_until_ready(
 
     while True:
         status = data.get("status")
-        if expect_apply_summary:
-            if status == "completed" and isinstance(data.get("apply_summary"), dict):
-                return data
-        else:
-            if status == "awaiting_results" and isinstance(data.get("batches"), dict):
-                return data
-        if status == "failed":
-            error = data.get("last_error") or "maintenance job failed"
-            raise RuntimeError(error)
+        if status == "busy" and not expect_apply_summary:
+            return data
+        if status in {"idle", "replaced", "expired", "failed"}:
+            if status == "failed":
+                raise RuntimeError(
+                    f"Maintenance failed: {data.get('last_error') or 'unknown error'}. "
+                    "Discard stale analysis; stop this run."
+                )
+            raise RuntimeError(
+                data.get("last_error") or data.get("message")
+                or f"Maintenance assignment is {status}. Discard stale analysis; stop this run."
+            )
+        if not job_id or data.get("job_id") != job_id:
+            raise RuntimeError("Maintenance job mismatch. Discard stale analysis; stop this run.")
+        ready_status = "completed" if expect_apply_summary else "awaiting_results"
+        ready_field = "apply_summary" if expect_apply_summary else "batches"
+        if status == ready_status and isinstance(data.get(ready_field), dict):
+            return data
+        running_status = "running_phase2" if expect_apply_summary else "running_phase1"
+        if status != running_status:
+            raise RuntimeError(f"Maintenance job is {status}. Stop this run; do not resubmit results.")
         if time.monotonic() >= deadline:
             raise httpx.ReadTimeout(_format_timeout_error("run_maintenance"))
         await _sleep_for_poll_interval()
-        params = {"job_id": job_id} if job_id else None
+        params = {"job_id": job_id}
         resp = await client.get("/agent/maintenance", params=params)
         if not resp.is_success:
             raise httpx.HTTPStatusError(
