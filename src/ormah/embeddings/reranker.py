@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from ormah.embeddings.cache import get_fastembed_cache_dir, is_model_cached
+from ormah.embeddings.runtime import MAX_BATCH_SIZE, local_inference
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ def _linear_rescale(ce_score: float) -> float:
     return max(0.0, min(1.0, (ce_score - _CE_MIN) / (_CE_MAX - _CE_MIN)))
 
 
+@local_inference
 def rerank(
     query: str,
     candidates: list[dict],
@@ -69,8 +71,10 @@ def rerank(
             doc = f"{doc}: {content[:max_doc_chars]}" if doc else content[:max_doc_chars]
         docs.append(doc)
 
-    # Score all docs in one batch
-    ce_scores = list(model.rerank(query, docs))
+    # FastEmbed already truncates pairs to the model's token window. Bound the
+    # batch and concurrent executions, without throwing away query context.
+    # Consume the generator on the worker: creating it does not run inference.
+    ce_scores = list(model.rerank(query, docs, batch_size=MAX_BATCH_SIZE))
 
     # Linear-rescale blend with original embedding scores, filter, sort
     reranked = []
@@ -95,6 +99,7 @@ def rerank(
     return reranked
 
 
+@local_inference
 def _get_model(model_name: str):
     if model_name in _model_cache:
         return _model_cache[model_name]
@@ -103,6 +108,8 @@ def _get_model(model_name: str):
     model = TextCrossEncoder(
         model_name,
         cache_dir=str(get_fastembed_cache_dir()),
+        # FastEmbed accepts this top-level option; session_options= is ignored.
+        enable_cpu_mem_arena=False,
     )
     _model_cache[model_name] = model
     return model

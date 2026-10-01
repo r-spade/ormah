@@ -8,6 +8,7 @@ import numpy as np
 
 from ormah.embeddings.base import EmbeddingAdapter
 from ormah.embeddings.cache import get_fastembed_cache_dir
+from ormah.embeddings.runtime import MAX_BATCH_SIZE, local_inference
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class LocalAdapter(EmbeddingAdapter):
         self._dim: int | None = None
 
     @property
+    @local_inference
     def model(self):
         if self._model is None:
             try:
@@ -40,27 +42,36 @@ class LocalAdapter(EmbeddingAdapter):
                 self._model = TextEmbedding(
                     self.model_name,
                     cache_dir=str(get_fastembed_cache_dir()),
+                    enable_cpu_mem_arena=False,
                 )
                 _model_cache[self.model_name] = self._model
                 logger.info("Embedding model ready.")
         return self._model
 
+    @local_inference
     def encode(self, text: str) -> np.ndarray:
         vec = next(iter(self.model.embed([text])))
         if self._dim is None:
             self._dim = vec.shape[0]
         return vec
 
+    @local_inference
     def encode_query(self, text: str) -> np.ndarray:
         # fastembed's query_embed handles model-specific query prefixes automatically
-        embed_fn = getattr(self.model, "query_embed", self.model.embed)
+        model = self.model
+        embed_fn = getattr(model, "query_embed", model.embed)
         vec = next(iter(embed_fn([text])))
         if self._dim is None:
             self._dim = vec.shape[0]
         return vec
 
+    @local_inference
     def encode_batch(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
-        vecs = np.array(list(self.model.embed(texts, batch_size=batch_size)))
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        vecs = np.array(list(self.model.embed(
+            texts, batch_size=min(batch_size, MAX_BATCH_SIZE),
+        )))
         if self._dim is None and len(vecs) > 0:
             self._dim = vecs.shape[1]
         return vecs

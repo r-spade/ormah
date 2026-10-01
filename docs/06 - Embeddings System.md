@@ -88,6 +88,43 @@ model.embed("Chose SQLite over Postgres for local-first design")
 
 **Lazy loading**: Model is downloaded and loaded on first `encode()` call. Subsequent calls use a module-level `_model_cache` singleton keyed by model name.
 
+### Local inference memory limits
+
+Local embedding and reranker model loading and inference share one process-wide
+worker thread (`embeddings/runtime.py`). This prevents concurrent requests from
+multiplying activation memory or loading duplicate models, and reuses the same
+native allocation context across calls. FastEmbed's lazy output iterators are
+consumed on that worker. Nested calls, such as model loading during an encode,
+execute directly on the worker to avoid deadlock.
+
+Embedding and reranker inference batches contain at most eight inputs. Every
+input is still processed in order, and query text remains intact for each
+model's tokenizer to truncate at its supported token window. The default BGE
+and MS MARCO models already cap sequences at 512 tokens; a character cutoff
+would discard context earlier and could change retrieval meaning.
+
+Both local models receive FastEmbed's top-level
+`enable_cpu_mem_arena=False` option. This requires FastEmbed 0.7.4 or later;
+passing an ONNX `session_options` object to FastEmbed is silently ignored by
+these model wrappers. Arena disabling and a shared worker substantially reduce
+retained RSS for concurrent inference, but they do not impose a hard process
+memory ceiling. ORT and the system allocator can still retain memory, and
+callers queue behind long local inference work. Remote embedding providers keep
+their existing execution behavior.
+
+Issue [#322](https://github.com/r-spade/ormah/issues/322) can be reproduced in
+a fresh process against cached real models and an isolated temporary store:
+
+```bash
+PYTHONPATH=src python scripts/diag/local_inference_memory.py \
+  --cache-dir /path/to/model-cache --nodes 45 --concurrency 2 --rounds 1 \
+  --rss-cap-mib 2800
+```
+
+The related startup re-embedding interruption described in #322 is separate:
+the current rebuild computes all vectors before persisting chunks. These local
+inference limits do not add restart checkpoints to that rebuild.
+
 ### Why BGE?
 
 - Runs entirely on CPU (no GPU needed)

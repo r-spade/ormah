@@ -1485,7 +1485,7 @@ class TestWhisperContextBuffer:
 
         captured: dict = {}
 
-        def _capture_rerank(query, docs):
+        def _capture_rerank(query, docs, **kwargs):
             captured["query"] = query
             return [5.0 for _ in docs]
 

@@ -169,7 +169,7 @@ def test_real_negative_feedback_suppresses_preference_applicability(engine):
             [preference_result],
         ]
     )
-    model = SimpleNamespace(rerank=lambda _query, docs: [-4.08] * len(docs))
+    model = SimpleNamespace(rerank=lambda _query, docs, **kwargs: [-4.08] * len(docs))
     lifecycle_before = _lifecycle_snapshot(engine, node_id)
 
     def whisper():

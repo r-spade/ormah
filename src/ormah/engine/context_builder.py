@@ -6,6 +6,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime, timezone
+from threading import Lock
 
 import numpy as np
 
@@ -114,6 +115,7 @@ class ContextBuilder:
         self.graph = graph
         self.engine = engine
         self._classifier = None  # lazy-init PromptClassifier
+        self._classifier_lock = Lock()
 
     def _get_classifier(self):
         """Get or create the prompt intent classifier (uses engine's encoder)."""
@@ -121,23 +123,26 @@ class ContextBuilder:
             return self._classifier
         if not self.engine:
             return None
-        try:
-            from ormah.engine.prompt_classifier import PromptClassifier, parser_for
+        with self._classifier_lock:
+            if self._classifier is not None:
+                return self._classifier
+            try:
+                from ormah.engine.prompt_classifier import PromptClassifier, parser_for
 
-            hybrid_search = self.engine._get_hybrid_search()
-            if hybrid_search is None:
+                hybrid_search = self.engine._get_hybrid_search()
+                if hybrid_search is None:
+                    return None
+                encoder = hybrid_search.encoder
+                settings = getattr(self.engine, "settings", None)
+                threshold = settings.whisper_intent_threshold if settings else 0.65
+                temporal_parser = parser_for(settings.temporal_locale_codes) if settings else None
+                self._classifier = PromptClassifier(
+                    encoder, threshold=threshold, temporal_parser=temporal_parser
+                )
+                return self._classifier
+            except Exception as e:
+                logger.warning("Failed to create prompt classifier: %s", e)
                 return None
-            encoder = hybrid_search.encoder
-            settings = getattr(self.engine, "settings", None)
-            threshold = settings.whisper_intent_threshold if settings else 0.65
-            temporal_parser = parser_for(settings.temporal_locale_codes) if settings else None
-            self._classifier = PromptClassifier(
-                encoder, threshold=threshold, temporal_parser=temporal_parser
-            )
-            return self._classifier
-        except Exception as e:
-            logger.warning("Failed to create prompt classifier: %s", e)
-            return None
 
     def _topic_was_served(
         self,
