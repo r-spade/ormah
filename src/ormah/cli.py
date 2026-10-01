@@ -1054,6 +1054,7 @@ def main():
     bench_run = ev_bench_sub.add_parser("run", help="Run resumable benchmark phases")
     bench_run.add_argument("dataset", choices=["longmemeval", "locomo"])
     bench_run.add_argument("--mode", choices=["raw", "extract"], default="raw")
+    bench_run.add_argument("--retrieval", choices=["recall", "whisper"], default="recall")
     bench_run.add_argument("--k", type=int, default=30)
     bench_run.add_argument("--phase", default="free", help="Comma-separated phases, or all; default: free")
     bench_run.add_argument("--limit", type=int)

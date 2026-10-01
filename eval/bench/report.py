@@ -13,6 +13,7 @@ def build_report(run_dir: Path):
     manifest = json.loads((run_dir / "manifest.json").read_text())
     rows = list(Journal(run_dir / "questions.jsonl").latest().values())
     k, mode = manifest["parameters"]["k"], manifest["parameters"]["mode"]
+    strategy = manifest["parameters"].get("retrieval", "recall")
     if manifest["parameters"]["dataset"] == "longmemeval":
         from eval.bench.judge import LONGMEMEVAL_RULES
 
@@ -21,9 +22,9 @@ def build_report(run_dir: Path):
         types = [str(i) for i in range(1, 6)]
     summary = {
         "manifest": manifest,
-        "overall": aggregate(rows, k, mode),
+        "overall": aggregate(rows, k, mode, strategy),
         "by_type": {
-            t: aggregate([r for r in rows if r["question_type"] == t], k, mode) for t in types
+            t: aggregate([r for r in rows if r["question_type"] == t], k, mode, strategy) for t in types
         },
         "calls": {},
     }
@@ -58,13 +59,15 @@ def build_report(run_dir: Path):
 def format_report(summary):
     manifest = summary["manifest"]
     k = manifest["parameters"]["k"]
+    strategy = manifest["parameters"].get("retrieval", "recall")
+    recall_key = "recall@whisper" if strategy == "whisper" else f"recall@{k}"
     lines = [
         f"Run {manifest['run_id']} ({manifest['parameters']['dataset']}, "
-        f"{manifest['parameters']['mode']})",
+        f"{manifest['parameters']['mode']}, {strategy})",
         f"{'Group':28} {'N':>5} {'Scored':>7} {'Accuracy':>9} {'Recall':>9} {'nDCG':>9}",
     ]
     for name, metrics in [("overall", summary["overall"]), *summary["by_type"].items()]:
-        values = [metrics.get(key) for key in ("accuracy", f"recall@{k}", f"ndcg@{k}")]
+        values = [metrics.get(key) for key in ("accuracy", recall_key, f"ndcg@{k}")]
         rendered = [f"{v:.4f}" if v is not None else "N/A" for v in values]
         lines.append(
             f"{name:28} {metrics['questions']:5} {metrics['scored']:7} "
@@ -78,4 +81,15 @@ def format_report(summary):
         f"Errors: {summary['overall']['errors']}; "
         f"abstention accuracy: {summary['overall']['abstention_accuracy']}"
     )
+    metrics = summary["overall"]
+    lines.append(
+        f"Injection rate: {metrics['injection_rate']}; "
+        f"mean memories: {metrics['mean_injected_memories']}; "
+        f"mean answer context chars: {metrics['mean_answer_context_chars']}"
+    )
+    if strategy == "whisper":
+        lines.append(
+            f"Mean whisper chars: {metrics['mean_whisper_context_chars']}; "
+            f"LongMemEval abstention silence: {metrics['abstention_silence_rate']}"
+        )
     return "\n".join(lines)

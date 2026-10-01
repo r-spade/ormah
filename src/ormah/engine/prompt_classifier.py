@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,17 @@ import numpy as np
 from ormah.embeddings.base import EmbeddingAdapter
 
 logger = logging.getLogger(__name__)
+
+# Benchmark-only clock override, scoped to the calling context. Production
+# callers leave it unset; only temporal query interpretation uses this clock.
+_temporal_reference_date: ContextVar[datetime | None] = ContextVar(
+    "temporal_reference_date", default=None
+)
+
+
+def _temporal_now() -> datetime:
+    return _temporal_reference_date.get() or datetime.now(timezone.utc)
+
 
 # Archetype prompts per intent category.  More examples = better embedding
 # space coverage for paraphrases the user might actually type.
@@ -170,7 +182,7 @@ def extract_time_params(prompt: str) -> dict:
     Returns a dict with ``created_after`` (always) and ``created_before``
     (when the window has a bounded end).
     """
-    now = datetime.now(timezone.utc)
+    now = _temporal_now()
 
     # Dynamic numeric patterns: "last 4 days", "past 2 weeks", etc.
     m = _NUMERIC_TIME_RE.search(prompt)
@@ -363,7 +375,7 @@ class PromptClassifier:
         if "continuation" in matched:
             # Recent memories in current space — same as temporal default
             if "created_after" not in search_params:
-                now = datetime.now(timezone.utc)
+                now = _temporal_now()
                 search_params["created_after"] = (
                     now - timedelta(days=_DEFAULT_TEMPORAL_DAYS)
                 ).isoformat()

@@ -5,43 +5,13 @@ import json
 import sys
 from pathlib import Path
 
-from eval.settings import RETRIEVAL_EVAL_SETTINGS_OVERRIDES
+from eval.settings import WHISPER_EVAL_SETTINGS_OVERRIDES
 
 _EVAL_DIR = Path(__file__).parent
 _CORPUS_DIR = _EVAL_DIR / "corpus"
 _EVAL_DB_DIR = _EVAL_DIR / "eval_db"
 
-_EVAL_SETTINGS_OVERRIDES = {
-    # Shared environment-independent retrieval pins (see eval/settings.py).
-    **RETRIEVAL_EVAL_SETTINGS_OVERRIDES,
-    # Whisper pipeline (re-enables the reranker the shared base disables)
-    "whisper_max_nodes": 6,
-    "whisper_min_relevance_score": 0.45,
-    "whisper_candidate_pool_multiplier": 5,
-    "whisper_injected_content_max_chars": 600,
-    "whisper_reranker_enabled": True,
-    "whisper_reranker_model": "Xenova/ms-marco-MiniLM-L-6-v2",
-    "whisper_reranker_min_score": 0.40,
-    "whisper_reranker_blend_alpha": 0.6,
-    "whisper_reranker_max_doc_chars": 512,
-    "whisper_context_buffer_size": 5,
-    "whisper_session_gap_minutes": 10,
-    "whisper_intent_threshold": 0.65,
-    "whisper_topic_shift_enabled": True,
-    "whisper_topic_shift_threshold": 0.75,
-    "whisper_injection_gate": 0.45,
-    "whisper_no_overlap_ce_floor": 0.45,
-    "whisper_no_overlap_cosine_floor": 0.70,
-    "whisper_preference_applicability_enabled": True,
-    "whisper_preference_applicability_gate": 0.40,
-    "whisper_preference_max_nodes": 2,
-    "whisper_exploration_enabled": True,
-    # Ranking adjustments used by whisper post-processing
-    "affinity_similarity_threshold": 0.70,
-    "affinity_half_life_days": 30.0,
-    "affinity_max_boost": 0.15,
-    "affinity_implicit_weight": 0.8,
-}
+_EVAL_SETTINGS_OVERRIDES = WHISPER_EVAL_SETTINGS_OVERRIDES
 
 
 def _make_engine():
