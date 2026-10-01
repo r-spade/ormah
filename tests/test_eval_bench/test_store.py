@@ -132,6 +132,38 @@ def test_extraction_preserves_budget_abort_through_ingest(bench_engine, tmp_path
         reset_adapter()
 
 
+def test_extract_workers_overlap_and_keep_session_provenance(bench_engine, tmp_path):
+    import threading
+    from eval.bench.artifacts import Journal
+
+    # A barrier fails if dry-run ingest still holds the shared engine lock.
+    # Two rounds also prove the pool respects workers=2 for four sessions.
+    barrier = threading.Barrier(2, timeout=5)
+    ledger = Journal(tmp_path / "calls.jsonl")
+    provider = FakeProvider("fake", phase="extract", ledger=ledger)
+    original = provider._call
+
+    def call(prompt, max_tokens):
+        barrier.wait()
+        return original(prompt, max_tokens)
+
+    provider._call = call
+    adapter = ProviderAdapter(provider)
+    sessions = [Session(f"s{i}", session().date, session().turns) for i in range(4)]
+    question = Question("q", "locomo", "What?", "bike", "4", "2023-01-01", [], sessions=sessions)
+    before = bench_engine.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    set_adapter(adapter)
+    try:
+        memories = prepare_memories(
+            bench_engine, question, "extract", tmp_path / "extract", adapter, workers=2
+        )
+    finally:
+        reset_adapter()
+    assert [m["tags"][-1] for m in memories] == [f"session:s{i}" for i in range(4)]
+    assert sorted(c["item_id"] for c in ledger.rows) == [f"s{i}" for i in range(4)]
+    assert bench_engine.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == before
+
+
 def test_retrieval_does_not_report_silent_lexical_fallback():
     import logging
     import pytest

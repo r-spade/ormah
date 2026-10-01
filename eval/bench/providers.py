@@ -15,20 +15,16 @@ from pathlib import Path
 
 from eval.bench.cost import Budget, BudgetExceeded, token_cost
 
-
-
 def _default_codex() -> str:
-    """Codex binary: ORMAH_BENCH_CODEX, else the pinned ai-agents build, else PATH."""
+    """Resolve only when Codex is requested, without probing machine-specific paths."""
     override = os.environ.get("ORMAH_BENCH_CODEX")
     if override:
         return override
-    pinned = "/root/agent-tools/codex-0.154.0/node_modules/.bin/codex"
-    if Path(pinned).exists():
-        return pinned
-    return shutil.which("codex") or "codex"
-
-
-CODEX = _default_codex()
+    try:
+        return shutil.which("codex") or "codex"
+    except OSError:
+        # An inaccessible PATH entry must not break other benchmark providers.
+        return "codex"
 
 # Neutral system prompt for subscription CLI calls. It replaces Claude Code's
 # agentic coding prompt so answers come from the benchmark prompt alone.
@@ -211,9 +207,10 @@ class ClaudeCLIProvider(CLIProvider):
 
 
 class CodexProvider(CLIProvider):
-    name, executable = "codex", CODEX
+    name = "codex"
 
     def __init__(self, model, **kwargs):
+        self.executable = _default_codex()
         if model == "default":
             config = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
             if config.exists():

@@ -225,7 +225,7 @@ def test_reference_date_is_context_local():
     assert _temporal_reference_date.get() is None
 
 
-def test_legacy_recall_manifest_can_resume(args, tmp_path, locomo, bench_engine, monkeypatch):
+def test_fingerprinted_recall_manifest_without_strategy_can_resume(args, tmp_path, locomo, bench_engine, monkeypatch):
     dataset(tmp_path, locomo)
     monkeypatch.setattr(bench_engine, "shutdown", lambda: None)
     factory = lambda *a, **kw: bench_engine  # noqa: E731
@@ -236,3 +236,24 @@ def test_legacy_recall_manifest_can_resume(args, tmp_path, locomo, bench_engine,
     path.write_text(json.dumps(manifest))
     args.resume = True
     assert run(args, base=tmp_path, engine_factory=factory)["overall"]["recall@30"] == 1
+
+
+def test_resume_validates_whisper_settings(args, tmp_path, locomo, bench_engine, monkeypatch):
+    dataset(tmp_path, locomo)
+    enable_whisper(bench_engine)
+    monkeypatch.setattr(bench_engine, "shutdown", lambda: None)
+    args.retrieval = "whisper"
+    args.phase = "store"
+    run(args, base=tmp_path, engine_factory=Mock(return_value=bench_engine))
+    path = tmp_path / "artifacts/test/manifest.json"
+    before = path.read_bytes()
+    manifest = json.loads(before)
+    assert manifest["experiment_fingerprint"]["settings"]["whisper_reranker_enabled"] is True
+    monkeypatch.setitem(WHISPER_EVAL_SETTINGS_OVERRIDES, "whisper_reranker_min_score", 0.99)
+    args.resume = True
+    args.phase = "retrieve"
+    factory = Mock()
+    with pytest.raises(ValueError, match="Resume experiment differs"):
+        run(args, base=tmp_path, engine_factory=factory)
+    factory.assert_not_called()
+    assert path.read_bytes() == before

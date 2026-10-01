@@ -35,13 +35,16 @@ comma-separated phases or `all`. Answer and judge never run implicitly.
 `--workers` defaults to four and bounds CLI work. Calls time out after 300 seconds;
 transient failures retry twice with backoff. Permanent errors and invalid verdicts
 are recorded, never interpreted as correct answers.
+Extraction dry runs execute concurrently without taking the engine's mutation
+lock; normal production ingestion still holds that lock across extraction,
+deduplication and storage. Paid API calls remain serialized by the budget guard.
 
-`claude-cli` defaults to `sonnet`; the subprocess uses `--bare`, no session
-persistence, empty tools, and no MCP servers. Some Claude CLI versions disable
-subscription OAuth under `--bare`: that causes a recorded authentication error,
-not fallback to API billing. `codex` uses the configured model name, passed
-explicitly while ignoring the rest of user config; the pinned node executable is
-`/root/agent-tools/codex-0.154.0/node_modules/.bin/codex`. It runs from an empty
+`claude-cli` defaults to `sonnet`; the subprocess uses `--safe-mode`, no session
+persistence, empty tools, and no MCP servers. `codex` uses the configured model
+name, passed explicitly while ignoring the rest of user config. Its executable
+is resolved only when that provider is created: `ORMAH_BENCH_CODEX`, then PATH.
+Set `ORMAH_BENCH_CODEX` explicitly to pin a particular CLI installation; the
+harness never probes another user's home directory. It runs from an empty
 temporary directory, read-only, ephemeral, with shell tools disabled. Provider
 versions, requested models and reported resolved model IDs are recorded. Set
 `--extract-model`, `--answer-model` and `--judge-model` to pin explicit IDs.
@@ -80,6 +83,18 @@ session ID, full effective prompt hash, provider and model; embedding caches are
 SHA-256 of the actual production embedding text, namespaced by embedding model
 and dimension. Changed dataset checksums or run parameters cannot silently reuse
 a run. Do not run two processes against the same run ID.
+
+New runs also record an experiment fingerprint over Ormah/eval Python source
+contents (including prompts and uncommitted edits), benchmark settings, a hash
+of effective settings including environment overrides, and runtime versions.
+Resume rejects changes before running phases or updating the saved manifest.
+Previously used providers must retain their resolved model and CLI version.
+Documentation-only commits are allowed when code and configuration are unchanged;
+`--phase`, `--workers` and `--max-usd` can still change between invocations.
+Use a new run ID for a changed experiment. Legacy manifests without a fingerprint
+cannot be resumed safely; their artifacts and summaries remain readable with
+`ormah eval bench report RUN_ID`. No previous artifacts are deleted or upgraded
+with guessed provenance.
 
 ## Methodology
 
@@ -171,8 +186,10 @@ uv run ormah eval bench run longmemeval --mode raw --retrieval whisper \
 ```
 
 For a matched comparison, repeat with `--retrieval recall` and a separate run ID.
-Strategy is recorded in the manifest and checked on resume; older manifests
-without a strategy are treated as recall. Both tracks reuse identical cached
+Strategy is recorded in the manifest and checked on resume; fingerprinted
+manifests without a strategy are treated as recall. Legacy runs without an
+experiment fingerprint remain reportable but require a new run ID to continue.
+Both tracks reuse identical cached
 embeddings. Whisper settings come from `WHISPER_EVAL_SETTINGS_OVERRIDES`, shared
 with the private whisper eval, including the shared retrieval pins. Startup must
 load the reranker before any question is seeded. A failed model load or a logged
