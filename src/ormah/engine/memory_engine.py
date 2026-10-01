@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from collections.abc import Callable
 from contextlib import contextmanager
 from functools import wraps
 import logging
@@ -19,8 +20,8 @@ from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
 from ormah.engine.maintenance_signal import (
-    MAINTENANCE_DUE_SIGNAL,
     is_maintenance_due_signal,
+    maintenance_due_signal,
 )
 from ormah.engine.tier_manager import TierManager
 from ormah.engine.whisper_health import compute_whisper_health
@@ -100,6 +101,7 @@ class MemoryEngine:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.maintenance_is_active: Callable[[], bool] | None = None
         self._memory_operation_lock = threading.RLock()
         self.file_store = FileStore(settings.nodes_dir, self._memory_operation_lock)
         self.db = Database(settings.db_path)
@@ -1276,27 +1278,7 @@ class MemoryEngine:
         return f"{result.rstrip()}\n\n{onboarding}" if result else onboarding
 
     def _maybe_get_maintenance_due_signal(self) -> str:
-        if not getattr(self.settings, "claude_maintenance_enabled", False):
-            return ""
-
-        interval_hours = getattr(self.settings, "claude_maintenance_interval_hours", 24)
-        try:
-            row = self.graph.conn.execute(
-                "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
-            ).fetchone()
-            last_run = row[0] if row else None
-            if not last_run:
-                return MAINTENANCE_DUE_SIGNAL
-
-            parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-            if parsed_last_run.tzinfo is None:
-                parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
-            elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
-            if elapsed.total_seconds() > interval_hours * 3600:
-                return MAINTENANCE_DUE_SIGNAL
-        except Exception as e:
-            logger.warning("Failed to compute maintenance_due: %s", e)
-        return ""
+        return maintenance_due_signal(self, self.graph.conn)
 
     @staticmethod
     def _strip_maintenance_due_signal(text: str) -> str:

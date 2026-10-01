@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
+from ormah.engine.maintenance_signal import maintenance_due_signal
 from ormah.engine.prompt_classifier import PromptIntent, is_clear_acknowledgement
 from ormah.index.graph import GraphIndex
 from ormah.text.tokens import distinctive_tokens
@@ -1054,33 +1054,9 @@ class ContextBuilder:
             bool(result),
         )
 
-        # Maintenance due signal: fires once per interval regardless of node creation rate.
-        # Self-limiting: apply_maintenance_results records last_maintenance_run, silencing
-        # the signal for claude_maintenance_interval_hours.
-        if self.engine is not None:
-            settings = getattr(self.engine, "settings", None)
-            if settings and getattr(settings, "claude_maintenance_enabled", False):
-                interval_hours = getattr(settings, "claude_maintenance_interval_hours", 24)
-                try:
-                    row = self.graph.conn.execute(
-                        "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
-                    ).fetchone()
-                    last_run = row[0] if row else None
-                    due = True
-                    if last_run:
-                        parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-                        if parsed_last_run.tzinfo is None:
-                            parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
-                        elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
-                        due = elapsed.total_seconds() > interval_hours * 3600
-                    if due:
-                        result = (
-                            f"{result}\n{MAINTENANCE_DUE_SIGNAL}"
-                            if result
-                            else MAINTENANCE_DUE_SIGNAL
-                        )
-                except Exception as e:
-                    logger.warning("Failed to compute maintenance_due: %s", e)
+        signal = maintenance_due_signal(self.engine, self.graph.conn)
+        if signal:
+            result = f"{result}\n{signal}" if result else signal
 
         if _return_debug:
             return result, _injected_ids

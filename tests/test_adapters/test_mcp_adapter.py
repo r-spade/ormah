@@ -254,14 +254,60 @@ async def test_dispatch_polls_until_phase2_apply_completes(monkeypatch):
 
     monkeypatch.setattr(mcp_adapter.httpx, "AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(mcp_adapter, "_sleep_for_poll_interval", _no_sleep)
-    mcp_adapter._MAINTENANCE_JOB_IDS["s1"] = "job-1"
 
     text = await mcp_adapter._dispatch(
         "http://localhost:8787",
         "run_maintenance",
-        {"results": {"edges": []}},
+        {"job_id": "job-1", "results": {"edges": []}},
         session_id="s1",
     )
 
     assert '"status": "applied"' in text
     assert '"edges": 1' in text
+
+
+@pytest.mark.parametrize("expect_apply", [False, True])
+@pytest.mark.parametrize("terminal", ["expired", "failed", "replaced", "idle"])
+async def test_poll_stops_on_unusable_assignment(monkeypatch, expect_apply, terminal):
+    client = AsyncMock()
+    response = MagicMock(is_success=True)
+    response.json.return_value = {"status": terminal, "job_id": "job-1"}
+    client.get.return_value = response
+    monkeypatch.setattr(mcp_adapter, "_sleep_for_poll_interval", AsyncMock())
+    with pytest.raises(RuntimeError, match=terminal):
+        await mcp_adapter._poll_maintenance_until_ready(
+            client,
+            {"job_id": "job-1", "status": "running_phase2" if expect_apply else "running_phase1"},
+            expect_apply_summary=expect_apply,
+        )
+    client.get.assert_awaited_once_with("/agent/maintenance", params={"job_id": "job-1"})
+
+
+async def test_poll_busy_is_terminal_and_never_polls_somebody_elses_job():
+    client = AsyncMock()
+    busy = {"status": "busy", "message": "Another run is underway. Stop."}
+    assert await mcp_adapter._poll_maintenance_until_ready(
+        client, busy, expect_apply_summary=False,
+    ) == busy
+    client.get.assert_not_awaited()
+    with pytest.raises(RuntimeError):
+        await mcp_adapter._poll_maintenance_until_ready(client, busy, expect_apply_summary=True)
+
+
+@pytest.mark.parametrize("completion", [
+    {"status": "completed", "job_id": "newer-job", "apply_summary": {"edges": 99}},
+    {"status": "completed", "apply_summary": {}},
+    {"status": "completed", "job_id": "job-1"},
+    {"status": "awaiting_results", "job_id": "job-1", "batches": {}},
+])
+async def test_poll_never_manufactures_applied(monkeypatch, completion):
+    client = AsyncMock()
+    response = MagicMock(is_success=True)
+    response.json.return_value = completion
+    client.get.return_value = response
+    monkeypatch.setattr(mcp_adapter, "_sleep_for_poll_interval", AsyncMock())
+    with pytest.raises(RuntimeError):
+        await mcp_adapter._poll_maintenance_until_ready(
+            client, {"status": "running_phase2", "job_id": "job-1"}, expect_apply_summary=True,
+        )
+    client.get.assert_awaited_once()
