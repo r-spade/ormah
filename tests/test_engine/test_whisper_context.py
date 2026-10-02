@@ -3473,3 +3473,171 @@ class TestEncodeOncePerWhisper:
         # PromptClassifier.classify(). Topic-shift, the affinity boost, and
         # whisper_log all reuse intent.prompt_vec rather than re-encoding.
         assert mock_encoder.encode.call_count == 1
+
+
+class TestWhisperTemporalGateSplit:
+    """Time-bounded search and permission to bypass relevance gates are separate.
+
+    An inferred temporal match narrows the search window, but only a
+    broad-recap match relaxes the floors, the topical filter, and the
+    injection gate (upstream issue #304).
+    """
+
+    @staticmethod
+    def _builder_with_intent(mock_graph, intent, results):
+        mock_engine = MagicMock()
+        mock_engine.settings.claude_maintenance_enabled = False
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        mock_classifier = MagicMock()
+        mock_classifier.classify.return_value = intent
+        builder._classifier = mock_classifier
+        mock_engine.recall_search_structured.return_value = results
+        return builder
+
+    def test_inferred_temporal_keeps_gates_on_ordinary_work_prompt(self, mock_graph):
+        """The #304 repro path: temporal category without broad-recap confidence.
+
+        Recent candidates that clear the relaxed floor (0.30) but not the
+        ordinary floor must be rejected — embedding-inferred temporal must
+        not admit topically irrelevant recent memories.
+        """
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        noisy = [
+            {"node": _make_node_dict("n1", "Release checklist draft"), "score": 0.05,
+             "source": "hybrid", "raw_cosine": 0.42},
+            {"node": _make_node_dict("n2", "Branch naming conventions"), "score": 0.05,
+             "source": "hybrid", "raw_cosine": 0.45},
+        ]
+        builder = self._builder_with_intent(
+            mock_graph,
+            PromptIntent(
+                categories=["continuation", "temporal"],
+                search_params={"created_after": "2026-09-27T00:00:00+00:00"},
+            ),
+            noisy,
+        )
+
+        result = builder.build_whisper_context(
+            prompt="wrap this up and save the work",
+            min_score=0.50,
+            injection_gate=0.45,
+        )
+
+        assert result == ""
+
+    def test_broad_recap_still_relaxes_gates_and_sorts_by_recency(self, mock_graph):
+        """A genuine broad recap keeps the pre-split relaxation behaviour."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        older = _make_node_dict("n1", "Yesterday work log")
+        older["created"] = "2026-09-28T10:00:00Z"
+        newer = _make_node_dict("n2", "Yesterday standup notes")
+        newer["created"] = "2026-09-29T10:00:00Z"
+        builder = self._builder_with_intent(
+            mock_graph,
+            PromptIntent(
+                categories=["temporal"],
+                search_params={"created_after": "2026-09-27T00:00:00+00:00"},
+                broad_recap=True,
+            ),
+            [
+                {"node": older, "score": 0.05, "source": "hybrid", "raw_cosine": 0.42},
+                {"node": newer, "score": 0.05, "source": "hybrid", "raw_cosine": 0.45},
+            ],
+        )
+
+        result = builder.build_whisper_context(
+            prompt="what did we do yesterday",
+            min_score=0.50,
+            injection_gate=0.45,
+        )
+
+        assert "Yesterday work log" in result
+        assert "Yesterday standup notes" in result
+        assert result.index("Yesterday standup notes") < result.index("Yesterday work log")
+
+    def test_topical_time_bounded_search_keeps_gates(self, mock_graph):
+        """A subject-scoped time-bounded query narrows search, not gates."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        relevant = {"node": _make_node_dict("n1", "FSRS decay fix"), "score": 0.8,
+                    "source": "hybrid", "raw_cosine": 0.80}
+        noisy = {"node": _make_node_dict("n2", "Release checklist draft"), "score": 0.05,
+                 "source": "hybrid", "raw_cosine": 0.42}
+        builder = self._builder_with_intent(
+            mock_graph,
+            PromptIntent(
+                categories=["temporal"],
+                search_params={
+                    "created_after": "2026-09-23T00:00:00+00:00",
+                    "created_before": "2026-09-30T00:00:00+00:00",
+                    "search_query": "the bug we fixed",
+                },
+                temporal_explicit=True,
+            ),
+            [relevant, noisy],
+        )
+
+        result = builder.build_whisper_context(
+            prompt="the bug we fixed yesterday",
+            min_score=0.50,
+            injection_gate=0.45,
+        )
+
+        assert "FSRS decay fix" in result
+        assert "Release checklist draft" not in result
+
+    def test_temporal_supplement_kept_only_for_broad_recap(self, mock_graph):
+        """SQL temporal supplements ride along with recap relaxation only."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        supplement = {"node": _make_node_dict("n1", "Standup scratch notes"), "score": 0.001,
+                      "source": "temporal"}
+
+        recap_builder = self._builder_with_intent(
+            mock_graph,
+            PromptIntent(
+                categories=["temporal"],
+                search_params={"created_after": "2026-09-27T00:00:00+00:00"},
+                broad_recap=True,
+            ),
+            [supplement],
+        )
+        recap_result = recap_builder.build_whisper_context(
+            prompt="what did we do yesterday", min_score=0.50, injection_gate=0.45,
+        )
+        assert "Standup scratch notes" in recap_result
+
+        inferred_builder = self._builder_with_intent(
+            mock_graph,
+            PromptIntent(
+                categories=["temporal"],
+                search_params={"created_after": "2026-09-27T00:00:00+00:00"},
+            ),
+            [supplement],
+        )
+        inferred_result = inferred_builder.build_whisper_context(
+            prompt="wrap this up and save the work", min_score=0.50, injection_gate=0.45,
+        )
+        assert inferred_result == ""
+
+    def test_continuation_intent_does_not_inherit_relaxation(self, mock_graph):
+        """Continuation narrows the window but never bypassed gates; still true."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        builder = self._builder_with_intent(
+            mock_graph,
+            PromptIntent(
+                categories=["continuation"],
+                search_params={"created_after": "2026-09-27T00:00:00+00:00"},
+            ),
+            [{"node": _make_node_dict("n1", "Yesterday work log"), "score": 0.05,
+              "source": "hybrid", "raw_cosine": 0.42}],
+        )
+
+        result = builder.build_whisper_context(
+            prompt="continue where we left off", min_score=0.50, injection_gate=0.45,
+        )
+
+        assert result == ""

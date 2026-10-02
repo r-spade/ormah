@@ -179,7 +179,15 @@ class PromptIntent:
 
     search_params: dict = field(default_factory=dict)
     """Extra kwargs to merge into ``recall_search_structured`` call."""
+    temporal_explicit: bool = False
+    """Whether an explicit time phrase was detected (vs an inferred window)."""
 
+    broad_recap: bool = False
+    """Whether the prompt qualifies for whisper's relaxed relevance gates.
+
+    Only a high-confidence broad-recap match sets this; embedding-inferred
+    temporal alone narrows the search window but does not bypass gates.
+    """
     prompt_vec: np.ndarray | None = None
     """The (normalised) embedding of the prompt computed during classification.
 
@@ -203,6 +211,12 @@ class PromptClassifier:
     # score.  With bge-base, cross-category noise is ~0.65–0.68 while genuine
     # matches are 0.9+, so 0.15 cleanly separates signal from noise.
     _CONV_MARGIN: float = 0.15
+    # A temporal match at/above this cosine earns broad-recap treatment (the
+    # relaxed whisper gates).  Measured with bge-base: paraphrases of the
+    # recap archetypes score 0.9+, while a misread work request ("wrap this
+    # up and save the work") grazes at ~0.69 — the inferred window still
+    # narrows its search, but the relevance gates stay up.
+    _RECAP_CONFIDENCE: float = 0.78
 
     def __init__(
         self,
@@ -293,9 +307,13 @@ class PromptClassifier:
 
         # Build merged search_params from all matched categories
         search_params: dict = {}
+        temporal_explicit = False
         parser = self._temporal_parser or _default_parser()
         if "temporal" in matched:
             search_params.update(parser.extract_time_params(prompt))
+            # The parser's own explicit detector decides this — a strip-only
+            # phrase ("recent") must not count as explicit time wording.
+            temporal_explicit = parser.has_temporal_phrases(prompt)
             stripped = parser.strip_temporal_phrases(prompt)
             if stripped != prompt:
                 search_params["search_query"] = stripped
@@ -307,7 +325,9 @@ class PromptClassifier:
                 search_params["created_after"] = parser.extract_time_params("")["created_after"]
 
         return PromptIntent(
-            categories=sorted(matched), search_params=search_params, prompt_vec=prompt_vec
+            categories=sorted(matched), search_params=search_params, prompt_vec=prompt_vec,
+            temporal_explicit=temporal_explicit,
+            broad_recap="temporal" in matched and scores["temporal"] >= self._RECAP_CONFIDENCE,
         )
 
     # ------------------------------------------------------------------
