@@ -161,6 +161,23 @@ def test_both_lanes_overlap_but_each_serializes_including_lazy_iteration():
     assert active == {"general": 0, "recall": 0}
 
 
+def test_real_whisper_topical_and_preference_searches_stay_general(engine, monkeypatch):
+    eng, seen = engine
+    monkeypatch.setattr(eng, "_maybe_get_onboarding_nudge", lambda **kw: None)
+    monkeypatch.setattr(eng.context_builder, "_get_classifier", lambda: None)
+    monkeypatch.setattr(eng, "has_searchable_preferences", lambda: True)
+    eng.settings.whisper_reranker_enabled = True
+    eng.settings.whisper_preference_applicability_enabled = True
+    eng._whisper_reranker_available = True
+
+    # Exercise the real builder and both structured-search call sites. The
+    # fixture replaces only model search, recording its actual worker thread.
+    eng.get_whisper_context("what did we decide about memory usage and retrieval")
+
+    assert len(seen) == 2
+    assert all(name.startswith("ormah-inference") for name, _ in seen)
+
+
 @pytest.mark.parametrize("origin", ["general", "recall"])
 def test_nested_calls_stay_on_worker_and_recover_after_error(origin):
     @runtime.local_inference

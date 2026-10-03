@@ -3717,7 +3717,20 @@ class TestRemoveFastembedCache:
 
 
 class TestPreloadLocalModels:
+    @pytest.fixture(autouse=True)
+    def isolate_model_caches(self, monkeypatch, tmp_path):
+        from ormah.embeddings import local_adapter, reranker
+
+        monkeypatch.setattr(local_adapter, "_model_cache", {})
+        monkeypatch.setattr(reranker, "_model_cache", {})
+        monkeypatch.setattr(local_adapter, "get_fastembed_cache_dir", lambda: tmp_path)
+        monkeypatch.setattr(reranker, "get_fastembed_cache_dir", lambda: tmp_path)
+
     def test_preloads_embedding_and_reranker_into_shared_cache(self, tmp_path):
+        from threading import current_thread
+
+        from ormah.embeddings import local_adapter, reranker
+
         fake_settings = MagicMock()
         fake_settings.embedding_provider = "local"
         fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
@@ -3730,10 +3743,30 @@ class TestPreloadLocalModels:
             patch("fastembed.TextEmbedding") as embed_cls,
             patch("fastembed.rerank.cross_encoder.TextCrossEncoder") as reranker_cls,
         ):
-            _preload_local_models()
+            threads = []
 
-        embed_cls.assert_called_once_with("BAAI/bge-base-en-v1.5", cache_dir=str(tmp_path))
-        reranker_cls.assert_called_once_with("Xenova/ms-marco-MiniLM-L-6-v2", cache_dir=str(tmp_path))
+            def record_thread(mock):
+                def construct(*args, **kwargs):
+                    threads.append(current_thread().name)
+                    return mock.return_value
+                return construct
+
+            embed_cls.side_effect = record_thread(embed_cls)
+            reranker_cls.side_effect = record_thread(reranker_cls)
+            _preload_local_models()
+            _preload_local_models()
+            assert local_adapter.LocalAdapter(fake_settings.embedding_model).model is embed_cls.return_value
+            assert reranker.preload_model(fake_settings.whisper_reranker_model) is reranker_cls.return_value
+            assert len(local_adapter._model_cache) == len(reranker._model_cache) == 1
+            assert len(threads) == 2
+            assert all(name.startswith("ormah-inference") for name in threads)
+
+        embed_cls.assert_called_once_with(
+            "BAAI/bge-base-en-v1.5", cache_dir=str(tmp_path), enable_cpu_mem_arena=False,
+        )
+        reranker_cls.assert_called_once_with(
+            "Xenova/ms-marco-MiniLM-L-6-v2", cache_dir=str(tmp_path), enable_cpu_mem_arena=False,
+        )
 
     def test_skips_reranker_preload_when_disabled(self, tmp_path):
         fake_settings = MagicMock()
@@ -3772,6 +3805,7 @@ class TestPreloadLocalModels:
         reranker_cls.assert_called_once_with(
             "Xenova/ms-marco-MiniLM-L-6-v2",
             cache_dir=str(tmp_path),
+            enable_cpu_mem_arena=False,
         )
 
 

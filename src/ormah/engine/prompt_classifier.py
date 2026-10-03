@@ -179,7 +179,7 @@ class PromptIntent:
     """Matched intent categories, e.g. ``["temporal"]``. Falls back to ``["general"]``."""
 
     search_params: dict = field(default_factory=dict)
-    """Extra kwargs to merge into ``recall_search_structured`` call."""
+    """Extra kwargs to merge into whisper's ``_search_structured`` call."""
 
     prompt_vec: np.ndarray | None = None
     """The (normalised) embedding of the prompt computed during classification.
