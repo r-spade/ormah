@@ -23,6 +23,7 @@ from typing import Callable
 
 import httpx
 
+from ormah.integrations.registry import descriptors as _integration_descriptors
 from ormah.config import settings
 from ormah.console import info, ok, play_finale, step, warn
 from ormah.embeddings.cache import get_fastembed_cache_dir, get_model_cache_dirname
@@ -2578,6 +2579,7 @@ class AgentDescriptor:
     supports_maintenance: bool = False
     # None = available on all platforms; ["darwin"] = macOS only, etc.
     platform: list[str] | None = field(default=None)
+    capabilities_fn: Callable[[], dict] | None = None
 
 
 def _claude_code_plugin_provides_hooks() -> bool:
@@ -2944,6 +2946,10 @@ AGENT_REGISTRY: list[AgentDescriptor] = [
 ]
 
 
+# Separate modules keep target PRs independent of one central registry.
+AGENT_REGISTRY.extend(_integration_descriptors())
+
+
 def _get_agent(agent_id: str) -> AgentDescriptor:
     for agent in AGENT_REGISTRY:
         if agent.id == agent_id:
@@ -3010,6 +3016,7 @@ def list_agents() -> list[dict]:
             "wired": wired,
             "platform": agent.platform,
             "available_on_current_os": agent.platform is None or current_os in agent.platform,
+            **({"capabilities": agent.capabilities_fn()} if agent.capabilities_fn else {}),
         })
     return result
 

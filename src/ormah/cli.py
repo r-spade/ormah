@@ -815,6 +815,14 @@ def main():
     cloud_kit.add_argument("--json", action="store_true", help="Output result as JSON")
     cloud_kit.set_defaults(func=_cmd_cloud_kit)
 
+    # Explicit integration setup does not start the server or load memory models.
+    agents_p = sub.add_parser("agents", help="Manage additional host integrations")
+    agents_p.add_argument("arguments", nargs=argparse.REMAINDER)
+    def _agents(args):
+        from ormah.integrations.__main__ import main as agents_main
+        agents_main(args.arguments)
+    agents_p.set_defaults(func=_agents)
+
     # --- setup ---
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")
     setup_p.add_argument("--ci", action="store_true", help="Non-interactive mode for CI/testing")
