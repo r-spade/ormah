@@ -705,6 +705,7 @@ class MemoryEngine:
             annotated.append(result)
         return annotated
 
+    @inference_request("recall")
     def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
         """Get a specific node with its neighbors, formatted as text."""
         node = self.graph.get_node(node_id)

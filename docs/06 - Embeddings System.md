@@ -92,7 +92,7 @@ model.embed("Chose SQLite over Postgres for local-first design")
 
 Local inference uses two process-wide reusable worker threads
 (`embeddings/runtime.py`): one for whisper and other model work, and one
-reserved for deliberate recall. The engine's `recall_search` and
+reserved for deliberate recall. The engine's `recall_search`, `recall_node`, and
 `recall_search_structured` entry points select the recall lane, covering API,
 MCP, UI, and direct engine callers. Whisper uses the neutral structured-search
 helper; its single-text encodes and reranks stay on the general lane.

@@ -264,3 +264,36 @@ def test_debug_timing_does_not_include_input(caplog):
     assert timing["execution_seconds"] >= 0
     assert timing["origin"] == "recall"
     assert "private query" not in str(records) + caplog.text
+
+
+@pytest.mark.parametrize("entry", ["direct", "api", "mcp"])
+def test_single_node_recall_feedback_embedding_uses_reserved_lane(engine, monkeypatch, entry):
+    from ormah.adapters import mcp_adapter
+    from ormah.models.node import MemoryNode
+
+    eng, seen = engine
+    node = MemoryNode(type="fact", title="Synthetic memory", content="Test content")
+    eng.builder.index_single(eng.file_store.save(node))
+
+    def encode_feedback(prompt):
+        seen.append(worker_identity())
+        return b""
+
+    monkeypatch.setattr(eng, "_encode_feedback_prompt_vec", encode_feedback)
+    app = FastAPI()
+    app.state.engine = eng
+    app.include_router(agent_router)
+    if entry == "direct":
+        assert eng.recall_node(node.id)
+    elif entry == "api":
+        with TestClient(app) as client:
+            assert client.get(f"/agent/recall/{node.id}").status_code == 200
+    else:
+        original = httpx.AsyncClient
+        monkeypatch.setattr(mcp_adapter.httpx, "AsyncClient", lambda **kw: original(
+            **kw, transport=httpx.ASGITransport(app=app),
+        ))
+        assert anyio.run(mcp_adapter._dispatch, "http://test", "recall_node", {"node_id": node.id})
+    assert len(seen) == 1
+    assert seen[0][0].startswith("ormah-recall")
+    assert worker_identity()[0].startswith("ormah-inference")
