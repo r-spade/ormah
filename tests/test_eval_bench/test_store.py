@@ -51,6 +51,8 @@ def test_extract_uses_real_ingest_prompt_and_cache(bench_engine, tmp_path):
         assert first == again
         assert provider._call.call_count == 1
         assert "memory curator" in provider._call.call_args.args[0]
+        assert "D1:1" not in provider._call.call_args.args[0]
+        assert "has_answer" not in provider._call.call_args.args[0]
         assert "session:s1" in first[0]["tags"]
         assert first[0]["turn_provenance"] == "unknown"
         changed = session()

@@ -99,7 +99,7 @@ with guessed provenance.
 ## Methodology
 
 * LongMemEval streams one question/haystack at a time. LoCoMo shares a haystack
-  across all questions in a conversation. Selection is dataset order, not random.
+  across all questions in a conversation. Unmanifested selection is dataset order, not random.
   `--conversation` is a zero-based LoCoMo index. The first ten questions are not a
   balanced sample; 50 LongMemEval questions also omit some question types.
   LongMemEval supplies its question date; LoCoMo uses the conversation's latest
@@ -138,6 +138,40 @@ with guessed provenance.
   per-phase wall time includes seeding separately. Startup, dataset loading and
   report generation add overhead to command wall time.
 
+### Locked diagnostic splits
+
+`splits/diagnostic-v1.json` fixes an outcome-blind development/held-out cycle against
+exact dataset SHA-256 hashes. Generate it reproducibly with:
+
+```console
+uv run python -m eval.bench.splits --data-dir eval/bench/data
+```
+
+Run a locked sample with `--split-manifest eval/bench/splits/diagnostic-v1.json
+--split development` (or `heldout`). Locked splits reject `--limit` and question
+filters. Each LongMemEval split contains eight answerable questions from each of
+six types plus twelve abstentions (three from each type that supplies them). Each
+LoCoMo split contains eight questions per category, selected round-robin across
+conversations before a conversation is reused. These are 60/40-question diagnostic
+samples, not leaderboard estimates.
+
+### Failure-stage diagnostics
+
+Every report regenerates `diagnostics.jsonl`. Each row retains evaluation-only
+source evidence, the stored memories, retrieved IDs and full text, the exact dated
+payload exposed to the answerer, its character count and explicitly labeled
+characters/4 token estimate, answer, and judge output. The summary reports
+supporting-turn retrieval/content/full-exposure coverage with denominators and a
+conservative observable stage. `storage_absence`, `retrieval_miss`, title-only or
+truncated exposure, and full-evidence downstream failures are distinguishable.
+Downstream cases remain `needs_review`: supporting labels do not prove answer
+sufficiency, and model judge verdicts are not deterministic ground truth.
+
+LongMemEval `has_answer` and LoCoMo evidence annotations never enter extraction,
+retrieval ranking, or answer prompts. Raw mode has exact turn provenance through
+evaluation tags. Extract mode has only session provenance and is reported as
+`unresolvable_extracted_provenance`; substring matches are not treated as proof.
+
 ## Comparability and limitations
 
 Answer prompts are condensed adaptations of Mem0's
@@ -160,6 +194,9 @@ CLI models instead of fixed API models/the official GPT-4o judge. CLI aliases ca
 change. Extract mode applies the shipped ingestion truncation at 100,000 characters;
 cache records expose truncation. Image content in LoCoMo is not downloaded or
 vision-encoded. No dataset gold or evidence enters extraction or answer generation.
+The static benchmark seeder also does not reproduce production ingestion's
+`about_self`, identity-tier, or link handling; this is a methodology limitation,
+not a production-ingestion measurement.
 
 Only reviewed summaries go under `results/` for these smoke runs. Raw journals,
 datasets and caches must not be committed. A future published run needs complete

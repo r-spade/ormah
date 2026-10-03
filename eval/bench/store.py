@@ -128,8 +128,10 @@ def raw_memories(dataset, session):
 def extract_session(engine, dataset, session, cache_dir, adapter):
     from ormah.engine.memory_engine import _INGEST_LLM_PROMPT
 
+    # Dataset turn IDs double as gold evidence IDs in LoCoMo. Extraction gets
+    # conversational content only: no gold IDs, has_answer flags, or hints.
     text = f"Session date: {session.date}\n" + "\n".join(
-        f"[{t.turn_id}] {t.speaker}: {t.text}" for t in session.turns
+        f"{t.speaker}: {t.text}" for t in session.turns
     )
     prompt = _INGEST_LLM_PROMPT.format(
         conversation=text[: engine.settings.ingest_max_content_chars]

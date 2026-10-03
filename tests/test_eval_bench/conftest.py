@@ -71,6 +71,8 @@ def args():
         question_type=None,
         category=None,
         conversation=None,
+        split_manifest=None,
+        split=None,
         workers=2,
         max_usd=5,
         run_id="test",

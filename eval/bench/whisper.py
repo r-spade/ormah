@@ -138,12 +138,14 @@ def retrieve_whisper(engine, question: str, question_date: str) -> dict:
     if failure.error:
         raise RuntimeError(failure.error)
     ranked, text = whispered_memories(engine, raw_text, injected_ids)
+    context = memory_context(ranked)
     return {
         "strategy": "whisper", "ranked": ranked, "injected_ids": injected_ids,
         "raw_whisper_text": raw_text, "whisper_text": text,
         "silent": not injected_ids, "injected_count": len(injected_ids),
         "whisper_context_chars": len(text), "raw_whisper_chars": len(raw_text),
-        "answer_context_chars": len(memory_context(ranked)),
+        "answer_context_chars": len(context),
+        "answer_context_tokens_estimate": (len(context) + 3) // 4,
         "latency_s": latency, "reranker_active": True,
         "temporal_reference_date": question_date,
     }

@@ -13,6 +13,8 @@ def test_locomo_categories_and_shared_haystack(tmp_path, locomo):
     assert questions[2].abstention
     assert questions[0].sessions is questions[1].sessions
     assert questions[0].sessions[0].turns[0].turn_id == "D1:1"
+    assert questions[0].source_evidence[0]["turn_id"] == "D1:1"
+    assert questions[0].source_evidence[0]["text"].startswith("I ride")
     assert questions[0].sessions[0].date.startswith("2023-01-01")
     assert "sessions" not in questions[0].metadata()
 
@@ -27,7 +29,7 @@ def test_longmemeval(tmp_path):
             "question_date": "2023/05/30 (Tue) 23:40",
             "haystack_dates": ["2020/01/01 (Wed) 09:00"],
             "haystack_session_ids": ["s1"],
-            "haystack_sessions": [[{"role": "user", "content": "Hello"}]],
+            "haystack_sessions": [[{"role": "user", "content": "Hello", "has_answer": True}]],
             "answer_session_ids": [],
         }
     ]
@@ -36,6 +38,8 @@ def test_longmemeval(tmp_path):
     question = next(load_questions(path, "longmemeval"))
     assert question.abstention
     assert question.sessions[0].turns[0].turn_id == "s1:0"
+    assert question.sessions[0].turns[0].supports_answer is True
+    assert question.source_evidence[0]["turn_id"] == "s1:0"
     assert question.sessions[0].date.startswith("2020-01-01")
 
 

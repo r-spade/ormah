@@ -46,10 +46,12 @@ def retrieve_question(engine, question: str, k: int) -> dict:
     ]
     for item in ranked:
         item["node"]["tags"] = sorted(tags.get(item["node"]["id"], []))
+    context = memory_context(ranked)
     return {
         "strategy": "recall",
         "reranker_active": False,
-        "answer_context_chars": len(memory_context(ranked)),
+        "answer_context_chars": len(context),
+        "answer_context_tokens_estimate": (len(context) + 3) // 4,
         "ranked": ranked,
         "latency_s": latency,
         "production_gate": engine.settings.recall_min_relevance_score,

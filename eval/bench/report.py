@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from eval.bench.artifacts import Journal, write_json
+from eval.bench.artifacts import Journal, write_json, write_jsonl
+from eval.bench.diagnostics import aggregate_diagnostics, diagnose_question
 from eval.bench.metrics import aggregate, percentile
 
 
@@ -28,6 +29,18 @@ def build_report(run_dir: Path):
         },
         "calls": {},
     }
+    diagnostics = []
+    for row in rows:
+        store = row.get("store", {})
+        haystack = store.get("result", {}).get("haystack")
+        memories = []
+        if haystack:
+            path = run_dir / haystack
+            if path.exists():
+                memories = json.loads(path.read_text())
+        diagnostics.append(diagnose_question(row, memories, mode))
+    write_jsonl(run_dir / "diagnostics.jsonl", diagnostics)
+    summary["diagnostics"] = aggregate_diagnostics(diagnostics)
     calls = Journal(run_dir / "calls.jsonl").rows
     for phase in ("extract", "answer", "judge"):
         group = [c for c in calls if c["phase"] == phase]
@@ -77,6 +90,15 @@ def format_report(summary):
         f"Retrieval p50/p95: {summary['overall']['retrieval_p50_s']} / "
         f"{summary['overall']['retrieval_p95_s']} s; wall {summary['wall_s']:.1f} s"
     )
+    diagnostic = summary.get("diagnostics", {})
+    if diagnostic:
+        lines.append(
+            "Supporting-turn retrieval/full exposure: "
+            f"{diagnostic['supporting_turn_retrieval']['macro_recall']} / "
+            f"{diagnostic['supporting_turn_full_exposure']['macro_recall']} "
+            f"(N={diagnostic['supporting_turn_retrieval']['questions']})"
+        )
+        lines.append(f"Failure stages: {diagnostic['failure_stage_counts']}")
     lines.append(
         f"Errors: {summary['overall']['errors']}; "
         f"abstention accuracy: {summary['overall']['abstention_accuracy']}"
@@ -86,6 +108,11 @@ def format_report(summary):
         f"Injection rate: {metrics['injection_rate']}; "
         f"mean memories: {metrics['mean_injected_memories']}; "
         f"mean answer context chars: {metrics['mean_answer_context_chars']}"
+    )
+    lines.append(
+        "Mean answer context tokens (chars/4 estimate): "
+        f"{metrics['mean_answer_context_tokens_estimate']}; seeding total: "
+        f"{metrics['seeding_total_s']:.3f} s"
     )
     if strategy == "whisper":
         lines.append(
