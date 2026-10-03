@@ -114,9 +114,9 @@ def _preload_local_models() -> None:
 
     if settings.embedding_provider == "local":
         try:
-            from fastembed import TextEmbedding
+            from ormah.embeddings.local_adapter import LocalAdapter
 
-            TextEmbedding(settings.embedding_model, cache_dir=str(cache_dir))
+            LocalAdapter(settings.embedding_model).model
             ok(f"Embedding model ready: {settings.embedding_model}")
         except Exception as e:
             warn(f"Could not preload embedding model {settings.embedding_model}: {e}")
@@ -131,9 +131,9 @@ def _preload_local_models() -> None:
         return
 
     try:
-        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        from ormah.embeddings.reranker import preload_model
 
-        TextCrossEncoder(settings.whisper_reranker_model, cache_dir=str(cache_dir))
+        preload_model(settings.whisper_reranker_model)
         ok(f"Whisper reranker ready: {settings.whisper_reranker_model}")
     except Exception as e:
         warn(f"Could not preload whisper reranker {settings.whisper_reranker_model}: {e}")

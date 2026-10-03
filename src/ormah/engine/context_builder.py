@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from ormah.embeddings.runtime import inference_request
+
 import hashlib
 import logging
 import re
 from datetime import datetime, timezone
+from threading import Lock
 
 import numpy as np
 
@@ -114,6 +117,7 @@ class ContextBuilder:
         self.graph = graph
         self.engine = engine
         self._classifier = None  # lazy-init PromptClassifier
+        self._classifier_lock = Lock()
 
     def _get_classifier(self):
         """Get or create the prompt intent classifier (uses engine's encoder)."""
@@ -121,23 +125,26 @@ class ContextBuilder:
             return self._classifier
         if not self.engine:
             return None
-        try:
-            from ormah.engine.prompt_classifier import PromptClassifier, parser_for
+        with self._classifier_lock:
+            if self._classifier is not None:
+                return self._classifier
+            try:
+                from ormah.engine.prompt_classifier import PromptClassifier, parser_for
 
-            hybrid_search = self.engine._get_hybrid_search()
-            if hybrid_search is None:
+                hybrid_search = self.engine._get_hybrid_search()
+                if hybrid_search is None:
+                    return None
+                encoder = hybrid_search.encoder
+                settings = getattr(self.engine, "settings", None)
+                threshold = settings.whisper_intent_threshold if settings else 0.65
+                temporal_parser = parser_for(settings.temporal_locale_codes) if settings else None
+                self._classifier = PromptClassifier(
+                    encoder, threshold=threshold, temporal_parser=temporal_parser
+                )
+                return self._classifier
+            except Exception as e:
+                logger.warning("Failed to create prompt classifier: %s", e)
                 return None
-            encoder = hybrid_search.encoder
-            settings = getattr(self.engine, "settings", None)
-            threshold = settings.whisper_intent_threshold if settings else 0.65
-            temporal_parser = parser_for(settings.temporal_locale_codes) if settings else None
-            self._classifier = PromptClassifier(
-                encoder, threshold=threshold, temporal_parser=temporal_parser
-            )
-            return self._classifier
-        except Exception as e:
-            logger.warning("Failed to create prompt classifier: %s", e)
-            return None
 
     def _topic_was_served(
         self,
@@ -214,6 +221,7 @@ class ContextBuilder:
         except Exception as e:
             logger.warning("whisper_decisions write failed: %s", e)
 
+    @inference_request("general")
     def build_whisper_context(
         self,
         prompt: str,
@@ -437,7 +445,7 @@ class ContextBuilder:
         }
         if intent is not None:
             # Extract search_query override before merging (it's not a
-            # recall_search_structured kwarg — it overrides our local query).
+            # _search_structured kwarg — it overrides our local query).
             intent_search_query = intent.search_params.pop("search_query", None)
             search_kwargs.update(intent.search_params)
             if intent_search_query is not None:
@@ -543,7 +551,7 @@ class ContextBuilder:
         # Always run search — even for identity-only queries, search finds
         # location/work/study nodes that graph neighbors alone miss.
         try:
-            search_results = self.engine.recall_search_structured(**search_kwargs)
+            search_results = self.engine._search_structured(**search_kwargs)
         except Exception as e:
             logger.warning("Whisper search failed: %s", e)
             self._log_decision(
@@ -844,7 +852,7 @@ class ContextBuilder:
                 from ormah.embeddings.reranker import rerank
 
                 existing_ids = {r["node"]["id"] for r in search_results}
-                preference_candidates = self.engine.recall_search_structured(
+                preference_candidates = self.engine._search_structured(
                     query=preference_query,
                     limit=max_nodes * max(candidate_pool_multiplier, 1),
                     default_space=space,
