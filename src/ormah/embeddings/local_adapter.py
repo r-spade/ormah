@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from threading import Lock
 
 import numpy as np
 
@@ -13,6 +14,7 @@ from ormah.embeddings.runtime import MAX_BATCH_SIZE, local_inference
 logger = logging.getLogger(__name__)
 
 _model_cache: dict[str, object] = {}
+_model_cache_lock = Lock()
 
 
 class LocalAdapter(EmbeddingAdapter):
@@ -26,26 +28,31 @@ class LocalAdapter(EmbeddingAdapter):
     @property
     @local_inference
     def model(self):
-        if self._model is None:
-            try:
-                from fastembed import TextEmbedding
-            except ImportError:
-                raise ImportError(
-                    "fastembed is required for local embeddings. "
-                    "Install ormah normally — it should be included."
-                )
+        if self._model is not None:
+            return self._model
+        # Publish only fully constructed sessions/tokenizers. The lock is never
+        # held during inference; both lanes share the loaded CPU model.
+        with _model_cache_lock:
+            if self._model is None:
+                try:
+                    from fastembed import TextEmbedding
+                except ImportError:
+                    raise ImportError(
+                        "fastembed is required for local embeddings. "
+                        "Install ormah normally — it should be included."
+                    )
 
-            if self.model_name in _model_cache:
-                self._model = _model_cache[self.model_name]
-            else:
-                logger.info("Loading embedding model (~420MB, first time only)...")
-                self._model = TextEmbedding(
-                    self.model_name,
-                    cache_dir=str(get_fastembed_cache_dir()),
-                    enable_cpu_mem_arena=False,
-                )
-                _model_cache[self.model_name] = self._model
-                logger.info("Embedding model ready.")
+                if self.model_name in _model_cache:
+                    self._model = _model_cache[self.model_name]
+                else:
+                    logger.info("Loading embedding model (~420MB, first time only)...")
+                    self._model = TextEmbedding(
+                        self.model_name,
+                        cache_dir=str(get_fastembed_cache_dir()),
+                        enable_cpu_mem_arena=False,
+                    )
+                    _model_cache[self.model_name] = self._model
+                    logger.info("Embedding model ready.")
         return self._model
 
     @local_inference
@@ -67,6 +74,7 @@ class LocalAdapter(EmbeddingAdapter):
 
     @local_inference
     def encode_batch(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
+        """Encode in order; positive caller batch sizes are capped at eight."""
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         vecs = np.array(list(self.model.embed(

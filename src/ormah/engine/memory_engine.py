@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ormah import lifecycle
+from ormah.embeddings.runtime import inference_request
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -792,7 +793,21 @@ class MemoryEngine:
         "while", "work", "worked", "working",
     })
 
+    @inference_request("recall")
     def recall_search_structured(
+        self, query: str, limit: int = 10, default_space: str | None = None,
+        *, min_relevance: float | None = None,
+        auto_temporal: bool = True, spread_activation: bool = True,
+        query_vec: Any | None = None, **filters,
+    ) -> list[dict]:
+        """Deliberate structured recall, including direct engine and UI callers."""
+        return self._search_structured(
+            query, limit, default_space, min_relevance=min_relevance,
+            auto_temporal=auto_temporal, spread_activation=spread_activation,
+            query_vec=query_vec, **filters,
+        )
+
+    def _search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
         *, min_relevance: float | None = None,
         auto_temporal: bool = True, spread_activation: bool = True,
@@ -801,7 +816,7 @@ class MemoryEngine:
         """Search memories and return structured results (list of dicts).
 
         Same logic as recall_search but returns raw dicts instead of formatted text.
-        Used by the UI and any consumer that needs structured data.
+        Shared retrieval for whisper and deliberate recall; inherits request origin.
 
         *min_relevance* overrides the deliberate-recall floor
         (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
@@ -934,6 +949,7 @@ class MemoryEngine:
         ).fetchone()
         return row is not None
 
+    @inference_request("recall")
     def recall_search(
         self,
         query: str,
@@ -1200,6 +1216,7 @@ class MemoryEngine:
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
 
+    @inference_request("general")
     def get_whisper_context(
         self,
         prompt: str,

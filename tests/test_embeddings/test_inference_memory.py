@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from ormah.embeddings import local_adapter, reranker
+from ormah.embeddings.runtime import inference_request
 from ormah.engine.context_builder import ContextBuilder
 from ormah.engine.prompt_classifier import ARCHETYPES, PromptClassifier
 
@@ -72,9 +73,10 @@ def test_concurrent_first_use_loads_one_model(monkeypatch, kind):
         def load():
             return reranker.preload_model("shared-model")
 
-    def run(_):
+    def run(i):
         barrier.wait(timeout=5)
-        return load()
+        with inference_request("recall" if i % 2 else "general"):
+            return load()
 
     with ThreadPoolExecutor(6) as pool:
         models = list(pool.map(run, range(6)))
@@ -121,7 +123,8 @@ def test_constructor_failure_can_retry(monkeypatch):
     assert attempts == 2
 
 
-def test_all_local_inference_paths_share_a_limit(monkeypatch):
+@pytest.mark.parametrize("origin", ["general", "recall"])
+def test_all_local_inference_paths_share_a_lane_limit(monkeypatch, origin):
     """Protect lazy iteration, including encode/batch and different adapters."""
     barrier = Barrier(8)
     counter_lock = Lock()
@@ -164,7 +167,8 @@ def test_all_local_inference_paths_share_a_limit(monkeypatch):
 
     def run(call):
         barrier.wait(timeout=5)
-        return call()
+        with inference_request(origin):
+            return call()
 
     with ThreadPoolExecutor(8) as pool:
         list(pool.map(run, calls))

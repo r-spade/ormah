@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ormah.embeddings.runtime import inference_request
+
 import hashlib
 import logging
 import re
@@ -219,6 +221,7 @@ class ContextBuilder:
         except Exception as e:
             logger.warning("whisper_decisions write failed: %s", e)
 
+    @inference_request("general")
     def build_whisper_context(
         self,
         prompt: str,
@@ -442,7 +445,7 @@ class ContextBuilder:
         }
         if intent is not None:
             # Extract search_query override before merging (it's not a
-            # recall_search_structured kwarg — it overrides our local query).
+            # _search_structured kwarg — it overrides our local query).
             intent_search_query = intent.search_params.pop("search_query", None)
             search_kwargs.update(intent.search_params)
             if intent_search_query is not None:
@@ -548,7 +551,7 @@ class ContextBuilder:
         # Always run search — even for identity-only queries, search finds
         # location/work/study nodes that graph neighbors alone miss.
         try:
-            search_results = self.engine.recall_search_structured(**search_kwargs)
+            search_results = self.engine._search_structured(**search_kwargs)
         except Exception as e:
             logger.warning("Whisper search failed: %s", e)
             self._log_decision(
@@ -849,7 +852,7 @@ class ContextBuilder:
                 from ormah.embeddings.reranker import rerank
 
                 existing_ids = {r["node"]["id"] for r in search_results}
-                preference_candidates = self.engine.recall_search_structured(
+                preference_candidates = self.engine._search_structured(
                     query=preference_query,
                     limit=max_nodes * max(candidate_pool_multiplier, 1),
                     default_space=space,

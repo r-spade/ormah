@@ -90,27 +90,47 @@ model.embed("Chose SQLite over Postgres for local-first design")
 
 ### Local inference memory limits
 
-Local embedding and reranker model loading and inference share one process-wide
-worker thread (`embeddings/runtime.py`). This prevents concurrent requests from
-multiplying activation memory or loading duplicate models, and reuses the same
-native allocation context across calls. FastEmbed's lazy output iterators are
-consumed on that worker. Nested calls, such as model loading during an encode,
-execute directly on the worker to avoid deadlock.
+Local inference uses two process-wide reusable worker threads
+(`embeddings/runtime.py`): one for whisper and other model work, and one
+reserved for deliberate recall. The engine's `recall_search` and
+`recall_search_structured` entry points select the recall lane, covering API,
+MCP, UI, and direct engine callers. Whisper uses the neutral structured-search
+helper; its single-text encodes and reranks stay on the general lane.
 
-Embedding and reranker inference batches contain at most eight inputs. Every
-input is still processed in order, and query text remains intact for each
-model's tokenizer to truncate at its supported token window. The default BGE
-and MS MARCO models already cap sequences at 512 tokens; a character cutoff
-would discard context earlier and could change retrieval meaning.
+A scoped request context is copied through AnyIO and into inference workers,
+then reset after completion or failure. Each lane runs one item at a time,
+with at most two local inference items active across the process. Nested calls
+execute inline on the current worker to avoid deadlock. FastEmbed's lazy
+iterators are consumed before that item completes. Construction locks publish
+fully initialized shared model instances without serializing warm inference.
+Model caches retain their existing process lifetime; engine shutdown does not
+unload process-wide models or shut down workers used by other engine instances.
 
-Both local models receive FastEmbed's top-level
-`enable_cpu_mem_arena=False` option. This requires FastEmbed 0.7.4 or later;
-passing an ONNX `session_options` object to FastEmbed is silently ignored by
-these model wrappers. Arena disabling and a shared worker substantially reduce
-retained RSS for concurrent inference, but they do not impose a hard process
-memory ceiling. ORT and the system allocator can still retain memory, and
-callers queue behind long local inference work. Remote embedding providers keep
-their existing execution behavior.
+Embedding and reranker batches contain at most eight inputs. `encode_batch`
+clamps positive caller-supplied `batch_size` values to eight, including its
+historical default of 32. Every input is processed in order, and query text
+remains intact for the tokenizer's existing token window (512 tokens for the
+default BGE and MS MARCO models).
+
+Both local models receive FastEmbed's top-level `enable_cpu_mem_arena=False`
+option, available since FastEmbed 0.7.4. Passing `session_options=` to these
+FastEmbed wrappers is silently ignored. The worker and batch limits bound
+inference concurrency, not total process RSS or native thread counts. ONNX
+Runtime and the system allocator can still retain memory. Recalls may queue
+behind other recalls, wait for cold model construction, and compete for CPU
+with whisper. Remote embedding providers retain their existing behavior.
+
+For opt-in diagnostics, enable DEBUG on `ormah.embeddings.runtime`. Its log
+records have an `inference` extra field with operation, request origin,
+monotonic enqueue/start/end timestamps, queue wait, and execution duration;
+they contain no query or document text. Execution time includes model loading
+when cold and CPU contention when busy. A structured logging handler can
+retain these fields, as the benchmark script does.
+
+On Linux/glibc, operators can separately evaluate `MALLOC_ARENA_MAX=2` in the
+server process environment to limit allocator arenas. It is optional, may
+trade allocator throughput for memory, and is not set by Ormah. A Python worker
+is neither one CPU core nor exactly one allocator arena.
 
 Issue [#322](https://github.com/r-spade/ormah/issues/322) can be reproduced in
 a fresh process against cached real models and an isolated temporary store:
