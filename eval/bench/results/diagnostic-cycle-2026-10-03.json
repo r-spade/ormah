@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-03",
+  "claim_scope": "locked stratified diagnostic samples; not leaderboard estimates",
+  "split_manifest": "eval/bench/splits/diagnostic-v1.json",
+  "dataset_sha256": {
+    "longmemeval": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
+    "locomo": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"
+  },
+  "inference": {
+    "cli": "codex-cli 0.154.0",
+    "extract_model": "gpt-5.6-terra",
+    "answer_model": "gpt-5.6-terra",
+    "judge_model": "gpt-5.6-terra",
+    "billing": "subscription",
+    "api_spend_usd": 0,
+    "workers": 2
+  },
+  "development_baselines": {
+    "longmemeval_raw_recall": {"run_id": "diag-v1-dev-lme-raw-recall-terra-v2", "correct": 51, "denominator": 60, "abstention_correct": 10, "abstention_denominator": 12, "mean_context_chars": 11735.267},
+    "longmemeval_raw_whisper": {"run_id": "diag-v1-dev-lme-raw-whisper-terra", "correct": 34, "denominator": 60, "abstention_correct": 10, "abstention_denominator": 12, "mean_context_chars": 675.317},
+    "locomo_raw_recall": {"run_id": "diag-v1-dev-locomo-raw-recall-terra", "correct": 25, "denominator": 32, "abstention_correct": 7, "abstention_denominator": 8, "mean_context_chars": 7263.35},
+    "locomo_raw_whisper": {"run_id": "diag-v1-dev-locomo-raw-whisper-terra", "correct": 22, "denominator": 32, "abstention_correct": 8, "abstention_denominator": 8, "mean_context_chars": 788.3},
+    "locomo_extract_recall": {"run_id": "diag-v1-dev-locomo-extract-recall-terra", "correct": 21, "denominator": 32, "abstention_correct": 7, "abstention_denominator": 8, "mean_context_chars": 8945.3},
+    "locomo_extract_whisper": {"run_id": "diag-v1-dev-locomo-extract-whisper-terra", "correct": 18, "denominator": 32, "abstention_correct": 7, "abstention_denominator": 8, "mean_context_chars": 843.95}
+  },
+  "development_candidates": {
+    "balanced-preview": {
+      "settings": {"whisper_full_content_count": 6, "whisper_injected_content_max_chars": 200},
+      "decision": "rejected before held-out",
+      "primary": {
+        "longmemeval_raw": {"correct": 29, "denominator": 60, "wins": 1, "losses": 6, "delta_95pct": [-0.166667, 0]},
+        "locomo_raw": {"correct": 21, "denominator": 32, "wins": 0, "losses": 1, "delta_95pct": [-0.1, 0]},
+        "locomo_extract": {"correct": 16, "denominator": 32, "wins": 0, "losses": 2, "delta_95pct": [-0.153846, 0]}
+      }
+    },
+    "lower-gate": {
+      "settings": {"whisper_injection_gate": 0.4},
+      "decision": "selected as less harmful but explicitly unconvincing",
+      "primary": {
+        "longmemeval_raw": {"correct": 35, "denominator": 60, "wins": 1, "losses": 0, "delta_95pct": [0, 0.05]},
+        "locomo_raw": {"correct": 21, "denominator": 32, "wins": 0, "losses": 1, "delta_95pct": [-0.1, 0]},
+        "locomo_extract": {"correct": 19, "denominator": 32, "wins": 2, "losses": 1, "delta_95pct": [-0.064516, 0.142857]}
+      }
+    }
+  },
+  "heldout": {
+    "longmemeval_raw": {
+      "recall": {"run_id": "diag-v1-held-lme-raw-recall-terra", "correct": 53, "denominator": 60, "abstention_correct": 12, "mean_context_chars": 10440.517},
+      "whisper": {"run_id": "diag-v1-held-lme-raw-whisper-terra", "correct": 32, "denominator": 60, "abstention_correct": 12, "mean_context_chars": 652.083},
+      "lower_gate": {"run_id": "diag-v1-held-lme-raw-whisper-lower-gate-terra", "correct": 32, "denominator": 60, "abstention_correct": 12, "mean_context_chars": 697.967, "wins": 1, "losses": 1, "delta_95pct": [-0.05, 0.05]}
+    },
+    "locomo_raw": {
+      "recall": {"run_id": "diag-v1-held-locomo-raw-recall-terra", "correct": 28, "denominator": 32, "abstention_correct": 7, "mean_context_chars": 7198.15},
+      "whisper": {"run_id": "diag-v1-held-locomo-raw-whisper-terra", "correct": 20, "denominator": 32, "abstention_correct": 7, "mean_context_chars": 821.65},
+      "lower_gate": {"run_id": "diag-v1-held-locomo-raw-whisper-lower-gate-terra", "correct": 18, "denominator": 32, "abstention_correct": 8, "mean_context_chars": 864.325, "wins": 0, "losses": 2, "delta_95pct": [-0.147059, 0]}
+    },
+    "locomo_extract": {
+      "recall": {"run_id": "diag-v1-held-locomo-extract-recall-terra", "correct": 26, "denominator": 32, "abstention_correct": 6, "mean_context_chars": 8939.6},
+      "whisper": {"run_id": "diag-v1-held-locomo-extract-whisper-terra", "correct": 25, "denominator": 32, "abstention_correct": 8, "mean_context_chars": 870.175},
+      "lower_gate": {"run_id": "diag-v1-held-locomo-extract-whisper-lower-gate-terra", "correct": 23, "denominator": 32, "abstention_correct": 7, "mean_context_chars": 881.125, "wins": 0, "losses": 2, "delta_95pct": [-0.153846, 0]}
+    }
+  },
+  "heldout_candidate_decision": "reject lower-gate; no production change justified",
+  "uncertainty": {"seed": 306, "samples": 10000, "longmemeval": "question bootstrap", "locomo": "conversation-cluster bootstrap"},
+  "subscription_usage": {
+    "successful_calls": {"extract": 272, "answer": 980, "judge": 980},
+    "failed_calls": {"answer": 60, "reason": "initial sandbox-denied app-server initialization; resumed successfully"},
+    "input_tokens": 32236074,
+    "cached_input_tokens": 28809216,
+    "output_tokens": 156428,
+    "reasoning_output_tokens": 36786,
+    "api_spend_usd": 0
+  },
+  "resources": {
+    "max_peak_rss_kib": 1076792,
+    "timing_caveat": "shared host load varied materially; latency is descriptive, not causal"
+  },
+  "limitations": [
+    "Small stratified diagnostic samples are not leaderboard estimates.",
+    "The model judge is not deterministic ground truth; downstream failures remain review cases.",
+    "Extracted mode has session-level provenance only, so exact fact survival and supporting-turn coverage are unresolved.",
+    "Static benchmark extraction omits production about_self, identity tier, and link handling."
+  ]
+}
