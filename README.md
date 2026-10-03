@@ -71,7 +71,7 @@ ormah remember "Checkout retries reuse the same idempotency key." --type decisio
 ormah recall "checkout retries"
 ```
 
-Success means the server reports that it is running and recall returns the decision you just stored. Open the [local graph](http://localhost:8787/ui) to inspect it.
+Success means the server reports that it is running and recall returns the decision you just stored. Open the [local graph](http://localhost:8787/) to inspect it.
 
 </details>
 
