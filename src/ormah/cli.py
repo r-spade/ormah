@@ -1055,6 +1055,12 @@ def main():
     bench_run.add_argument("dataset", choices=["longmemeval", "locomo"])
     bench_run.add_argument("--mode", choices=["raw", "extract"], default="raw")
     bench_run.add_argument("--retrieval", choices=["recall", "whisper"], default="recall")
+    bench_run.add_argument(
+        "--whisper-profile",
+        choices=["baseline", "balanced-preview", "lower-gate"],
+        default="baseline",
+        help="Controlled whisper evaluation profile (default: baseline)",
+    )
     bench_run.add_argument("--k", type=int, default=30)
     bench_run.add_argument("--phase", default="free", help="Comma-separated phases, or all; default: free")
     bench_run.add_argument("--limit", type=int)

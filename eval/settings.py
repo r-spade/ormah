@@ -62,6 +62,7 @@ WHISPER_EVAL_SETTINGS_OVERRIDES = {
     # Whisper pipeline (re-enables the reranker the shared base disables)
     "whisper_max_nodes": 6,
     "whisper_min_relevance_score": 0.45,
+    "whisper_full_content_count": 2,
     "whisper_candidate_pool_multiplier": 5,
     "whisper_injected_content_max_chars": 600,
     "whisper_reranker_enabled": True,

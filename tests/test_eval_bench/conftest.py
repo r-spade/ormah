@@ -65,6 +65,7 @@ def args():
         dataset="locomo",
         mode="raw",
         retrieval="recall",
+        whisper_profile="baseline",
         k=30,
         phase="free",
         limit=None,

@@ -39,6 +39,18 @@ BENCH_SETTINGS_OVERRIDES = {
     "ingest_max_content_chars": 100000,
 }
 
+WHISPER_PROFILES = {
+    "baseline": {},
+    # Keep the 1,200-character theoretical content allowance fixed while
+    # spreading it across all six injected memories instead of the top two.
+    "balanced-preview": {
+        "whisper_full_content_count": 6,
+        "whisper_injected_content_max_chars": 200,
+    },
+    # Change only the absolute post-reranker injection gate.
+    "lower-gate": {"whisper_injection_gate": 0.40},
+}
+
 
 def phases_for(args):
     if args.phase == "free":
@@ -56,18 +68,26 @@ def phases_for(args):
     return phases
 
 
-def settings_for(retrieval):
+def settings_for(retrieval, whisper_profile="baseline"):
+    if whisper_profile not in WHISPER_PROFILES:
+        raise ValueError(f"Unknown whisper profile: {whisper_profile}")
+    if retrieval != "whisper" and whisper_profile != "baseline":
+        raise ValueError("Non-baseline whisper profiles require --retrieval whisper")
     if retrieval == "whisper":
-        return {**BENCH_SETTINGS_OVERRIDES, **WHISPER_EVAL_SETTINGS_OVERRIDES}
+        return {
+            **BENCH_SETTINGS_OVERRIDES,
+            **WHISPER_EVAL_SETTINGS_OVERRIDES,
+            **WHISPER_PROFILES[whisper_profile],
+        }
     return dict(BENCH_SETTINGS_OVERRIDES)
 
 
-def make_engine(db_dir, retrieval="recall"):
+def make_engine(db_dir, retrieval="recall", whisper_profile="baseline"):
     from ormah.config import Settings
     from ormah.engine.memory_engine import MemoryEngine
 
     (db_dir / "nodes").mkdir(parents=True, exist_ok=True)
-    settings = Settings(memory_dir=db_dir, **settings_for(retrieval))
+    settings = Settings(memory_dir=db_dir, **settings_for(retrieval, whisper_profile))
     engine = MemoryEngine(settings)
     engine.startup()
     return engine
@@ -108,6 +128,7 @@ def parameters(args):
             "dataset",
             "mode",
             "retrieval",
+            "whisper_profile",
             "k",
             "limit",
             "question_type",
@@ -129,6 +150,7 @@ def parameters(args):
 def validate(args):
     if args.retrieval not in {"recall", "whisper"}:
         raise ValueError("--retrieval must be recall or whisper")
+    settings_for(args.retrieval, args.whisper_profile)
     if args.k <= 0 or args.workers <= 0 or (args.limit is not None and args.limit <= 0):
         raise ValueError("--k, --workers and --limit must be positive")
     if args.conversation is not None and args.conversation < 0:
@@ -216,7 +238,9 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
         "numpy": importlib.metadata.version("numpy"),
         "onnxruntime": importlib.metadata.version("onnxruntime"),
     }
-    experiment = experiment_fingerprint(settings_for(args.retrieval), runtime)
+    experiment = experiment_fingerprint(
+        settings_for(args.retrieval, args.whisper_profile), runtime
+    )
     if manifest_path.exists():
         if not args.resume:
             raise ValueError("Run exists; use --resume or a new --run-id")
@@ -235,7 +259,7 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
             "ormah_version": importlib.metadata.version("ormah"),
             "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
             "git_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], text=True)),
-            "settings": settings_for(args.retrieval),
+            "settings": settings_for(args.retrieval, args.whisper_profile),
             "experiment_fingerprint": experiment,
             "reranker_active": False,
             "temporal_reference": "question_date" if args.retrieval == "whisper" else "disabled",
@@ -309,7 +333,11 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
 
         from eval.bench.whisper import RerankerUnavailable, require_reranker, retrieve_whisper
 
-        engine = engine_factory(base / "eval_db" / run_id, retrieval=args.retrieval)
+        engine = engine_factory(
+            base / "eval_db" / run_id,
+            retrieval=args.retrieval,
+            whisper_profile=args.whisper_profile,
+        )
         if args.retrieval == "whisper":
             try:
                 require_reranker(engine)

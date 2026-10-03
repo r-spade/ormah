@@ -301,12 +301,14 @@ def test_get_whisper_context_passes_user_node_id(engine):
 def test_get_whisper_context_threads_pool_and_content_cap_settings(engine):
     engine._whisper_reranker_available = True
     engine.settings.whisper_candidate_pool_multiplier = 7
+    engine.settings.whisper_full_content_count = 4
     engine.settings.whisper_injected_content_max_chars = 450
 
     with patch.object(engine.context_builder, "build_whisper_context", return_value="") as build:
         engine.get_whisper_context("auth prompt")
 
     assert build.call_args.kwargs["candidate_pool_multiplier"] == 7
+    assert build.call_args.kwargs["full_content_count"] == 4
     assert build.call_args.kwargs["injected_content_max_chars"] == 450
 
 
