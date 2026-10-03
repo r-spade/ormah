@@ -197,6 +197,7 @@ class Settings(BaseSettings):
     # Max characters of node content injected for the top full-content
     # whispers; truncated at a word boundary. Full content stays one
     # recall_node call away (the whisper framing says so).
+    whisper_full_content_count: int = 2
     whisper_injected_content_max_chars: int = 600
 
     # Whisper reranking (cross-encoder with linear-rescale blended scoring)
@@ -371,6 +372,13 @@ class Settings(BaseSettings):
     def _embedding_dim_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"embedding_dim must be >= 1, got {v}")
+        return v
+
+    @field_validator("whisper_full_content_count")
+    @classmethod
+    def _whisper_full_content_count_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"whisper_full_content_count must be >= 0, got {v}")
         return v
 
     @field_validator(

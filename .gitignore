@@ -112,3 +112,6 @@ CLAUDE.md
 eval/bench/data/
 eval/bench/artifacts/
 eval/bench/eval_db/
+
+# ONNX Runtime may emit this telemetry identity file when persistence is denied.
+/:memory:.ses

@@ -100,6 +100,7 @@ def test_cli_parse(monkeypatch, strategy):
     ormah.cli.main()
     parsed = handler.call_args.args[0]
     assert parsed.retrieval == (strategy or "recall")
+    assert parsed.whisper_profile == "baseline"
     assert parsed.judge_provider == "codex"
     assert parsed.answer_provider == "claude-cli"
     assert parsed.limit == 10 and parsed.conversation == 0 and parsed.workers == 4

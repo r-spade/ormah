@@ -90,6 +90,12 @@ def test_embedding_dim_zero():
         _settings(embedding_dim=0)
 
 
+def test_whisper_full_content_count_non_negative():
+    assert _settings(whisper_full_content_count=0).whisper_full_content_count == 0
+    with pytest.raises(ValidationError, match="whisper_full_content_count must be >= 0"):
+        _settings(whisper_full_content_count=-1)
+
+
 # --- Intervals ---
 
 def test_interval_zero():

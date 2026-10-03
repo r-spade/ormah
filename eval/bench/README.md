@@ -258,6 +258,23 @@ memory payloads and counts; raw output is retained separately for audit. A nudge
 with zero debug IDs is **silence** and sends an empty memory list to the answerer.
 There is no fallback retrieval or follow-up recall.
 
+Controlled development experiments can select exactly one `--whisper-profile`:
+`baseline` preserves the two-by-600-character behavior, `balanced-preview`
+redistributes the same theoretical 1,200 content characters over six previews
+(six by 200), and `lower-gate` changes only the post-reranker absolute gate from
+0.45 to 0.40. Profiles are fingerprinted and cannot be resumed under another
+name. The balanced profile holds only the maximum content allowance constant;
+reports still compare exact rendered context characters because short memories
+and formatting can change the realized total. Non-baseline profiles are rejected
+for recall runs.
+
+Compare completed paired runs with deterministic question bootstrapping for
+LongMemEval and conversation-cluster bootstrapping for LoCoMo:
+
+```console
+uv run python -m eval.bench.compare BASELINE_RUN CANDIDATE_RUN
+```
+
 Whisper reports unchanged answer accuracy/J-score plus:
 
 * `injection_rate`: fraction of successful retrievals with at least one memory.

@@ -45,6 +45,12 @@ def seed(engine, tmp_path, n=3):
 def test_settings_shared_and_recall_default():
     assert settings_for("recall")["whisper_reranker_enabled"] is False
     assert all(settings_for("whisper")[k] == v for k, v in WHISPER_EVAL_SETTINGS_OVERRIDES.items())
+    balanced = settings_for("whisper", "balanced-preview")
+    assert balanced["whisper_full_content_count"] == 6
+    assert balanced["whisper_injected_content_max_chars"] == 200
+    assert settings_for("whisper", "lower-gate")["whisper_injection_gate"] == 0.40
+    with pytest.raises(ValueError, match="require --retrieval whisper"):
+        settings_for("recall", "lower-gate")
     from eval.whisper.cli import _EVAL_SETTINGS_OVERRIDES
 
     assert _EVAL_SETTINGS_OVERRIDES is WHISPER_EVAL_SETTINGS_OVERRIDES
@@ -92,7 +98,10 @@ def test_silence_passes_empty_memories_to_answerer(
     monkeypatch.setattr("eval.bench.answer.answer_question", answerer)
     report = run(args, base=tmp_path, engine_factory=factory,
                  provider_factory=lambda name, model, **kw: FakeProvider("fake", **kw))
-    assert factory.call_args.kwargs == {"retrieval": "whisper"}
+    assert factory.call_args.kwargs == {
+        "retrieval": "whisper",
+        "whisper_profile": "baseline",
+    }
     assert all(call.args[2] == [] for call in answerer.call_args_list)
     assert all(call.kwargs == dict(space=None, recent_prompts=None, session_id=None,
                                    _return_debug=True) for call in whisper.call_args_list)

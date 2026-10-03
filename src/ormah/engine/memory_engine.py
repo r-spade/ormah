@@ -1224,6 +1224,7 @@ class MemoryEngine:
             user_node_id=self.user_node_id,
             max_nodes=self.settings.whisper_max_nodes,
             min_score=self.settings.whisper_min_relevance_score,
+            full_content_count=self.settings.whisper_full_content_count,
             candidate_pool_multiplier=self.settings.whisper_candidate_pool_multiplier,
             injected_content_max_chars=self.settings.whisper_injected_content_max_chars,
             reranker_enabled=reranker_active,
