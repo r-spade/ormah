@@ -155,6 +155,12 @@ LoCoMo split contains eight questions per category, selected round-robin across
 conversations before a conversation is reused. These are 60/40-question diagnostic
 samples, not leaderboard estimates.
 
+For paired retrieval tracks, run the baseline store first and pass its run ID as
+`--haystack-source-run BASELINE_RUN` to the comparison. The comparison fails if
+any source haystack is absent, copies the exact JSON artifact, and records both
+its SHA-256 and source run on every question. This freezes memory content while
+allowing retrieval settings and isolated indexes to differ.
+
 ### Failure-stage diagnostics
 
 Every report regenerates `diagnostics.jsonl`. Each row retains evaluation-only

@@ -115,6 +115,7 @@ def parameters(args):
             "conversation",
             "split_manifest",
             "split",
+            "haystack_source_run",
             "extract_provider",
             "extract_model",
             "answer_provider",
@@ -146,6 +147,11 @@ def validate(args):
         (args.limit, args.question_type, args.category, args.conversation is not None)
     ):
         raise ValueError("Locked splits cannot be combined with limit or question filters")
+    if getattr(args, "haystack_source_run", None):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.haystack_source_run):
+            raise ValueError("Invalid haystack source run id")
+        if args.haystack_source_run == args.run_id:
+            raise ValueError("Haystack source run must differ from --run-id")
 
 
 def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_provider):
@@ -347,8 +353,25 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
                     if seeded != haystack_id:
                         preparation_start = time.perf_counter()
                         haystack_cache_hit = haystack_path.exists()
+                        haystack_source = None
                         if haystack_path.exists():
                             memories = json.loads(haystack_path.read_text())
+                        elif getattr(args, "haystack_source_run", None):
+                            source_path = (
+                                base / "artifacts" / args.haystack_source_run / "haystacks"
+                                / f"{digest(haystack_id)}.json"
+                            )
+                            if not source_path.exists():
+                                raise ValueError(
+                                    f"Missing frozen haystack in source run: {source_path}"
+                                )
+                            memories = json.loads(source_path.read_text())
+                            write_json(haystack_path, memories)
+                            haystack_source = {
+                                "run_id": args.haystack_source_run,
+                                "path": str(source_path.relative_to(base / "artifacts")),
+                                "sha256": sha256_file(source_path),
+                            }
                         elif "store" in phases:
                             memories = prepare_memories(
                                 engine,
@@ -384,6 +407,8 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
                                 "memories": memory_count,
                                 "haystack": str(haystack_path.relative_to(run_dir)),
                                 "haystack_cache_hit": haystack_cache_hit,
+                                "haystack_sha256": sha256_file(haystack_path),
+                                "haystack_source": haystack_source,
                                 "reused_seeded_haystack": reused_seeded_haystack,
                                 "preparation_s": preparation_s,
                                 "seeding_s": seeding_s,

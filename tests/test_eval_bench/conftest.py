@@ -73,6 +73,7 @@ def args():
         conversation=None,
         split_manifest=None,
         split=None,
+        haystack_source_run=None,
         workers=2,
         max_usd=5,
         run_id="test",

@@ -1063,6 +1063,10 @@ def main():
     bench_run.add_argument("--conversation", type=int, help="Zero-based LoCoMo conversation index")
     bench_run.add_argument("--split-manifest", help="Locked JSON split manifest")
     bench_run.add_argument("--split", choices=["development", "heldout"])
+    bench_run.add_argument(
+        "--haystack-source-run",
+        help="Reuse exact frozen haystacks from another run (fails if any are missing)",
+    )
     bench_run.add_argument("--workers", type=int, default=4)
     bench_run.add_argument("--max-usd", type=float, default=5.0)
     bench_run.add_argument("--run-id")
