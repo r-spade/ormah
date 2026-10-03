@@ -19,6 +19,17 @@ def write_json(path: Path, value) -> None:
     tmp.replace(path)
 
 
+def write_jsonl(path: Path, values) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as f:
+        for value in values:
+            f.write(json.dumps(value, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(path)
+
+
 class Journal:
     """Only a torn final line is recoverable; corrupt complete rows fail loudly."""
 

@@ -27,6 +27,9 @@ class Turn:
     speaker: str
     text: str
     turn_id: str
+    # Evaluation-only label. It is copied to Question.source_evidence, never to
+    # extraction, retrieval, or answer prompts.
+    supports_answer: bool = False
 
 
 @dataclass
@@ -47,6 +50,7 @@ class Question:
     gold_ids: list[str]
     abstention: bool = False
     conversation_id: str | None = None
+    source_evidence: list[dict] = field(default_factory=list)
     sessions: list[Session] = field(default_factory=list)
 
     def metadata(self) -> dict:
@@ -137,13 +141,24 @@ def load_questions(path: Path, dataset: str):
                 entry["haystack_sessions"],
                 strict=True,
             ):
-                sessions.append(
-                    Session(
-                        str(sid),
-                        parse_date(date),
-                        [Turn(t["role"], t["content"], f"{sid}:{i}") for i, t in enumerate(turns)],
-                    )
-                )
+                parsed_date = parse_date(date)
+                sessions.append(Session(
+                    str(sid), parsed_date,
+                    [Turn(t["role"], t["content"], f"{sid}:{i}", bool(t.get("has_answer")))
+                     for i, t in enumerate(turns)],
+                ))
+            source_evidence = [
+                {
+                    "session_id": session.session_id,
+                    "turn_id": turn.turn_id,
+                    "speaker": turn.speaker,
+                    "text": turn.text,
+                    "date": session.date,
+                }
+                for session in sessions
+                for turn in session.turns
+                if turn.supports_answer
+            ]
             yield Question(
                 str(entry["question_id"]),
                 dataset,
@@ -153,6 +168,7 @@ def load_questions(path: Path, dataset: str):
                 parse_date(entry["question_date"]),
                 list(entry["answer_session_ids"]),
                 str(entry["question_id"]).endswith("_abs"),
+                source_evidence=source_evidence,
                 sessions=sessions,
             )
         elif dataset == "locomo":
@@ -175,6 +191,19 @@ def load_questions(path: Path, dataset: str):
                 gold = str(qa.get("answer", ""))
                 if category == 3:
                     gold = gold.split(";", 1)[0].strip()
+                evidence_ids = {str(value) for value in qa.get("evidence", [])}
+                source_evidence = [
+                    {
+                        "session_id": session.session_id,
+                        "turn_id": turn.turn_id,
+                        "speaker": turn.speaker,
+                        "text": turn.text,
+                        "date": session.date,
+                    }
+                    for session in sessions
+                    for turn in session.turns
+                    if turn.turn_id in evidence_ids
+                ]
                 yield Question(
                     f"locomo:{ci}:{qi}",
                     dataset,
@@ -185,6 +214,7 @@ def load_questions(path: Path, dataset: str):
                     list(qa.get("evidence", [])),
                     category == 5,
                     str(ci),
+                    source_evidence,
                     sessions,
                 )
         else:

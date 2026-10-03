@@ -136,6 +136,31 @@ def test_question_filter_limit(args, tmp_path, locomo):
     assert questions[0].gold == "Yes"
 
 
+def test_frozen_haystack_source_is_copied_and_fingerprinted(
+    args, tmp_path, locomo, bench_engine, monkeypatch
+):
+    from eval.bench.datasets import sha256_file
+    from eval.bench.store import digest
+
+    dataset(tmp_path, locomo)
+    monkeypatch.setattr(bench_engine, "shutdown", lambda: None)
+    factory = Mock(return_value=bench_engine)
+    args.run_id = "source"
+    run(args, base=tmp_path, engine_factory=factory)
+    source = tmp_path / "artifacts/source/haystacks" / f"{digest('0')}.json"
+    args.run_id = "paired"
+    args.haystack_source_run = "source"
+    report = run(args, base=tmp_path, engine_factory=factory)
+    row = Journal(tmp_path / "artifacts/paired/questions.jsonl").latest()["locomo:0:0"]
+    assert row["store"]["result"]["haystack_source"] == {
+        "run_id": "source",
+        "path": f"source/haystacks/{source.name}",
+        "sha256": sha256_file(source),
+    }
+    assert row["store"]["result"]["haystack_sha256"] == sha256_file(source)
+    assert report["overall"]["questions"] == 3
+
+
 def test_published_runtime_guard(monkeypatch, capsys):
     import builtins
     import ormah.cli

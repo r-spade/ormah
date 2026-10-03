@@ -74,18 +74,31 @@ def make_engine(db_dir, retrieval="recall"):
 
 
 def selected_questions(args, path):
+    selected_ids = None
+    if getattr(args, "split_manifest", None):
+        from eval.bench.splits import load_split
+
+        ids, _ = load_split(Path(args.split_manifest), args.dataset, args.split, path)
+        selected_ids = set(ids)
     count = 0
+    found = set()
     for q in load_questions(path, args.dataset):
+        if selected_ids is not None and q.question_id not in selected_ids:
+            continue
         if args.question_type and q.question_type != args.question_type:
             continue
         if args.category and q.question_type != str(args.category):
             continue
         if args.conversation is not None and q.conversation_id != str(args.conversation):
             continue
+        found.add(q.question_id)
         yield q
         count += 1
         if args.limit and count >= args.limit:
             return
+    if selected_ids is not None and found != selected_ids:
+        missing = sorted(selected_ids - found)
+        raise ValueError(f"Split selected IDs not found after filters: {missing[:10]}")
 
 
 def parameters(args):
@@ -100,6 +113,9 @@ def parameters(args):
             "question_type",
             "category",
             "conversation",
+            "split_manifest",
+            "split",
+            "haystack_source_run",
             "extract_provider",
             "extract_model",
             "answer_provider",
@@ -125,6 +141,17 @@ def validate(args):
         raise ValueError("--question-type applies only to LongMemEval")
     if args.run_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.run_id):
         raise ValueError("Invalid run id")
+    if bool(getattr(args, "split_manifest", None)) != bool(getattr(args, "split", None)):
+        raise ValueError("--split-manifest and --split must be used together")
+    if getattr(args, "split_manifest", None) and any(
+        (args.limit, args.question_type, args.category, args.conversation is not None)
+    ):
+        raise ValueError("Locked splits cannot be combined with limit or question filters")
+    if getattr(args, "haystack_source_run", None):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.haystack_source_run):
+            raise ValueError("Invalid haystack source run id")
+        if args.haystack_source_run == args.run_id:
+            raise ValueError("Haystack source run must differ from --run-id")
 
 
 def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_provider):
@@ -217,9 +244,17 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
             "runtime": runtime,
             "prompt_hashes": {name: sha256_file(BASE / name) for name in ("answer.py", "judge.py")},
             "phase_wall_s": {},
+            "host_loadavg_start": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
             "providers": {},
             "invocations": [],
         }
+        if getattr(args, "split_manifest", None):
+            split_path = Path(args.split_manifest)
+            manifest["selection_manifest"] = {
+                "path": str(split_path),
+                "sha256": sha256_file(split_path),
+                "split": args.split,
+            }
     manifest["invocations"].append(
         {
             "phases": sorted(phases),
@@ -316,8 +351,27 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
                     if haystack_id in failed_haystacks:
                         raise RuntimeError(failed_haystacks[haystack_id])
                     if seeded != haystack_id:
+                        preparation_start = time.perf_counter()
+                        haystack_cache_hit = haystack_path.exists()
+                        haystack_source = None
                         if haystack_path.exists():
                             memories = json.loads(haystack_path.read_text())
+                        elif getattr(args, "haystack_source_run", None):
+                            source_path = (
+                                base / "artifacts" / args.haystack_source_run / "haystacks"
+                                / f"{digest(haystack_id)}.json"
+                            )
+                            if not source_path.exists():
+                                raise ValueError(
+                                    f"Missing frozen haystack in source run: {source_path}"
+                                )
+                            memories = json.loads(source_path.read_text())
+                            write_json(haystack_path, memories)
+                            haystack_source = {
+                                "run_id": args.haystack_source_run,
+                                "path": str(source_path.relative_to(base / "artifacts")),
+                                "sha256": sha256_file(source_path),
+                            }
                         elif "store" in phases:
                             memories = prepare_memories(
                                 engine,
@@ -330,16 +384,36 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
                             write_json(haystack_path, memories)
                         else:
                             raise ValueError("Missing stored haystack: run --phase store first")
+                        preparation_s = time.perf_counter() - preparation_start
+                        cache_hits_before, cache_misses_before = cache.hits, cache.misses
+                        seeding_start = time.perf_counter()
                         seed_memories(engine, memories, cache)
+                        seeding_s = time.perf_counter() - seeding_start
+                        embedding_cache_hits = cache.hits - cache_hits_before
+                        embedding_cache_misses = cache.misses - cache_misses_before
                         memory_count = len(memories)
                         del memories
                         seeded = haystack_id
+                        reused_seeded_haystack = False
+                    else:
+                        preparation_s = seeding_s = 0.0
+                        embedding_cache_hits = embedding_cache_misses = 0
+                        haystack_cache_hit = True
+                        reused_seeded_haystack = True
                     if "store" in phases:
                         row["store"] = {
                             "status": "ok",
                             "result": {
                                 "memories": memory_count,
                                 "haystack": str(haystack_path.relative_to(run_dir)),
+                                "haystack_cache_hit": haystack_cache_hit,
+                                "haystack_sha256": sha256_file(haystack_path),
+                                "haystack_source": haystack_source,
+                                "reused_seeded_haystack": reused_seeded_haystack,
+                                "preparation_s": preparation_s,
+                                "seeding_s": seeding_s,
+                                "embedding_cache_hits": embedding_cache_hits,
+                                "embedding_cache_misses": embedding_cache_misses,
                             },
                         }
                         save(dict(row))
@@ -434,6 +508,7 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
     )
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     manifest["peak_rss_kib"] = peak / 1024 if sys.platform == "darwin" else peak
+    manifest["host_loadavg_end"] = list(os.getloadavg()) if hasattr(os, "getloadavg") else None
     write_json(manifest_path, manifest)
     if "report" in phases:
         return build_report(run_dir)

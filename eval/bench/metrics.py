@@ -49,8 +49,11 @@ def percentile(values, quantile):
 
 def aggregate(rows, k, mode, strategy="recall"):
     metrics, gates, scores, abstentions, latencies = [], [], [], [], []
-    counts, context_chars, whisper_chars, silent_abstentions = [], [], [], []
+    counts, context_chars, context_tokens, whisper_chars, silent_abstentions = [], [], [], [], []
+    seeding_times = []
     for row in rows:
+        if row.get("store", {}).get("status") == "ok":
+            seeding_times.append(row["store"]["result"].get("seeding_s"))
         if row.get("retrieve", {}).get("status") == "ok":
             retrieval = row["retrieve"]["result"]
             limit = max(1, len(retrieval["ranked"])) if strategy == "whisper" else k
@@ -59,6 +62,7 @@ def aggregate(rows, k, mode, strategy="recall"):
                 gates.append(retrieval_metrics(row, retrieval, k, mode, gated=True))
             counts.append(len(retrieval["ranked"]))
             context_chars.append(retrieval.get("answer_context_chars"))
+            context_tokens.append(retrieval.get("answer_context_tokens_estimate"))
             if strategy == "whisper":
                 whisper_chars.append(retrieval["whisper_context_chars"])
                 if row["dataset"] == "longmemeval" and row["abstention"]:
@@ -81,6 +85,8 @@ def aggregate(rows, k, mode, strategy="recall"):
         "injection_rate": mean([int(n > 0) for n in counts]),
         "mean_injected_memories": mean(counts),
         "mean_answer_context_chars": mean(context_chars),
+        "mean_answer_context_tokens_estimate": mean(context_tokens),
+        "seeding_total_s": sum(value for value in seeding_times if value is not None),
         "retrieval_labeled": sum(m["recall"] is not None for m in metrics),
         "retrieval_p50_s": percentile(latencies, 0.5),
         "retrieval_p95_s": percentile(latencies, 0.95),

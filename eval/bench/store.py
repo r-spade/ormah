@@ -128,8 +128,10 @@ def raw_memories(dataset, session):
 def extract_session(engine, dataset, session, cache_dir, adapter):
     from ormah.engine.memory_engine import _INGEST_LLM_PROMPT
 
+    # Dataset turn IDs double as gold evidence IDs in LoCoMo. Extraction gets
+    # conversational content only: no gold IDs, has_answer flags, or hints.
     text = f"Session date: {session.date}\n" + "\n".join(
-        f"[{t.turn_id}] {t.speaker}: {t.text}" for t in session.turns
+        f"{t.speaker}: {t.text}" for t in session.turns
     )
     prompt = _INGEST_LLM_PROMPT.format(
         conversation=text[: engine.settings.ingest_max_content_chars]
@@ -191,8 +193,9 @@ def seed_memories(engine, memories, cache):
     encoder = get_encoder(engine.settings)
     vectors = VectorStore(engine.db)
     now = datetime.now(timezone.utc)
+    nodes = []
     for start in range(0, len(memories), 64):
-        nodes = [
+        batch = [
             MemoryNode(
                 id=m["id"],
                 title=m["title"],
@@ -209,15 +212,22 @@ def seed_memories(engine, memories, cache):
             )
             for m in memories[start : start + 64]
         ]
+        nodes.extend(batch)
+        for node in batch:
+            engine.file_store.save(node)
+
+    # This is an isolated, newly emptied benchmark store. Index all saved
+    # files in one transaction instead of reparsing and committing each turn
+    # separately. Vector encoding/upsert stays content-keyed and batched.
+    engine.builder.full_rebuild()
+    for start in range(0, len(nodes), 64):
+        batch = nodes[start : start + 64]
         texts = [
             embedding_text(n.title, n.content, engine.settings.embedding_max_content_chars)
-            for n in nodes
+            for n in batch
         ]
         embeddings = cache.encode(texts, encoder)
-        for node in nodes:
-            path = engine.file_store.save(node)
-            engine.builder.index_single(path)
-        vectors.upsert_batch([(n.id, v) for n, v in zip(nodes, embeddings, strict=True)])
+        vectors.upsert_batch([(n.id, v) for n, v in zip(batch, embeddings, strict=True)])
 
     # HybridSearch intentionally tolerates vector failures in production. A
     # benchmark must fail visibly rather than silently measure lexical fallback.

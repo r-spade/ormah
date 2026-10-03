@@ -22,9 +22,13 @@ def session():
 
 
 def test_raw_cache_and_backdated_retrieval(bench_engine, tmp_path, encoder):
+    bench_engine.builder.full_rebuild = Mock(wraps=bench_engine.builder.full_rebuild)
     cache = EmbeddingCache(tmp_path / "cache.sqlite", "fake")
     memories = raw_memories("locomo", session())
     seed_memories(bench_engine, memories, cache)
+    # clear_eval_db rebuilds the empty store, then seeding rebuilds all saved
+    # memories transactionally instead of one index transaction per turn.
+    assert bench_engine.builder.full_rebuild.call_count == 2
     node = bench_engine.file_store.load(memories[0]["id"])
     assert node.created.year == 2000
     assert (datetime.now(timezone.utc) - node.last_accessed).total_seconds() < 30
@@ -51,6 +55,8 @@ def test_extract_uses_real_ingest_prompt_and_cache(bench_engine, tmp_path):
         assert first == again
         assert provider._call.call_count == 1
         assert "memory curator" in provider._call.call_args.args[0]
+        assert "D1:1" not in provider._call.call_args.args[0]
+        assert "has_answer" not in provider._call.call_args.args[0]
         assert "session:s1" in first[0]["tags"]
         assert first[0]["turn_provenance"] == "unknown"
         changed = session()
