@@ -57,13 +57,14 @@ class VectorStore:
     def search(self, query_vec: np.ndarray, limit: int = 10) -> list[dict[str, Any]]:
         """Find nearest neighbors. Returns results with cosine similarity scores."""
         vec_bytes = _serialize_f32(query_vec)
+        # Explicit k also works on SQLite < 3.41, whose virtual-table planner
+        # does not pass LIMIT constraints through to sqlite-vec.
         rows = self.db.conn.execute(
             """
             SELECT id, distance
             FROM node_vectors
-            WHERE embedding MATCH ?
+            WHERE embedding MATCH ? AND k = ?
             ORDER BY distance
-            LIMIT ?
             """,
             (vec_bytes, limit),
         ).fetchall()

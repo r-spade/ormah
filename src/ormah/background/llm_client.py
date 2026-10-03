@@ -58,6 +58,13 @@ _cached_adapter: LLMAdapter | None = None
 _adapter_initialised: bool = False
 
 
+def set_adapter(adapter: LLMAdapter | None) -> None:
+    """Install an explicit adapter (e.g. an isolated benchmark or test provider)."""
+    global _cached_adapter, _adapter_initialised
+    _cached_adapter = adapter
+    _adapter_initialised = True
+
+
 def reset_adapter() -> None:
     """Clear the cached adapter (useful for test isolation)."""
     global _cached_adapter, _adapter_initialised

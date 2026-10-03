@@ -1,0 +1,329 @@
+{
+  "manifest": {
+    "run_id": "locomo-extract-smoke10",
+    "parameters": {
+      "dataset": "locomo",
+      "mode": "extract",
+      "k": 30,
+      "limit": 10,
+      "question_type": null,
+      "category": null,
+      "conversation": 0,
+      "extract_provider": "claude-cli",
+      "extract_model": null,
+      "answer_provider": "claude-cli",
+      "answer_model": null,
+      "judge_provider": "codex",
+      "judge_model": null
+    },
+    "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "dataset_bytes": 2805274,
+    "timestamp": "2026-09-18T21:31:32.249554+00:00",
+    "ormah_version": "0.15.1",
+    "git_sha": "71094e83665da50d0e29b5d69cbd1470790e94c7",
+    "git_dirty": true,
+    "settings": {
+      "llm_provider": "none",
+      "embedding_provider": "local",
+      "embedding_model": "BAAI/bge-base-en-v1.5",
+      "embedding_dim": 768,
+      "fts_weight": 0.4,
+      "vector_weight": 0.6,
+      "similarity_threshold": 0.4,
+      "rrf_k": 60,
+      "fts_only_dampening": 0.5,
+      "min_result_score": 0.1,
+      "rrf_min_spread_ratio": 0.05,
+      "question_fts_weight_scale": 0.3,
+      "question_vector_weight_scale": 1.5,
+      "question_similarity_blend_weight": 0.85,
+      "similarity_blend_weight": 0.5,
+      "title_match_boost": 2.0,
+      "length_penalty_threshold": 300,
+      "recency_boost": 0.05,
+      "recency_half_life_days": 7.0,
+      "access_boost": 0.05,
+      "tier_boost_core": 0.1,
+      "tier_boost_working": 0.0,
+      "tier_boost_archival": -0.1,
+      "space_boost_global": 1.0,
+      "space_boost_other": 0.6,
+      "recall_min_relevance_score": 0.35,
+      "whisper_injection_gate": 0.45,
+      "whisper_reranker_enabled": false,
+      "whisper_out_enabled": false,
+      "claude_maintenance_enabled": false
+    },
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "phase_wall_s": {
+      "store": 13.187357684131712,
+      "answer": 0.023248695069923997,
+      "judge": 0.022837111027911305
+    },
+    "providers": {
+      "extract": {
+        "provider": "claude-cli",
+        "model": "sonnet",
+        "version": "2.1.220 (Claude Code)"
+      },
+      "answer": {
+        "provider": "claude-cli",
+        "model": "sonnet",
+        "version": "2.1.220 (Claude Code)"
+      },
+      "judge": {
+        "provider": "codex",
+        "model": "default",
+        "version": "codex-cli 0.154.0"
+      }
+    },
+    "invocations": [
+      {
+        "phases": [
+          "answer",
+          "judge",
+          "report",
+          "retrieve",
+          "store"
+        ],
+        "workers": 4,
+        "max_usd": 5.0,
+        "resume": false
+      }
+    ]
+  },
+  "overall": {
+    "questions": 10,
+    "retrieved": 0,
+    "scored": 0,
+    "accuracy": null,
+    "abstention_questions": 0,
+    "abstention_scored": 0,
+    "abstention_accuracy": null,
+    "recall@30": null,
+    "ndcg@30": null,
+    "retrieval_labeled": 0,
+    "production_recall@30": null,
+    "retrieval_p50_s": null,
+    "retrieval_p95_s": null,
+    "errors": {
+      "store": 10,
+      "retrieve": 0,
+      "answer": 10,
+      "judge": 10
+    }
+  },
+  "by_type": {
+    "1": {
+      "questions": 3,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 3,
+        "retrieve": 0,
+        "answer": 3,
+        "judge": 3
+      }
+    },
+    "2": {
+      "questions": 6,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 6,
+        "retrieve": 0,
+        "answer": 6,
+        "judge": 6
+      }
+    },
+    "3": {
+      "questions": 1,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 1,
+        "retrieve": 0,
+        "answer": 1,
+        "judge": 1
+      }
+    },
+    "4": {
+      "questions": 0,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "5": {
+      "questions": 0,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    }
+  },
+  "calls": {
+    "extract": {
+      "calls": 6,
+      "errors": 6,
+      "usage_unknown": 6,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 12991,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": 2.0459507749183103,
+      "latency_p95_s": 4.221589045599103,
+      "latency_total_s": 15.116476273164153
+    },
+    "answer": {
+      "calls": 0,
+      "errors": 0,
+      "usage_unknown": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 0,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": null,
+      "latency_p95_s": null,
+      "latency_total_s": 0
+    },
+    "judge": {
+      "calls": 0,
+      "errors": 0,
+      "usage_unknown": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 0,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": null,
+      "latency_p95_s": null,
+      "latency_total_s": 0
+    }
+  },
+  "wall_s": 13.233443490229547,
+  "publication_status": "smoke_validation_only_not_a_published_accuracy_claim",
+  "execution_measurements": {
+    "command_exit": 1,
+    "command_wall_s": 20.291097874054685,
+    "peak_rss_kib": 714192
+  },
+  "blocker": "Required claude --bare disables subscription OAuth in installed CLI; calls returned Not logged in. Zero questions scored; no successful answer/judge inference.",
+  "per_call_measurements": [
+    {
+      "item_id": "locomo:0:session_1",
+      "phase": "extract",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 2.1045113161671907,
+      "prompt_tokens_estimate": 1893
+    },
+    {
+      "item_id": "locomo:0:session_5",
+      "phase": "extract",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 2.025638455990702,
+      "prompt_tokens_estimate": 2007
+    },
+    {
+      "item_id": "locomo:0:session_2",
+      "phase": "extract",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.9671433290932328,
+      "prompt_tokens_estimate": 2120
+    },
+    {
+      "item_id": "locomo:0:session_2",
+      "phase": "extract",
+      "provider": "claude-cli",
+      "attempt": 2,
+      "latency_s": 4.927281622076407,
+      "prompt_tokens_estimate": 2120
+    },
+    {
+      "item_id": "locomo:0:session_4",
+      "phase": "extract",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 2.0456041989382356,
+      "prompt_tokens_estimate": 2244
+    },
+    {
+      "item_id": "locomo:0:session_3",
+      "phase": "extract",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 2.046297350898385,
+      "prompt_tokens_estimate": 2607
+    }
+  ],
+  "latency_caveat": "Legacy LoCoMo attempt 2 latency includes attempt 1 and retry backoff; its 4.927282 s is cumulative, not a separate-call duration. Final provider code measures attempts separately. Legacy raw-JSON authentication error was spuriously retried because its session UUID contained 429; final code extracts the result message before classifying retries."
+}
