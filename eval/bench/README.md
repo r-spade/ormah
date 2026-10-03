@@ -111,7 +111,8 @@ with guessed provenance.
   historical session dates; updated/accessed timestamps are current so FSRS does
   not discard the corpus merely because its dates are old. No auto-linking or
   production core-cap enforcement runs during seeding.
-* Seeding writes the file store, SQLite index and batched vectors. Embeddings use
+* Seeding writes the file store, rebuilds the isolated SQLite index once, and
+  inserts batched vectors. Embeddings use
   production title/content formatting and truncation (512 content characters by
   default). CPU batches group texts by length (16 at a time) to reduce padding;
   content-hash lookup restores node order. Full stored text, not just the embedded

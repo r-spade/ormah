@@ -22,9 +22,13 @@ def session():
 
 
 def test_raw_cache_and_backdated_retrieval(bench_engine, tmp_path, encoder):
+    bench_engine.builder.full_rebuild = Mock(wraps=bench_engine.builder.full_rebuild)
     cache = EmbeddingCache(tmp_path / "cache.sqlite", "fake")
     memories = raw_memories("locomo", session())
     seed_memories(bench_engine, memories, cache)
+    # clear_eval_db rebuilds the empty store, then seeding rebuilds all saved
+    # memories transactionally instead of one index transaction per turn.
+    assert bench_engine.builder.full_rebuild.call_count == 2
     node = bench_engine.file_store.load(memories[0]["id"])
     assert node.created.year == 2000
     assert (datetime.now(timezone.utc) - node.last_accessed).total_seconds() < 30
