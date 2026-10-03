@@ -25,6 +25,7 @@ Shared runtime environment variables:
 - `ORMAH_AUTH_TOKEN`: optional Bearer token, inherited at runtime, never written
   into generated host files.
 - `ORMAH_SPACE`: explicit project-space override for tools and whisper.
+- `ORMAH_WORKSPACE`: explicit workspace for otherwise unbound MCP/hook defaults.
 - `ORMAH_WHISPER_TIMEOUT`: total hook retrieval budget in seconds, default 2,
   clamped to 0.1–10. Host hooks may impose a tighter outer deadline.
 
@@ -42,3 +43,25 @@ remain. Reconnect after disconnect to change the Python installation path.
 
 Runtime assets are inside `src/ormah/integrations` and ship in both wheels and
 source distributions; a source checkout is not needed after installation.
+
+## Host guides and scope
+
+These host modules are delivered in separate integration PRs. Availability in
+`ormah agents list` depends on which modules are installed. Each guide records
+host versions, exact lifecycle evidence, setup scope and validation limits.
+
+| Host guide | Automatic context route / limitation | PR |
+| --- | --- | --- |
+| [Cursor](integration-cursor.md) | MCP only; per-prompt injection blocked | [#310](https://github.com/r-spade/ormah/pull/310), draft |
+| [OpenCode](integration-opencode.md) | Native `chat.message` plugin | [#311](https://github.com/r-spade/ormah/pull/311) |
+| [Copilot](integration-github-copilot.md) | VS Code Local `UserPromptSubmit`; CLI excluded | [#312](https://github.com/r-spade/ormah/pull/312) |
+| [OpenClaw](integration-openclaw.md) | `before_prompt_build` plugin, one selected workspace | [#313](https://github.com/r-spade/ormah/pull/313) |
+| [Cline](integration-cline.md) | VS Code `UserPromptSubmit`, one selected workspace | [#314](https://github.com/r-spade/ormah/pull/314) |
+| [Antigravity](integration-antigravity.md) | CLI `PreInvocation`; desktop transcript validation pending | [#315](https://github.com/r-spade/ormah/pull/315), draft |
+| [Kilo](integration-kilo.md) | Current shared CLI/VS Code `chat.message` plugin | [#316](https://github.com/r-spade/ormah/pull/316) |
+| [Hermes](integration-hermes.md) | Profile-bound `pre_llm_call` plugin | [#317](https://github.com/r-spade/ormah/pull/317) |
+| [Devin Desktop](integration-devin_desktop.md) | Local `UserPromptSubmit`; Cascade MCP only | [#318](https://github.com/r-spade/ormah/pull/318), draft |
+| [Kiro](integration-kiro.md) | Current IDE / CLI V3 `UserPromptSubmit` | [#319](https://github.com/r-spade/ormah/pull/319) |
+
+These configuration routes do not imply live authenticated host validation.
+The guides distinguish native binary/component execution from synthetic tests.
