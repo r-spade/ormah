@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -69,6 +70,19 @@ def prevent_tests_mutating_real_ormah_install(monkeypatch):
 
     monkeypatch.setattr(Path, "unlink", guarded_unlink)
     monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_from_global_env(monkeypatch, tmp_path):
+    """Stop the global ~/.config/ormah/.env and stray ORMAH_* OS vars from
+    leaking into bare Settings() during tests (env pollution, not regressions).
+    """
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(empty_env))
+    for key in list(os.environ):
+        if key.startswith("ORMAH_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture(scope="session", autouse=True)
