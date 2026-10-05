@@ -134,15 +134,36 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
         return None
 
 
-def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
+def _find_merge_candidates(
+    engine,
+    limit: int = 8,
+    *,
+    max_seeds: int | None = None,
+    delta: bool = False,
+    respect_checked: bool = True,
+):
     """Find node pairs that might be duplicates.
 
-    Returns up to *limit* pairs as
-    ``[{"node_a": {...}, "node_b": {...}, "similarity": float, "score": float,
-        "embedding_sim": float, "title_sim": float, "token_sim": float}]``.
+    ``delta=False`` (default — agent path): today's ``ORDER BY RANDOM()``
+    selection, unchanged; returns a candidate list.
+
+    ``delta=True`` (background run only, #81): seeds are nodes with ``seq``
+    above the ``duplicate_check_watermark``, oldest-first, bounded by
+    *max_seeds* (default: ``duplicate_check_max_nodes_per_run``). Vector
+    neighbors are NOT age-filtered. Returns ``(candidates, drained_seeds)``;
+    candidates carry ``seed_seq``. Only ``run_duplicate_detection`` advances
+    the watermark. ``limit`` stays pair-denominated in both modes.
+
+    ``respect_checked`` (default ``True``): skip pairs already present in
+    ``auto_link_checked``. Background dedup (``run_duplicate_detection``)
+    passes ``False`` — that table records auto_linker's LINK decisions
+    (including "no link"), not dedup verdicts, and relies on its own
+    seq-watermark for convergence instead.
+
     Does NOT call the LLM — just applies the same pre-filters as
     ``run_duplicate_detection`` (same type, composite score threshold).
     """
+    drained_seeds: list[tuple[str, int]] = []
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
@@ -150,20 +171,57 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
         settings = engine.settings
         encoder = get_encoder(settings)
         vec_store = VectorStore(engine.db)
-
         user_node_id = getattr(engine, "user_node_id", None)
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes ORDER BY RANDOM()").fetchall()
+
+        if delta:
+            from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+            if max_seeds is None:
+                max_seeds = settings.duplicate_check_max_nodes_per_run
+            watermark = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+            nodes = engine.db.conn.execute(
+                "SELECT id, content, title, type, seq FROM nodes "
+                "WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+                (watermark, max_seeds),
+            ).fetchall()
+        else:
+            # Legacy selection — byte-for-byte today's query (agent path).
+            nodes = engine.db.conn.execute(
+                "SELECT id, content, title, type, seq FROM nodes ORDER BY RANDOM()"
+            ).fetchall()
+
         checked: set[tuple[str, str]] = set()
         candidates: list[dict] = []
+        barrier_hit = False
 
         for node in nodes:
             if len(candidates) >= limit:
-                break
+                break  # pair budget hit before this seed: not drained
             if node["id"] == user_node_id:
+                if not barrier_hit:
+                    drained_seeds.append((node["id"], node["seq"]))
                 continue
 
             text = f"{node['title'] or ''} {node['content']}".strip()
             if not text:
+                if not barrier_hit:
+                    drained_seeds.append((node["id"], node["seq"]))
+                continue
+
+            # DRAIN BARRIER (overview invariant, mirrors upstream
+            # auto_linker.py): a seed with text but no persisted vector must
+            # not let the cursor advance past it — its pairs would be
+            # permanently skipped once the vector is backfilled. `continue`,
+            # not `break`: later seeds are still PROCESSED (liveness, mirrors
+            # auto_linker) but no further seed drains once the barrier is hit.
+            if delta and vec_store.get(node["id"]) is None:
+                if not barrier_hit:
+                    logger.warning(
+                        "duplicate delta stalled: node %s has no persisted vector (embedding "
+                        "backfill pending?); cursor parked at seq %s until it embeds",
+                        node["id"][:8], node["seq"],
+                    )
+                barrier_hit = True
                 continue
 
             query_vec = stored_or_encoded(
@@ -189,11 +247,12 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
                     continue
                 checked.add(pair)
 
-                already_checked = engine.db.conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
-                ).fetchone()
-                if already_checked:
-                    continue
+                if respect_checked:
+                    already_checked = engine.db.conn.execute(
+                        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                    ).fetchone()
+                    if already_checked:
+                        continue
 
                 embedding_sim = match["similarity"]
                 if embedding_sim < 0.25:
@@ -230,13 +289,21 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
                     "embedding_sim": round(embedding_sim, 3),
                     "title_sim": round(title_sim, 3),
                     "token_sim": round(token_sim, 3),
+                    "seed_seq": node["seq"],
                 })
 
+            if len(candidates) >= limit:
+                break  # pair budget hit mid-seed: possibly partial, not drained
+            if not barrier_hit:
+                drained_seeds.append((node["id"], node["seq"]))
+
+        if delta:
+            return candidates, drained_seeds
         return candidates
 
     except Exception as e:
         logger.warning("_find_merge_candidates failed: %s", e)
-        return []
+        return ([], []) if delta else []
 
 
 @serialized_memory_job
@@ -249,141 +316,119 @@ def run_duplicate_detection(engine) -> None:
     saying ``is_duplicate: true``.
     """
     try:
-        from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
-
         settings = engine.settings
-        encoder = get_encoder(settings)
-        vec_store = VectorStore(engine.db)
 
         if not settings.llm_enabled:
             logger.debug("Duplicate detection skipped: LLM not enabled")
             return
 
-        user_node_id = getattr(engine, "user_node_id", None)
+        from ormah.background.watermark import (
+            DUPLICATE_WATERMARK_KEY, get_watermark, set_watermark,
+        )
 
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes").fetchall()
-        checked = set()
+        candidates, drained_seeds = _find_merge_candidates(
+            engine, limit=10_000, delta=True, respect_checked=False,
+        )
+        failed_seed_seqs: set[int] = set()
         proposals_created = 0
 
-        for node in nodes:
-            if node["id"] == user_node_id:
+        for cand in candidates:
+            # Re-fetch FULL rows: finder previews are truncated to 400 chars and
+            # merged_content must never be generated from truncated text.
+            node = engine.db.conn.execute(
+                "SELECT id, content, title, type FROM nodes WHERE id = ?",
+                (cand["node_a"]["id"],),
+            ).fetchone()
+            other = engine.db.conn.execute(
+                "SELECT id, content, title, type FROM nodes WHERE id = ?",
+                (cand["node_b"]["id"],),
+            ).fetchone()
+            if node is None or other is None:
+                continue  # merged/deleted earlier in this same run: drained
+
+            embedding_sim = cand["embedding_sim"]
+            title_sim = cand["title_sim"]
+            token_sim = cand["token_sim"]
+            score = cand["score"]
+
+            # --- LLM confirmation (mandatory) ---
+            llm_result = _llm_check_duplicate(settings, node, other)
+            if llm_result is None:
+                # LLM unavailable for this pair — skip, park the seed
+                failed_seed_seqs.add(cand["seed_seq"])
                 continue
-            text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
+            if not llm_result.get("is_duplicate"):
+                logger.debug(
+                    "LLM rejected duplicate for %s / %s: %s",
+                    node["id"][:8], other["id"][:8],
+                    llm_result.get("reason", ""),
+                )
                 continue
 
-            query_vec = stored_or_encoded(
-                vec_store,
-                encoder,
-                node["id"],
-                node["title"],
-                node["content"],
-                settings.embedding_max_content_chars,
-            )
-            # Fetch more candidates since we use a lower embedding pre-filter
-            similar = vec_store.search(query_vec, limit=6)
+            # Extract LLM-generated merge content
+            merged_content = llm_result.get("merged_content")
+            merged_title = llm_result.get("merged_title")
+            reason = llm_result.get("reason", "LLM confirmed duplicate")
+            reason += f" (score={score:.3f}, embed={embedding_sim:.2f}, title={title_sim:.2f}, token={token_sim:.2f})"
 
-            for match in similar:
-                if match["id"] == node["id"]:
-                    continue
-                if match["id"] == user_node_id:
-                    continue
-
-                pair = tuple(sorted([node["id"], match["id"]]))
-                if pair in checked:
-                    continue
-                checked.add(pair)
-
-                embedding_sim = match["similarity"]
-                # Pre-filter: skip very dissimilar pairs to avoid wasted work
-                if embedding_sim < 0.25:
-                    continue
-
-                # Same type only
-                other = engine.db.conn.execute(
-                    "SELECT type, title, content FROM nodes WHERE id = ?", (match["id"],)
-                ).fetchone()
-                if other is None or other["type"] != node["type"]:
-                    continue
-
-                # Compute multi-signal score
-                title_sim = _title_similarity(node["title"], other["title"])
-                other_text = f"{other['title'] or ''} {other['content']}".strip()
-                token_sim = _token_overlap(text, other_text)
-                score = _composite_score(embedding_sim, title_sim, token_sim)
-
-                if score < _COMPOSITE_THRESHOLD:
-                    continue
-
-                # --- LLM confirmation (mandatory) ---
-                llm_result = _llm_check_duplicate(settings, node, other)
-                if llm_result is None:
-                    # LLM unavailable for this pair — skip
-                    continue
-                if not llm_result.get("is_duplicate"):
-                    logger.debug(
-                        "LLM rejected duplicate for %s / %s: %s",
-                        node["id"][:8], match["id"][:8],
-                        llm_result.get("reason", ""),
+            # Auto-merge for high-confidence duplicates
+            if score >= engine.settings.auto_merge_threshold:
+                try:
+                    result = engine.execute_merge(
+                        node["id"], other["id"],
+                        merged_content=merged_content,
+                        merged_title=merged_title,
                     )
+                    logger.info("Auto-merged: %s", result)
+                    proposals_created += 1
                     continue
+                except Exception as e:
+                    logger.warning("Auto-merge failed for %s / %s: %s",
+                                   node["id"][:8], other["id"][:8], e)
 
-                # Extract LLM-generated merge content
-                merged_content = llm_result.get("merged_content")
-                merged_title = llm_result.get("merged_title")
-                reason = llm_result.get("reason", "LLM confirmed duplicate")
-                reason += f" (score={score:.3f}, embed={embedding_sim:.2f}, title={title_sim:.2f}, token={token_sim:.2f})"
+            # Check no existing merge proposal
+            existing = engine.db.conn.execute(
+                "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending' "
+                "AND (source_nodes LIKE ? OR source_nodes LIKE ?)",
+                (f"%{node['id']}%", f"%{other['id']}%"),
+            ).fetchone()
 
-                # Auto-merge for high-confidence duplicates
-                if score >= engine.settings.auto_merge_threshold:
-                    try:
-                        result = engine.execute_merge(
-                            node["id"], match["id"],
-                            merged_content=merged_content,
-                            merged_title=merged_title,
-                        )
-                        logger.info("Auto-merged: %s", result)
-                        proposals_created += 1
-                        continue
-                    except Exception as e:
-                        logger.warning("Auto-merge failed for %s / %s: %s",
-                                       node["id"][:8], match["id"][:8], e)
+            if existing:
+                continue
 
-                # Check no existing merge proposal
-                existing = engine.db.conn.execute(
-                    "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending' "
-                    "AND (source_nodes LIKE ? OR source_nodes LIKE ?)",
-                    (f"%{node['id']}%", f"%{match['id']}%"),
-                ).fetchone()
+            # Build proposed_action — include merged content preview when available
+            proposed_action = f"Merge two {node['type']} memories into one"
+            if merged_content is not None:
+                proposed_action += (
+                    f"\n\nMerged content preview:\n---\n"
+                    f"{merged_title or ''}\n{merged_content}\n---"
+                )
 
-                if existing:
-                    continue
-
-                # Build proposed_action — include merged content preview when available
-                proposed_action = f"Merge two {node['type']} memories into one"
-                if merged_content is not None:
-                    proposed_action += (
-                        f"\n\nMerged content preview:\n---\n"
-                        f"{merged_title or ''}\n{merged_content}\n---"
-                    )
-
-                proposal_id = str(uuid.uuid4())
-                with engine.db.transaction() as conn:
-                    conn.execute(
-                        "INSERT INTO proposals (id, type, status, source_nodes, proposed_action, reason, created) "
-                        "VALUES (?, 'merge', 'pending', ?, ?, ?, ?)",
-                        (
-                            proposal_id,
-                            json.dumps([node["id"], match["id"]]),
-                            proposed_action,
-                            reason,
-                            datetime.now(timezone.utc).isoformat(),
-                        ),
-                    )
-                proposals_created += 1
+            proposal_id = str(uuid.uuid4())
+            with engine.db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO proposals (id, type, status, source_nodes, proposed_action, reason, created) "
+                    "VALUES (?, 'merge', 'pending', ?, ?, ?, ?)",
+                    (
+                        proposal_id,
+                        json.dumps([node["id"], other["id"]]),
+                        proposed_action,
+                        reason,
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+            proposals_created += 1
         if proposals_created:
             logger.info("Duplicate merger created %d proposals/auto-merges", proposals_created)
+
+        # ponytail: contiguous-prefix advance; deterministic failure parks the
+        # cursor — dead-letter escape hatch is upstream #122.
+        new_watermark = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+        for _seed_id, seed_seq in drained_seeds:  # ascending seq
+            if seed_seq in failed_seed_seqs:
+                break
+            new_watermark = seed_seq
+        set_watermark(engine, DUPLICATE_WATERMARK_KEY, new_watermark)
 
     except Exception as e:
         logger.warning("Duplicate detection failed: %s", e)
