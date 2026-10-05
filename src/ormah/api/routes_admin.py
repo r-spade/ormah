@@ -28,6 +28,9 @@ _TASK_RUNNERS = {
     "memory_backup": ("ormah.backup", "run_auto_backup"),
     "cloud_backup": ("ormah.cloud.jobs", "run_cloud_backup"),
     "restore_verification": ("ormah.cloud.jobs", "run_restore_verification"),
+    "synthetic_pattern_monitor": (
+        "ormah.background.synthetic_pattern_monitor", "run_synthetic_pattern_monitor",
+    ),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -43,6 +46,7 @@ _TASK_DESCRIPTIONS = {
     "memory_backup": "Creates a local backup of memory source files when one is due.",
     "cloud_backup": "Encrypts and uploads a due cloud backup without changing the sync head.",
     "restore_verification": "Downloads, decrypts, rebuilds, and searches the latest cloud backup.",
+    "synthetic_pattern_monitor": "Detects synthetic-prompt patterns that stopped matching and proposes removing or repairing them. Proposes only — never edits your config (#143).",
 }
 
 # Order for sleep cycle (full maintenance pass)

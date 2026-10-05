@@ -231,6 +231,7 @@ class Database:
 
             self._migrate_whisper_log_schema(conn)
             self._migrate_retrieval_event_schema(conn)
+            self._migrate_whisper_decisions_schema(conn)
 
             self._migrate_affinity_schema(conn, existing_tables)
             self._ensure_signals_schema(conn)
@@ -271,6 +272,15 @@ class Database:
         for name, column_type in additions.items():
             if name not in cols:
                 conn.execute(f"ALTER TABLE whisper_log ADD COLUMN {name} {column_type}")
+
+    def _migrate_whisper_decisions_schema(self, conn: sqlite3.Connection) -> None:
+        """Record which synthetic pattern fired, so rot detection has a signal (#143)."""
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(whisper_decisions)").fetchall()
+        }
+        if "matched_pattern" not in cols:
+            conn.execute("ALTER TABLE whisper_decisions ADD COLUMN matched_pattern TEXT")
 
     def _migrate_retrieval_event_schema(self, conn: sqlite3.Connection) -> None:
         """Normalize prompt payloads without rebuilding exact feedback rows."""

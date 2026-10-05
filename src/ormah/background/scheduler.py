@@ -124,6 +124,17 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.background.synthetic_pattern_monitor import run_synthetic_pattern_monitor
+
+    scheduler.add_job(
+        tracked(tracker, "synthetic_pattern_monitor", run_synthetic_pattern_monitor, engine),
+        "interval",
+        minutes=s.whisper_pattern_monitor_interval_minutes,
+        id="synthetic_pattern_monitor",
+        name="Synthetic pattern monitor",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     from ormah.backup import run_auto_backup
 
     scheduler.add_job(
