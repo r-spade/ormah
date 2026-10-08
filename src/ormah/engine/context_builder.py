@@ -591,18 +591,25 @@ class ContextBuilder:
         reranker_before_count = 0
         reranker_after_count = 0
 
-        # Per-intent adjustments: temporal queries rely on the created_after
-        # filter for relevance rather than semantic similarity, so we relax
-        # both the min-score threshold and the reranker threshold.
-        has_temporal = intent is not None and "temporal" in intent.categories
+        # Per-intent adjustments: a broad recap ("what did we do today") is
+        # underspecified by design — its relevance comes from the time window,
+        # not semantic similarity, so the gates below relax. Only a
+        # high-confidence recap match earns this (PromptIntent.broad_recap);
+        # an embedding-inferred temporal match narrows the search window but
+        # leaves every gate up (upstream issue #304).
+        broad_recap = intent is not None and intent.broad_recap
+        def _supplement_vouched(r: dict) -> bool:
+            """Temporal supplements ride along with recap relaxation only."""
+            return broad_recap and r.get("source") == "temporal"
 
-        # Apply min-score threshold (relaxed for temporal queries whose
-        # vague phrasing like "what did we do today" scores poorly against
-        # specific memory content — the created_after filter already ensures
-        # temporal relevance).  Temporal-supplement results (source="temporal")
-        # are always kept — they were fetched by SQL recency, not semantic
-        # similarity, so their low base score (0.001) is not meaningful.
-        if has_temporal:
+        # Apply min-score threshold (relaxed for broad recaps whose vague
+        # phrasing like "what did we do today" scores poorly against specific
+        # memory content — the created_after filter already ensures temporal
+        # relevance). Temporal-supplement results (source="temporal") ride
+        # along with the recap relaxation only — they were fetched by SQL
+        # recency, not semantic similarity, so their low base score (0.001)
+        # is not meaningful.
+        if broad_recap:
             effective_min_score = min(min_score, 0.30)
         else:
             effective_min_score = min_score
@@ -617,7 +624,7 @@ class ContextBuilder:
             r for r in search_results
             if r.get("score", 0) >= effective_min_score
             or r.get("raw_cosine", 0.0) >= effective_min_score
-            or r.get("source") == "temporal"
+            or _supplement_vouched(r)
         ]
         _mark_removed(before_min_score, search_results, "pre_rerank_floor")
         post_min_score_count = len(search_results)
@@ -651,7 +658,7 @@ class ContextBuilder:
         # pre_gate_candidates captures the full set after boost (used by
         # exploration slot and whisper_log logging below).
         pre_gate_candidates: list[dict] = []
-        if not has_temporal and reranker_enabled and search_results and prompt_vec is not None:
+        if not broad_recap and reranker_enabled and search_results and prompt_vec is not None:
             try:
                 boosted = _apply_affinity_boost(search_results)
                 # Apply 0.40 floor AFTER boost (spec: reranker_min_score is now a post-boost floor).
@@ -708,14 +715,14 @@ class ContextBuilder:
                     return True
                 # Recency-vouched results: relevance comes from the time
                 # filter, not semantics — never demand a semantic voucher.
-                if r.get("source") == "temporal":
+                if _supplement_vouched(r):
                     return True
-                # Temporal and follow-up prompts are underspecified by design
+                # Broad recaps and follow-up prompts are underspecified by design
                 # ("what did we do today", "and the second one?") — the CE
                 # judged them against the raw prompt, so its verdict is not a
                 # fair voucher. Keep pre-contract behavior for them: pass
                 # when nothing overlapped, drop when other candidates did.
-                if has_temporal or follow_up_mode:
+                if broad_recap or follow_up_mode:
                     return not overlapping_ids
                 ce = r.get("ce_absolute")
                 if ce is not None:
@@ -738,12 +745,12 @@ class ContextBuilder:
         # Injection gate: require at least one result with a strong enough
         # ABSOLUTE relevance signal to justify injection (see _gate_score —
         # the blended score is rank-relative and cannot reject a weak query's
-        # least-bad match; it stays the ordering key only). Temporal queries
-        # are exempt (they rely on time filtering, not semantic relevance).
+        # least-bad match; it stays the ordering key only). Broad recaps are
+        # exempt (they rely on time filtering, not semantic relevance).
         max_gate_score: float | None = None
         if search_results:
             max_gate_score = max(_gate_score(r) for r in search_results)
-        if not has_temporal and search_results:
+        if not broad_recap and search_results:
             before_injection_gate = search_results
             if max_gate_score < injection_gate:
                 logger.info(
@@ -767,7 +774,7 @@ class ContextBuilder:
         # never manufacture an injection from nothing.
         # CE gate: skip candidates the cross-encoder strongly rejected
         # (ce < -8 means "definitely not relevant") to prevent noise injection.
-        if (not has_temporal
+        if (not broad_recap
                 and getattr(self.engine.settings, "whisper_exploration_enabled", True)
                 and prompt_vec is not None
                 and search_results
@@ -815,14 +822,14 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning("Exploration slot failed: %s", e)
 
-        # Temporal queries: re-sort by (space priority, recency).
+        # Broad recaps: re-sort by (space priority, recency).
         # Semantic scores already filtered noise via the 0.45 threshold,
         # but users expect chronological ordering for "what did we do today".
         # Space priority stays the primary key so a newer other-project memory
         # cannot outrank an older current-project one purely by recency — both
         # semantic hits and temporal supplements carry _space_factor from the
         # recall layer.
-        if has_temporal and search_results:
+        if broad_recap and search_results:
             search_results.sort(
                 key=lambda r: (r.get("_space_factor", 1.0), r["node"].get("created") or ""),
                 reverse=True,
@@ -1037,13 +1044,13 @@ class ContextBuilder:
             result = _WHISPER_FRAMING + "\n\n" + body
 
         logger.info(
-            "Whisper diagnostics: prompt=%r intent=%s identity_only=%s temporal=%s "
+            "Whisper diagnostics: prompt=%r intent=%s identity_only=%s recap=%s "
             "candidates=%d post_min_score=%d reranker_enabled=%s reranker_applied=%s "
             "reranker_before=%d reranker_after=%d final=%d injected=%s",
             prompt_snippet,
             intent.categories if intent is not None else None,
             identity_only,
-            has_temporal,
+            broad_recap,
             initial_candidate_count,
             post_min_score_count,
             reranker_enabled,

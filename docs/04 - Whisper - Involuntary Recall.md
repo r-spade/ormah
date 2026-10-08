@@ -73,7 +73,9 @@ The prompt is classified first. That classification drives later branching:
 - conversational-only prompts skip injection entirely
 - continuation prompts enable search-query enrichment
 - identity prompts skip the reranker path
-- temporal prompts relax some thresholds and are later sorted by recency
+- broad-recap prompts (a high-confidence temporal match) relax some thresholds
+  and are later sorted by recency; an inferred temporal match only narrows the
+  search window and leaves every gate up
 
 ### 3. Topic-shift skip only applies to non-follow-ups
 
@@ -103,7 +105,7 @@ The builder calls structured recall with:
 ### 7. Thresholds and reranking
 
 - base whisper min relevance score: `0.45`
-- temporal queries can relax the effective floor
+- broad recaps can relax the effective floor
 - reranker is enabled by default
 - reranker is **skipped for identity-only queries**
 - reranker model default: `Xenova/ms-marco-MiniLM-L-6-v2`
@@ -127,7 +129,7 @@ This step exists because semantic retrieval can surface broadly related memories
 
 The hard gate is controlled by `whisper_injection_gate`, which currently defaults to `0.50`, not `0.55`.
 
-- if the best non-temporal result is below the gate: whisper returns empty
+- if the best non-recap result is below the gate: whisper returns empty
 - otherwise weak candidates below the gate are removed
 
 ### 11. Exploration slot is optional
