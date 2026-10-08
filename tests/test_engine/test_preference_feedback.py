@@ -99,7 +99,7 @@ def _unit_builder(mock_graph, main_results, preference_results, prompt_vec=None)
     engine = MagicMock()
     engine.settings = _unit_settings()
     engine.has_searchable_preferences.return_value = True
-    engine.recall_search_structured.side_effect = [main_results, preference_results]
+    engine._search_structured.side_effect = [main_results, preference_results]
     engine.db = MagicMock()
     engine.db.conn = mock_graph.conn
     encoder = MagicMock()
@@ -161,7 +161,7 @@ def test_real_negative_feedback_suppresses_preference_applicability(engine):
         "raw_cosine": 0.8,
         "source": "hybrid",
     }
-    engine.recall_search_structured = MagicMock(
+    engine._search_structured = MagicMock(
         side_effect=[
             [main_result],
             [preference_result],
@@ -169,7 +169,7 @@ def test_real_negative_feedback_suppresses_preference_applicability(engine):
             [preference_result],
         ]
     )
-    model = SimpleNamespace(rerank=lambda _query, docs: [-4.08] * len(docs))
+    model = SimpleNamespace(rerank=lambda _query, docs, **kwargs: [-4.08] * len(docs))
     lifecycle_before = _lifecycle_snapshot(engine, node_id)
 
     def whisper():
@@ -334,7 +334,7 @@ def test_already_admitted_preference_is_not_duplicated_or_refetched(mock_graph):
 
     assert ids == [node_id]
     assert result.count("id: pref-alr") == 1
-    assert engine.recall_search_structured.call_count == 2
+    assert engine._search_structured.call_count == 2
     batch.assert_called_once_with(mock_graph.conn, [node_id])
 
 
@@ -569,5 +569,5 @@ def test_disabled_preference_channel_does_not_do_affinity_work(
             preference_max_nodes=1,
         )
 
-    assert engine.recall_search_structured.call_count == 1
+    assert engine._search_structured.call_count == 1
     batch.assert_not_called()

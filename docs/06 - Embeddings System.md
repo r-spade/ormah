@@ -88,6 +88,67 @@ model.embed("Chose SQLite over Postgres for local-first design")
 
 **Lazy loading**: Model is downloaded and loaded on first `encode()` call. Subsequent calls use a module-level `_model_cache` singleton keyed by model name.
 
+### Local inference memory limits
+
+Local inference uses two process-wide reusable worker threads
+(`embeddings/runtime.py`): one for whisper and other model work, and one
+reserved for deliberate recall. The engine's `recall_search`, `recall_node`, and
+`recall_search_structured` entry points select the recall lane, covering API,
+MCP, UI, and direct engine callers. Whisper uses the neutral structured-search
+helper; its single-text encodes and reranks stay on the general lane.
+UI search shares the recall worker with agent recall, so these requests can
+queue behind each other. Setup preloading uses the same model caches and
+worker policy, including when invoked by the running desktop sidecar.
+
+A scoped request context is copied through AnyIO and into inference workers,
+then reset after completion or failure. Each lane runs one item at a time,
+with at most two local inference items active across the process. Nested calls
+execute inline on the current worker to avoid deadlock. FastEmbed's lazy
+iterators are consumed before that item completes. Construction locks publish
+fully initialized shared model instances without serializing warm inference.
+Model caches retain their existing process lifetime; engine shutdown does not
+unload process-wide models or shut down workers used by other engine instances.
+
+Embedding and reranker batches contain at most eight inputs. `encode_batch`
+clamps positive caller-supplied `batch_size` values to eight, including its
+historical default of 32. Every input is processed in order, and query text
+remains intact for the tokenizer's existing token window (512 tokens for the
+default BGE and MS MARCO models).
+
+Both local models receive FastEmbed's top-level `enable_cpu_mem_arena=False`
+option, available since FastEmbed 0.7.4. Passing `session_options=` to these
+FastEmbed wrappers is silently ignored. The worker and batch limits bound
+inference concurrency, not total process RSS or native thread counts. ONNX
+Runtime and the system allocator can still retain memory. Recalls may queue
+behind other recalls, wait for cold model construction, and compete for CPU
+with whisper. Remote embedding providers retain their existing behavior.
+
+For opt-in diagnostics, enable DEBUG on `ormah.embeddings.runtime`. Each item
+emits start and end records with an `inference` extra field. Both contain the
+operation, request origin, and monotonic enqueue/start timestamps; the end
+record also contains the end timestamp, queue wait, and execution duration.
+Neither contains query or document text. Execution time includes model loading
+when cold and CPU contention when busy. A structured logging handler can
+retain these fields, as the benchmark script does.
+
+On Linux/glibc, operators can separately evaluate `MALLOC_ARENA_MAX=2` in the
+server process environment to limit allocator arenas. It is optional, may
+trade allocator throughput for memory, and is not set by Ormah. A Python worker
+is neither one CPU core nor exactly one allocator arena.
+
+Issue [#322](https://github.com/r-spade/ormah/issues/322) can be reproduced in
+a fresh process against cached real models and an isolated temporary store:
+
+```bash
+PYTHONPATH=src python scripts/diag/local_inference_memory.py \
+  --cache-dir /path/to/model-cache --nodes 45 --concurrency 2 --rounds 1 \
+  --rss-cap-mib 2800
+```
+
+The related startup re-embedding interruption described in #322 is separate:
+the current rebuild computes all vectors before persisting chunks. These local
+inference limits do not add restart checkpoints to that rebuild.
+
 ### Why BGE?
 
 - Runs entirely on CPU (no GPU needed)
