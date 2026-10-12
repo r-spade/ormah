@@ -13,10 +13,15 @@ __all__ = [
 ]
 
 
-def get_adapter(settings) -> LLMAdapter | None:
+def get_adapter(settings, num_ctx: int | None = None) -> LLMAdapter | None:
     """Build an adapter from the application settings.
 
     Returns ``None`` when ``llm_provider`` is ``"none"``.
+
+    ``num_ctx`` is a parameter rather than a settings read on purpose: this factory builds the
+    adapter SHARED by every maintenance job, and wiring a large input window unconditionally
+    would give small pair-judging calls a large KV cache for no benefit. Only the consolidation
+    route opts in (#192).
     """
     provider = settings.llm_provider
     timeout = getattr(settings, "llm_timeout_seconds", 60)
@@ -29,6 +34,7 @@ def get_adapter(settings) -> LLMAdapter | None:
             base_url=settings.llm_base_url,
             timeout=timeout,
             num_predict=getattr(settings, "llm_num_predict", 4096),
+            num_ctx=num_ctx,
         )
 
     if provider == "litellm":
