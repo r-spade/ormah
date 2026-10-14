@@ -328,7 +328,7 @@ class TestConfigureClaudeCodeMcp:
     def test_writes_mcp_config_to_claude_json(self, tmp_path):
         config_path = str(tmp_path / ".claude.json")
 
-        with patch("ormah.setup.shutil.which", return_value=None), \
+        with patch("ormah.setup._find_binary", return_value=None), \
              patch("ormah.setup.subprocess.run") as mock_run, \
              patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
@@ -346,7 +346,7 @@ class TestConfigureClaudeCodeMcp:
         with open(config_path, "w") as f:
             json.dump({"mcpServers": {"fetch": {"command": "uvx"}}}, f)
 
-        with patch("ormah.setup.shutil.which", return_value=None), \
+        with patch("ormah.setup._find_binary", return_value=None), \
              patch("ormah.setup.subprocess.run") as mock_run, \
              patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
@@ -886,7 +886,7 @@ class TestConfigureClaudeDesktop:
 class TestConfigureCodexMcp:
     def test_writes_mcp_config_to_codex_toml(self, tmp_path):
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -910,7 +910,7 @@ class TestConfigureCodexMcp:
         )
 
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -935,7 +935,7 @@ class TestConfigureCodexMcp:
         )
 
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
