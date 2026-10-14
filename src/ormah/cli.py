@@ -33,6 +33,25 @@ import sys
 from pathlib import Path
 
 
+def _cmd_eval_bench(args):
+    # Console entry points omit the checkout root from sys.path. Only discover
+    # eval alongside this source file, never an arbitrary working directory.
+    checkout = Path(__file__).resolve().parents[2]
+    if (checkout / "eval" / "bench" / "cli.py").is_file():
+        sys.path.insert(0, str(checkout))
+    try:
+        from eval.bench.cli import cmd_eval_bench as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.bench", "eval.bench.cli"}:
+            raise
+        print(
+            "The benchmark harness is not installed in the published Ormah runtime.\n"
+            "Use a source checkout or editable dev install to run 'ormah eval bench'."
+        )
+        sys.exit(1)
+    _cmd(args)
+
+
 def _cmd_eval_whisper_run(args):
     try:
         from eval.whisper.cli import cmd_eval_whisper_run as _cmd
@@ -1026,6 +1045,34 @@ def main():
 
     ev_rc_import = ev_rc_sub.add_parser("import-labels", help="Merge labels.jsonl into corpus ground truth")
     ev_rc_import.set_defaults(func=_cmd_eval_recall_import)
+
+    ev_bench = ev_sub.add_parser("bench", help="Public LongMemEval/LoCoMo benchmarks")
+    ev_bench_sub = ev_bench.add_subparsers(dest="eval_bench_cmd", required=True)
+    bench_download = ev_bench_sub.add_parser("download", help="Download public datasets")
+    bench_download.add_argument("--dataset", choices=["longmemeval", "locomo", "all"], default="all")
+    bench_download.set_defaults(func=_cmd_eval_bench)
+    bench_run = ev_bench_sub.add_parser("run", help="Run resumable benchmark phases")
+    bench_run.add_argument("dataset", choices=["longmemeval", "locomo"])
+    bench_run.add_argument("--mode", choices=["raw", "extract"], default="raw")
+    bench_run.add_argument("--k", type=int, default=30)
+    bench_run.add_argument("--phase", default="free", help="Comma-separated phases, or all; default: free")
+    bench_run.add_argument("--limit", type=int)
+    bench_run.add_argument("--question-type")
+    bench_run.add_argument("--category", type=int, choices=range(1, 6))
+    bench_run.add_argument("--conversation", type=int, help="Zero-based LoCoMo conversation index")
+    bench_run.add_argument("--workers", type=int, default=4)
+    bench_run.add_argument("--max-usd", type=float, default=5.0)
+    bench_run.add_argument("--run-id")
+    bench_run.add_argument("--resume", action="store_true")
+    for phase, provider in (("extract", "claude-cli"), ("answer", "claude-cli"), ("judge", "codex")):
+        bench_run.add_argument(f"--{phase}-provider", choices=["anthropic", "claude-cli", "codex"],
+                               default=provider)
+        bench_run.add_argument(f"--{phase}-model")
+    bench_run.set_defaults(func=_cmd_eval_bench)
+    bench_report = ev_bench_sub.add_parser("report", help="Rebuild report from run journals")
+    bench_report.add_argument("run_id")
+    bench_report.add_argument("--json", action="store_true")
+    bench_report.set_defaults(func=_cmd_eval_bench)
 
     args = p.parse_args()
 

@@ -1,0 +1,263 @@
+{
+  "manifest": {
+    "run_id": "locomo-raw-free-v2",
+    "parameters": {
+      "dataset": "locomo",
+      "mode": "raw",
+      "k": 30,
+      "limit": null,
+      "question_type": null,
+      "category": null,
+      "conversation": null,
+      "extract_provider": "claude-cli",
+      "extract_model": null,
+      "answer_provider": "claude-cli",
+      "answer_model": null,
+      "judge_provider": "codex",
+      "judge_model": null
+    },
+    "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "dataset_bytes": 2805274,
+    "timestamp": "2026-09-18T21:34:26.311749+00:00",
+    "ormah_version": "0.15.1",
+    "git_sha": "71094e83665da50d0e29b5d69cbd1470790e94c7",
+    "git_dirty": true,
+    "settings": {
+      "llm_provider": "none",
+      "embedding_provider": "local",
+      "embedding_model": "BAAI/bge-base-en-v1.5",
+      "embedding_dim": 768,
+      "fts_weight": 0.4,
+      "vector_weight": 0.6,
+      "similarity_threshold": 0.4,
+      "rrf_k": 60,
+      "fts_only_dampening": 0.5,
+      "min_result_score": 0.1,
+      "rrf_min_spread_ratio": 0.05,
+      "question_fts_weight_scale": 0.3,
+      "question_vector_weight_scale": 1.5,
+      "question_similarity_blend_weight": 0.85,
+      "similarity_blend_weight": 0.5,
+      "title_match_boost": 2.0,
+      "length_penalty_threshold": 300,
+      "recency_boost": 0.05,
+      "recency_half_life_days": 7.0,
+      "access_boost": 0.05,
+      "tier_boost_core": 0.1,
+      "tier_boost_working": 0.0,
+      "tier_boost_archival": -0.1,
+      "space_boost_global": 1.0,
+      "space_boost_other": 0.6,
+      "recall_min_relevance_score": 0.35,
+      "whisper_injection_gate": 0.45,
+      "whisper_reranker_enabled": false,
+      "whisper_out_enabled": false,
+      "claude_maintenance_enabled": false
+    },
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "phase_wall_s": {
+      "store": 684.9413523036055,
+      "retrieve": 204.73923014546745
+    },
+    "providers": {},
+    "invocations": [
+      {
+        "phases": [
+          "report",
+          "retrieve",
+          "store"
+        ],
+        "workers": 4,
+        "max_usd": 5.0,
+        "resume": false
+      }
+    ],
+    "artifact_corrections": [
+      "Restored omitted node tags from the exact saved haystack, matched by ranked node ID. Ranked IDs, scores, content, dates and latency are unchanged. Added batched tag hydration to retrieve.py and regression assertions. Original tagless snapshots remain earlier in the journal."
+    ]
+  },
+  "overall": {
+    "questions": 1986,
+    "retrieved": 1986,
+    "scored": 0,
+    "accuracy": null,
+    "abstention_questions": 446,
+    "abstention_scored": 0,
+    "abstention_accuracy": null,
+    "recall@30": 0.7382229318081164,
+    "ndcg@30": 0.47043550481345514,
+    "retrieval_labeled": 1982,
+    "production_recall@30": 0.7382229318081164,
+    "retrieval_p50_s": 0.0945113964844495,
+    "retrieval_p95_s": 0.13801797293126583,
+    "errors": {
+      "store": 0,
+      "retrieve": 0,
+      "answer": 0,
+      "judge": 0
+    }
+  },
+  "by_type": {
+    "1": {
+      "questions": 282,
+      "retrieved": 282,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": 0.5893512997516357,
+      "ndcg@30": 0.3816942361313331,
+      "retrieval_labeled": 282,
+      "production_recall@30": 0.5893512997516357,
+      "retrieval_p50_s": 0.09197184746153653,
+      "retrieval_p95_s": 0.13224057058105246,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "2": {
+      "questions": 321,
+      "retrieved": 321,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": 0.8115264797507789,
+      "ndcg@30": 0.5940268345680358,
+      "retrieval_labeled": 321,
+      "production_recall@30": 0.8115264797507789,
+      "retrieval_p50_s": 0.09315338009037077,
+      "retrieval_p95_s": 0.1346560879610479,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "3": {
+      "questions": 96,
+      "retrieved": 96,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": 0.45428388746803067,
+      "ndcg@30": 0.2851544548592389,
+      "retrieval_labeled": 92,
+      "production_recall@30": 0.45428388746803067,
+      "retrieval_p50_s": 0.10384337289724499,
+      "retrieval_p95_s": 0.14149140450172126,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "4": {
+      "questions": 841,
+      "retrieved": 841,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": 0.8277843836702339,
+      "ndcg@30": 0.5275071333459053,
+      "retrieval_labeled": 841,
+      "production_recall@30": 0.8277843836702339,
+      "retrieval_p50_s": 0.0946807221043855,
+      "retrieval_p95_s": 0.13797838799655437,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "5": {
+      "questions": 446,
+      "retrieved": 446,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 446,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": 0.6692825112107623,
+      "ndcg@30": 0.3681952310850589,
+      "retrieval_labeled": 446,
+      "production_recall@30": 0.6692825112107623,
+      "retrieval_p50_s": 0.09536076500080526,
+      "retrieval_p95_s": 0.13994335680035874,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    }
+  },
+  "calls": {
+    "extract": {
+      "calls": 0,
+      "errors": 0,
+      "usage_unknown": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 0,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": null,
+      "latency_p95_s": null,
+      "latency_total_s": 0
+    },
+    "answer": {
+      "calls": 0,
+      "errors": 0,
+      "usage_unknown": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 0,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": null,
+      "latency_p95_s": null,
+      "latency_total_s": 0
+    },
+    "judge": {
+      "calls": 0,
+      "errors": 0,
+      "usage_unknown": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 0,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": null,
+      "latency_p95_s": null,
+      "latency_total_s": 0
+    }
+  },
+  "wall_s": 889.680582449073,
+  "publication_status": "smoke_validation_only_not_a_published_accuracy_claim",
+  "execution_measurements": {
+    "command_exit": 0,
+    "command_wall_s": 901.9248735569417,
+    "peak_rss_kib": 811728,
+    "embedding_batch_size": 8,
+    "embedding_cache_state": "partially warm from discarded lexical-fallback attempt"
+  }
+}

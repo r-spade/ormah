@@ -48,6 +48,8 @@ dev = [
     "ruff>=0.8.0,<0.16",
 ]
 litellm = ["litellm>=1.0.0"]
+# Public memory benchmarks: optional API provider; subscription CLIs need no SDK.
+bench = ["anthropic>=0.40.0"]
 
 [dependency-groups]
 dev = [
