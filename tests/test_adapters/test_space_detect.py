@@ -6,7 +6,7 @@ import os
 import subprocess
 from unittest.mock import patch
 
-from ormah.adapters.space_detect import detect_space_from_cwd, resolve_space
+from ormah.adapters.space_detect import detect_space_from_cwd, detect_space_from_dir, resolve_space
 
 
 # --- detect_space_from_cwd ---
@@ -44,6 +44,14 @@ def test_detect_returns_none_for_home():
     home = os.path.expanduser("~")
     with patch("os.getcwd", return_value=home):
         assert detect_space_from_cwd() is None
+
+
+def test_detect_returns_none_for_symlinked_home(tmp_path):
+    (tmp_path / "real" / "home").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    home = str(tmp_path / "link" / "home")
+    with patch.dict(os.environ, {"HOME": home}):
+        assert detect_space_from_dir(home) is None
 
 
 def test_detect_returns_none_for_root():
