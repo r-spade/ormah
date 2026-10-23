@@ -23,6 +23,9 @@ _BASE_URL = f"http://localhost:{settings.port}"
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 _MAINTENANCE_TIMEOUT_SECONDS = 300.0
 _MAINTENANCE_POLL_INTERVAL_SECONDS = 1.0
+# Claude Code keeps a result up to this size inline instead of saving it to a file.
+# A margin over claude_maintenance_payload_max_chars; clients that do not know the key ignore it.
+_TOOL_META = {"run_maintenance": {"anthropic/maxResultSizeChars": 100_000}}
 
 
 def _coerce_list(value):
@@ -67,6 +70,7 @@ def create_mcp_server(
                 name=t["name"],
                 description=t["description"],
                 inputSchema=t["parameters"],
+                _meta=_TOOL_META.get(t["name"]),  # the alias: `meta=` goes on the wire as "meta"
             )
             for t in TOOLS
         ]

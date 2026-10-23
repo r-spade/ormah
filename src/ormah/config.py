@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from ormah.engine.maintenance_budget import max_item_cost
 from ormah.engine.temporal import parse_locale_codes
 
 
@@ -293,6 +294,10 @@ class Settings(BaseSettings):
     claude_maintenance_enabled: bool = False
     claude_maintenance_interval_hours: int = 24  # hours between maintenance runs
     claude_maintenance_batch_size: int = 25  # candidates per type per run
+    # Upper bound, in UTF-16 code units (JS ``.length``), of the Phase 1 batches.
+    # Claude Code saves an MCP result above 50,000 units to a file the maintenance
+    # agent cannot read; the default leaves room for the formatter's header lines.
+    claude_maintenance_payload_max_chars: int = 45_000
     maintenance_timeout_minutes: int = Field(default=30, gt=0)  # analysis reservation
 
     # Temporal locale packs consulted when parsing a time reference out of a
@@ -536,6 +541,17 @@ class Settings(BaseSettings):
             raise ValueError(f"consolidation_min_cluster_size must be >= 2, got {v}")
         return v
 
+    @field_validator("claude_maintenance_payload_max_chars")
+    @classmethod
+    def _claude_maintenance_payload_max_chars_range(cls, v: int) -> int:
+        # The ceiling stays under the 100,000-character result limit the MCP
+        # adapter declares on run_maintenance.
+        if not 5_000 <= v <= 90_000:
+            raise ValueError(
+                f"claude_maintenance_payload_max_chars must be between 5000 and 90000, got {v}"
+            )
+        return v
+
     @field_validator("consolidation_max_cluster_nodes")
     @classmethod
     def _consolidation_max_cluster_nodes_range(cls, v: int, info) -> int:
@@ -665,6 +681,22 @@ class Settings(BaseSettings):
     def _temporal_locales_known(cls, v: str) -> str:
         parse_locale_codes(v)  # raises on an empty result or a code with no pack
         return v
+
+    @model_validator(mode="after")
+    def _maintenance_payload_fits_one_candidate(self) -> "Settings":
+        # A candidate larger than the whole budget could never be issued, and its
+        # batch would stay empty in every run. With Claude maintenance off, no
+        # scheduled run reads the budget, so a cluster size it cannot hold is valid.
+        if not self.claude_maintenance_enabled:
+            return self
+        need = max_item_cost(self.consolidation_max_cluster_nodes)
+        if self.claude_maintenance_payload_max_chars < need:
+            raise ValueError(
+                f"claude_maintenance_payload_max_chars ({self.claude_maintenance_payload_max_chars}) "
+                f"is smaller than one maintenance candidate ({need}) with "
+                f"consolidation_max_cluster_nodes={self.consolidation_max_cluster_nodes}"
+            )
+        return self
 
     @property
     def temporal_locale_codes(self) -> tuple[str, ...]:

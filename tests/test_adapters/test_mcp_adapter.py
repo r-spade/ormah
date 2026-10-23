@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from mcp.types import CallToolRequest, CallToolRequestParams
+from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
 
 from ormah.adapters import mcp_adapter
 
@@ -95,6 +95,19 @@ async def test_call_tool_connect_error_recommends_supervised_start(monkeypatch):
     message = result.root.content[0].text
     assert "Ormah server not running" in message
     assert "ormah server start -d" in message
+
+
+@pytest.mark.asyncio
+async def test_list_tools_declares_result_limit_only_on_run_maintenance():
+    server = mcp_adapter.create_mcp_server("http://localhost:8787")
+    handler = server.request_handlers[ListToolsRequest]
+
+    result = await handler(ListToolsRequest(method="tools/list"))
+    wire = result.model_dump(by_alias=True, mode="json", exclude_none=True)
+
+    metas = {tool["name"]: tool.get("_meta") for tool in wire["tools"]}
+    assert metas.pop("run_maintenance") == {"anthropic/maxResultSizeChars": 100_000}
+    assert metas and all(meta is None for meta in metas.values())
 
 
 def test_format_timeout_error_for_maintenance_is_explicit():

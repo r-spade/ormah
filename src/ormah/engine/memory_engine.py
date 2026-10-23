@@ -1906,12 +1906,22 @@ class MemoryEngine:
         plus a summary string.  Batch sizes are capped: up to *limit_per_batch*
         pairs for link/conflict/merge (default from settings), up to 4 clusters
         for consolidation (max nodes per cluster from
-        ``settings.consolidation_max_cluster_nodes``).
+        ``settings.consolidation_max_cluster_nodes``).  The four batches
+        together are then cut to ``settings.claude_maintenance_payload_max_chars``
+        (see ``maintenance_budget``); a cut candidate stays pending for a
+        later run, and the summary counts only the emitted candidates.
         """
         from ormah.background.auto_linker import _find_link_candidates
         from ormah.background.conflict_detector import _find_conflict_candidates
         from ormah.background.consolidator import _find_consolidation_clusters
         from ormah.background.duplicate_merger import _find_merge_candidates
+        from ormah.engine.maintenance_budget import (
+            CONTENT_MAX_CHARS,
+            SPACE_MAX_CHARS,
+            TITLE_MAX_CHARS,
+            cut_utf16,
+            fit_to_budget,
+        )
 
         if limit_per_batch is None:
             limit_per_batch = getattr(self.settings, "claude_maintenance_batch_size", 25)
@@ -1924,10 +1934,10 @@ class MemoryEngine:
         def _norm(node: dict) -> dict:
             return {
                 "id": node.get("id", ""),
-                "title": node.get("title", ""),
+                "title": cut_utf16(node.get("title") or "", TITLE_MAX_CHARS),
                 "type": node.get("type", ""),
-                "space": node.get("space", ""),
-                "content": (node.get("content") or "")[:400],
+                "space": cut_utf16(node.get("space") or "", SPACE_MAX_CHARS),
+                "content": cut_utf16(node.get("content") or "", CONTENT_MAX_CHARS),
             }
 
         def _norm_pair(c: dict) -> dict:
@@ -1937,27 +1947,28 @@ class MemoryEngine:
                 "similarity": c.get("similarity", 0.0),
             }
 
-        parts = []
-        if link_candidates:
-            parts.append(f"{len(link_candidates)} link candidates")
-        if conflict_candidates:
-            parts.append(f"{len(conflict_candidates)} conflict candidates")
-        if merge_candidates:
-            parts.append(f"{len(merge_candidates)} merge candidates")
-        if consolidation_clusters:
-            parts.append(f"{len(consolidation_clusters)} cluster(s)")
-        summary = ", ".join(parts) if parts else "nothing to process"
+        # The budget cut is the single owner of what Phase 1 issues; the formatter never cuts.
+        batches = fit_to_budget(
+            {
+                "link_candidates": [_norm_pair(c) for c in link_candidates],
+                "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
+                "merge_candidates": [_norm_pair(c) for c in merge_candidates],
+                "consolidation_clusters": [
+                    [_norm(n) for n in cluster] for cluster in consolidation_clusters
+                ],
+            },
+            self.settings.claude_maintenance_payload_max_chars,
+        )
 
-        return {
-            "link_candidates": [_norm_pair(c) for c in link_candidates],
-            "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
-            "merge_candidates": [_norm_pair(c) for c in merge_candidates],
-            "consolidation_clusters": [
-                [_norm(n) for n in cluster]
-                for cluster in consolidation_clusters
-            ],
-            "summary": summary,
-        }
+        labels = (
+            ("link_candidates", "link candidates"),
+            ("conflict_candidates", "conflict candidates"),
+            ("merge_candidates", "merge candidates"),
+            ("consolidation_clusters", "cluster(s)"),
+        )
+        parts = [f"{len(batches[key])} {label}" for key, label in labels if batches[key]]
+        batches["summary"] = ", ".join(parts) if parts else "nothing to process"
+        return batches
 
     @_serialized_memory_operation
     def apply_maintenance_results(self, results: dict) -> dict:
