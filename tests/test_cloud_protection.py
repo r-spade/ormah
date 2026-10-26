@@ -648,6 +648,26 @@ def test_product_error_redacts_nonsecret_local_path():
     assert message == "Could not write <redacted-path>"
 
 
+def test_product_error_uses_bridge_safe_placeholder_for_bearer_diagnostics():
+    message = protection.safe_product_error_message(
+        "Authorization failed: Bearer opaque-cloud-token; invalid bearer token."
+    )
+
+    assert "opaque-cloud-token" not in message
+    assert "bearer " not in message.lower()
+    assert message == (
+        "Authorization failed: <redacted-credential> invalid <redacted-credential>"
+    )
+
+
+def test_product_error_repairs_persisted_legacy_bearer_placeholder():
+    message = protection.safe_product_error_message(
+        "The previous request failed with Bearer <redacted>"
+    )
+
+    assert message == "The previous request failed with <redacted-credential>"
+
+
 def test_offline_upload_preserves_verification_health_and_redacts_persisted_error(
     tmp_path, monkeypatch, cloud_state_dir
 ):
