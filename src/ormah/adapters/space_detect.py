@@ -15,7 +15,7 @@ def detect_space_from_dir(path: str) -> str | None:
     path = os.path.realpath(path)
 
     # Don't auto-detect space for home directory or root
-    home = os.path.expanduser("~")
+    home = os.path.realpath(os.path.expanduser("~"))
     if path == home or path == "/":
         return None
 
