@@ -33,6 +33,24 @@ class Node:
     comma: int | None = None
 
 
+def values_equal(left: object, right: object) -> bool:
+    """Compare owned values recursively without conflating booleans and numbers."""
+    if isinstance(left, dict) or isinstance(right, dict):
+        return isinstance(left, dict) and isinstance(right, dict) and left.keys() == right.keys() and all(
+            values_equal(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, list) or isinstance(right, list):
+        return isinstance(left, list) and isinstance(right, list) and len(left) == len(right) and all(
+            values_equal(a, b) for a, b in zip(left, right)
+        )
+    # YAML editors retain formatting in dict/list/scalar subclasses. Compare
+    # their semantic types, checking bool before int (bool is an int subclass).
+    for scalar_type in (bool, int, float, str):
+        if isinstance(left, scalar_type) or isinstance(right, scalar_type):
+            return isinstance(left, scalar_type) and isinstance(right, scalar_type) and left == right
+    return type(left) is type(right) and left == right
+
+
 def parse(text: str, *, json5: bool = False) -> Node:
     if json5:
         json5_parser.loads(text, allow_duplicate_keys=False)
@@ -185,12 +203,14 @@ def append(text: str, keys: list[str], value: object, *, json5: bool = False) ->
 
 def remove_item(text: str, keys: list[str], value: object, *, json5: bool = False) -> str:
     found, current = get(text, keys, json5=json5)
-    if not found or not isinstance(current, list) or value not in current:
+    if not found or not isinstance(current, list):
+        return text
+    index = next((i for i, item in enumerate(current) if values_equal(item, value)), None)
+    if index is None:
         return text
     node = parse(text, json5=json5)
     for key in keys:
         node = node.children[key]
-    index = current.index(value)
     child = node.children[index]
     start, end = child.start, child.end
     if child.comma is not None:
