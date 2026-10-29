@@ -26,7 +26,8 @@ workspace and generated hook. Local `chat.useHooks` must be enabled (the documen
 default); policy or disabled hook locations can prevent execution. Setup preserves
 those settings, model choices, approvals, and unrelated configuration. Windows
 commands are quoted for the default PowerShell hook executor; Linux/macOS use
-the host shell. No GUI or Windows process was run during validation.
+the host shell. The macOS Local path has live validation below; Windows execution
+remains untested.
 
 The handler reads `prompt`, `session_id`, and `cwd` from `UserPromptSubmit`.
 Project setup pins the workspace for both MCP and the hook; user MCP uses VS
@@ -75,5 +76,31 @@ that every installed release provides this contract):
 
 Synthetic tests cover real documented payload/output shapes, workspace scope,
 missing identity, other harnesses, offline behavior, ownership, idempotency, and
-shared runtime/MCP regressions. No authenticated VS Code model session was run;
-`verified_live` remains false. All runtime assets ship in wheels and sdists.
+shared runtime/MCP regressions. All runtime assets ship in wheels and sdists.
+
+### Live validation — 2026-10-29
+
+On macOS, VS Code **1.144.0** with bundled Copilot Chat **0.72.0**, an
+authenticated **Local** session retrieved a unique synthetic fact from an isolated
+Ormah daemon. The fact was absent from workspace files and the user prompt.
+Native hook logs recorded the actual `UserPromptSubmit` and returned
+`hookSpecificOutput.additionalContext`; the chat transcript showed the correct
+answer with an empty `toolRequests` list. This establishes automatic whisper in
+that tested Local session.
+
+The newer **Copilot** session target ran the hook but did not produce the fact in
+its answer. It remains unsupported; hook discovery alone is not proof of context
+injection. In a new chat, select **Local** using the **Copilot/Local session
+selector**, not the dropdown next to the new-chat button. Reloading or starting a
+new chat can choose the newer target, so check the target before testing.
+
+Real subprocess checks also verified an unavailable daemon returns `{}` with
+exit code 0 from the hook, and a clear unavailable-server message from MCP.
+CLI connect/disconnect checks in disposable projects preserved personal MCP
+entries, comments, symlinks, and user-edited hooks while removing untouched owned
+artifacts. These are process-level checks, not native GUI outage tests.
+
+Live MCP save/recall in VS Code is still pending. Windows, remote profiles, and
+other installed versions have not been live-tested. `verified_live` remains false
+in status because setup checks configuration integrity, not whether that user
+has completed a successful live session.
