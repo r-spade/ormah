@@ -122,7 +122,7 @@ def selected_questions(args, path):
 
 
 def parameters(args):
-    return {
+    values = {
         k: getattr(args, k)
         for k in (
             "dataset",
@@ -145,11 +145,18 @@ def parameters(args):
             "judge_model",
         )
     }
+    values["context_chars"] = getattr(args, "context_chars", None)
+    return values
 
 
 def validate(args):
-    if args.retrieval not in {"recall", "whisper"}:
-        raise ValueError("--retrieval must be recall or whisper")
+    if args.retrieval not in {"recall", "whisper", "dense", "none"}:
+        raise ValueError("--retrieval must be recall, whisper, dense or none")
+    if args.retrieval in {"dense", "none"} and args.mode != "raw":
+        raise ValueError("Dense and no-memory references require raw mode")
+    if getattr(args, "context_chars", None) is not None:
+        if args.context_chars < 0 or args.k > 30 or args.retrieval == "whisper":
+            raise ValueError("Context budgets require nonnegative chars, k <= 30, and no whisper")
     settings_for(args.retrieval, args.whisper_profile)
     if args.k <= 0 or args.workers <= 0 or (args.limit is not None and args.limit <= 0):
         raise ValueError("--k, --workers and --limit must be positive")
@@ -246,6 +253,7 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
             raise ValueError("Run exists; use --resume or a new --run-id")
         manifest = json.loads(manifest_path.read_text())
         manifest["parameters"].setdefault("retrieval", "recall")
+        manifest["parameters"].setdefault("context_chars", None)
         if manifest["parameters"] != parameters(args) or manifest["dataset_sha256"] != fingerprint:
             raise ValueError("Resume parameters/dataset differ from the saved manifest")
         validate_resume(manifest, experiment)
@@ -457,13 +465,21 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
                 if "retrieve" in needed:
                     start = time.perf_counter()
                     try:
+                        from eval.bench.reference import budget_context, dense_question, empty_question
+
+                        if args.retrieval == "whisper":
+                            result = retrieve_whisper(engine, q.question, q.question_date)
+                        elif args.retrieval == "dense":
+                            result = dense_question(engine, q.question, args.k)
+                        elif args.retrieval == "none":
+                            result = empty_question()
+                        else:
+                            result = retrieve_question(engine, q.question, args.k)
+                        if getattr(args, "context_chars", None) is not None:
+                            result = budget_context(result, args.context_chars, args.k)
                         row["retrieve"] = {
                             "status": "ok",
-                            "result": (
-                                retrieve_whisper(engine, q.question, q.question_date)
-                                if args.retrieval == "whisper"
-                                else retrieve_question(engine, q.question, args.k)
-                            ),
+                            "result": result,
                         }
                     except RerankerUnavailable as exc:
                         row["retrieve"] = {
@@ -506,7 +522,8 @@ def run(args, *, base=BASE, engine_factory=make_engine, provider_factory=make_pr
             try:
                 if phase == "answer":
                     result = answer_question(
-                        providers[phase], row, row["retrieve"]["result"]["ranked"]
+                        providers[phase], row, row["retrieve"]["result"]["ranked"],
+                        context=row["retrieve"]["result"].get("answer_context_text"),
                     )
                 else:
                     result = judge_answer(providers[phase], row, row["answer"]["result"]["text"])

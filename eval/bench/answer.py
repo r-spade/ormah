@@ -28,7 +28,7 @@ def memory_context(retrieved: list[dict]) -> str:
     )
 
 
-def answer_prompt(question: dict, retrieved: list[dict]) -> str:
+def answer_prompt(question: dict, retrieved: list[dict], *, context: str | None = None) -> str:
     guidance = (
         "For recommendations, respect the user's preferences and exclusions. "
         "Do not conflate different roles, variants or entities. Compute comparisons "
@@ -37,18 +37,19 @@ def answer_prompt(question: dict, retrieved: list[dict]) -> str:
         else "Check attribution to each conversation participant. Reasonable deductions "
         "and general knowledge may connect remembered facts for open-domain questions.\n"
     )
-    memories = memory_context(retrieved)
+    memories = memory_context(retrieved) if context is None else context
     return (
         COMMON + guidance + f"\nReference date: {question['question_date']}\n"
         f"Memories:\n{memories}\n\nQuestion: {question['question']}\nAnswer:"
     )
 
 
-def answer_question(provider, question, retrieved):
+def answer_question(provider, question, retrieved, *, context: str | None = None):
     from dataclasses import asdict
 
     return asdict(
         provider.complete(
-            answer_prompt(question, retrieved), item_id=question["question_id"], max_tokens=1024
+            answer_prompt(question, retrieved, context=context),
+            item_id=question["question_id"], max_tokens=1024,
         )
     )

@@ -51,6 +51,12 @@ def build_report(run_dir: Path):
             "usage_unknown": sum(c.get("usage") is None for c in group),
             "input_tokens": sum(((c.get("usage") or {}).get("input_tokens") or 0) for c in group),
             "output_tokens": sum(((c.get("usage") or {}).get("output_tokens") or 0) for c in group),
+            "cached_input_tokens": sum(
+                ((c.get("usage") or {}).get("cached_input_tokens") or 0) for c in group
+            ),
+            "reasoning_output_tokens": sum(
+                ((c.get("usage") or {}).get("reasoning_output_tokens") or 0) for c in group
+            ),
             "cache_read_input_tokens": sum(
                 ((c.get("usage") or {}).get("cache_read_input_tokens") or 0) for c in group
             ),

@@ -1054,7 +1054,8 @@ def main():
     bench_run = ev_bench_sub.add_parser("run", help="Run resumable benchmark phases")
     bench_run.add_argument("dataset", choices=["longmemeval", "locomo"])
     bench_run.add_argument("--mode", choices=["raw", "extract"], default="raw")
-    bench_run.add_argument("--retrieval", choices=["recall", "whisper"], default="recall")
+    bench_run.add_argument("--retrieval", choices=["recall", "whisper", "dense", "none"], default="recall")
+    bench_run.add_argument("--context-chars", type=int, help="Cap the exact dated memory payload (k <= 30)")
     bench_run.add_argument(
         "--whisper-profile",
         choices=["baseline", "balanced-preview", "lower-gate"],
@@ -1068,7 +1069,7 @@ def main():
     bench_run.add_argument("--category", type=int, choices=range(1, 6))
     bench_run.add_argument("--conversation", type=int, help="Zero-based LoCoMo conversation index")
     bench_run.add_argument("--split-manifest", help="Locked JSON split manifest")
-    bench_run.add_argument("--split", choices=["development", "heldout"])
+    bench_run.add_argument("--split", choices=["development", "heldout", "diagnostic"])
     bench_run.add_argument(
         "--haystack-source-run",
         help="Reuse exact frozen haystacks from another run (fails if any are missing)",
