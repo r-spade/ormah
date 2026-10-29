@@ -66,6 +66,17 @@ def test_no_memory_and_prompt_keep_question_date_without_gold():
     assert "Memories:\n[2023\n\nQuestion:" in answer_prompt(q, [], context="[2023")
 
 
+def test_comparison_counts_exposed_reference_memories():
+    from eval.bench.compare import _metric
+    result = budget_context({"ranked": [{"node": m} for m in memories()]}, 35)
+    row = {"retrieve": {"status": "ok", "result": result}}
+    assert _metric(row, "injected_count") == 1
+    assert _metric(row, "silent") is False
+    row["retrieve"]["result"] = budget_context(empty_question(), 12000)
+    assert _metric(row, "injected_count") == 0
+    assert _metric(row, "silent") is True
+
+
 def test_budget_diagnostics_distinguish_retrieval_from_exposure():
     stored = memories()
     ranked = [{"node": m, "score": 1} for m in stored]

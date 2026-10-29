@@ -112,7 +112,9 @@ have now been inspected. Retain conversation-cluster uncertainty for LoCoMo
 and question-unit uncertainty for LME; no paired intervals are available yet.
 
 Validation: 110 focused/existing tests passed, including benchmark, raw-cosine
-and recall-concurrency tests. Test child peak RSS was 730,816 KiB and wall 33.76s;
+and recall-concurrency tests. A subsequent 17-test reference/comparison run passed
+after fixing comparison counts to respect exposed dense/recall entries.
+Test child peak RSS was 730,816 KiB and wall 33.76s;
 that is a child-process peak, not a whole-job benchmark memory measurement.
 No benchmark inference latency/usage or matched wins/losses/abstention results
 are available. Only non-scored smoke calls consumed model usage. A local launch

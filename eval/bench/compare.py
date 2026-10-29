@@ -38,7 +38,17 @@ def _abstention(row: dict) -> bool:
 
 
 def _metric(row: dict, name: str, default=0):
-    return row.get("retrieve", {}).get("result", {}).get(name, default)
+    result = row.get("retrieve", {}).get("result", {})
+    if name in result:
+        return result[name]
+    # Recall/dense references expose an ordered ranked set, not whisper's
+    # injected_count/silent fields. Count only entries surviving the budget.
+    count = len(result.get("exposed_memory_ids", result.get("ranked", [])))
+    if name == "injected_count":
+        return count
+    if name == "silent":
+        return count == 0
+    return default
 
 
 def _paired(rows: list[tuple[dict, dict]]) -> dict:
