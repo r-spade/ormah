@@ -9,10 +9,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ormah.index.db import Database
 
+from ormah.store.file_store import UnresolvedNodeReference
 from ormah.text.tokens import IDENTITY_TOKENS, STOP_WORDS
 
 logger = logging.getLogger(__name__)
 
+
+# Candidates an ambiguity message lists before it truncates.
+_AMBIGUITY_SHOWN = 5
 
 _NOT_EXPIRED = "(n.valid_until IS NULL OR n.valid_until > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))"
 
@@ -35,12 +39,37 @@ class GraphIndex:
         return db.conn if hasattr(db, "conn") else db
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
+        """Fetch a node by Full id, or by an id prefix that names exactly one node.
+
+        An ambiguous prefix returns None; `resolve_node` tells it apart from absence.
+        """
+        try:
+            return self.resolve_node(node_id)
+        except UnresolvedNodeReference:
+            return None
+
+    def resolve_node(self, node_id: str) -> dict[str, Any] | None:
+        """Like `get_node`, but raise `UnresolvedNodeReference` on an ambiguous prefix.
+
+        Any prefix shorter than a Full id is accepted, while `FileStore.resolve` takes
+        only a Full id or an 8-character Short id. The message lists the Full ids the
+        prefix matched, so a caller holding only a Short id can retry with one.
+        """
         row = self.conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
-        if row is None and len(node_id) < 36:
-            row = self.conn.execute(
-                "SELECT * FROM nodes WHERE id LIKE ? LIMIT 1", (node_id + "%",)
-            ).fetchone()
-        return dict(row) if row else None
+        if row is not None or len(node_id) >= 36:
+            return dict(row) if row else None
+        rows = self.conn.execute(
+            "SELECT * FROM nodes WHERE id LIKE ? ORDER BY id LIMIT ?",
+            (node_id + "%", _AMBIGUITY_SHOWN + 1),
+        ).fetchall()
+        if len(rows) > 1:
+            shown = ", ".join(f"{r['id']} ({r['title']})" for r in rows[:_AMBIGUITY_SHOWN])
+            more = ", ..." if len(rows) > _AMBIGUITY_SHOWN else ""
+            raise UnresolvedNodeReference(
+                f"Node reference {node_id} is ambiguous: it matches {shown}{more}. "
+                "Retry with one of these Full ids."
+            )
+        return dict(rows[0]) if rows else None
 
     def get_nodes_batch(self, node_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch multiple nodes in a single query, keyed by ID."""

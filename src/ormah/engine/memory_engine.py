@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from collections.abc import Callable
 from contextlib import contextmanager
 from functools import wraps
 import logging
@@ -15,12 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from ormah import lifecycle
+from ormah.embeddings.runtime import inference_request
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
 from ormah.engine.maintenance_signal import (
-    MAINTENANCE_DUE_SIGNAL,
     is_maintenance_due_signal,
+    maintenance_due_signal,
 )
 from ormah.engine.tier_manager import TierManager
 from ormah.engine.whisper_health import compute_whisper_health
@@ -100,6 +102,7 @@ class MemoryEngine:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.maintenance_is_active: Callable[[], bool] | None = None
         self._memory_operation_lock = threading.RLock()
         self.file_store = FileStore(settings.nodes_dir, self._memory_operation_lock)
         self.db = Database(settings.db_path)
@@ -704,9 +707,14 @@ class MemoryEngine:
             annotated.append(result)
         return annotated
 
+    @inference_request("recall")
     def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
-        """Get a specific node with its neighbors, formatted as text."""
-        node = self.graph.get_node(node_id)
+        """Get a specific node with its neighbors, formatted as text.
+
+        Raises `UnresolvedNodeReference` when `node_id` is a prefix shared by several
+        nodes; its message lists their Full ids.
+        """
+        node = self.graph.resolve_node(node_id)
         if node is None:
             return None
 
@@ -792,7 +800,21 @@ class MemoryEngine:
         "while", "work", "worked", "working",
     })
 
+    @inference_request("recall")
     def recall_search_structured(
+        self, query: str, limit: int = 10, default_space: str | None = None,
+        *, min_relevance: float | None = None,
+        auto_temporal: bool = True, spread_activation: bool = True,
+        query_vec: Any | None = None, **filters,
+    ) -> list[dict]:
+        """Deliberate structured recall, including direct engine and UI callers."""
+        return self._search_structured(
+            query, limit, default_space, min_relevance=min_relevance,
+            auto_temporal=auto_temporal, spread_activation=spread_activation,
+            query_vec=query_vec, **filters,
+        )
+
+    def _search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
         *, min_relevance: float | None = None,
         auto_temporal: bool = True, spread_activation: bool = True,
@@ -801,7 +823,7 @@ class MemoryEngine:
         """Search memories and return structured results (list of dicts).
 
         Same logic as recall_search but returns raw dicts instead of formatted text.
-        Used by the UI and any consumer that needs structured data.
+        Shared retrieval for whisper and deliberate recall; inherits request origin.
 
         *min_relevance* overrides the deliberate-recall floor
         (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
@@ -934,6 +956,7 @@ class MemoryEngine:
         ).fetchone()
         return row is not None
 
+    @inference_request("recall")
     def recall_search(
         self,
         query: str,
@@ -1124,8 +1147,8 @@ class MemoryEngine:
             return f"Cannot delete {node_id}: {exc} Nothing was deleted."
         if full_node is None:
             # Fall back to graph index to check existence. Exact Full id only:
-            # `get_node` answers a prefix with one arbitrary row of many, and the store
-            # has just confirmed that no file holds this reference.
+            # `get_node` still answers a unique prefix, and the store has just
+            # confirmed that no file holds this reference.
             node = self.graph.get_node(node_id)
             if node is None or node["id"] != node_id:
                 return None
@@ -1200,6 +1223,7 @@ class MemoryEngine:
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
 
+    @inference_request("general")
     def get_whisper_context(
         self,
         prompt: str,
@@ -1276,27 +1300,7 @@ class MemoryEngine:
         return f"{result.rstrip()}\n\n{onboarding}" if result else onboarding
 
     def _maybe_get_maintenance_due_signal(self) -> str:
-        if not getattr(self.settings, "claude_maintenance_enabled", False):
-            return ""
-
-        interval_hours = getattr(self.settings, "claude_maintenance_interval_hours", 24)
-        try:
-            row = self.graph.conn.execute(
-                "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
-            ).fetchone()
-            last_run = row[0] if row else None
-            if not last_run:
-                return MAINTENANCE_DUE_SIGNAL
-
-            parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-            if parsed_last_run.tzinfo is None:
-                parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
-            elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
-            if elapsed.total_seconds() > interval_hours * 3600:
-                return MAINTENANCE_DUE_SIGNAL
-        except Exception as e:
-            logger.warning("Failed to compute maintenance_due: %s", e)
-        return ""
+        return maintenance_due_signal(self, self.graph.conn)
 
     @staticmethod
     def _strip_maintenance_due_signal(text: str) -> str:
@@ -1902,12 +1906,22 @@ class MemoryEngine:
         plus a summary string.  Batch sizes are capped: up to *limit_per_batch*
         pairs for link/conflict/merge (default from settings), up to 4 clusters
         for consolidation (max nodes per cluster from
-        ``settings.consolidation_max_cluster_nodes``).
+        ``settings.consolidation_max_cluster_nodes``).  The four batches
+        together are then cut to ``settings.claude_maintenance_payload_max_chars``
+        (see ``maintenance_budget``); a cut candidate stays pending for a
+        later run, and the summary counts only the emitted candidates.
         """
         from ormah.background.auto_linker import _find_link_candidates
         from ormah.background.conflict_detector import _find_conflict_candidates
         from ormah.background.consolidator import _find_consolidation_clusters
         from ormah.background.duplicate_merger import _find_merge_candidates
+        from ormah.engine.maintenance_budget import (
+            CONTENT_MAX_CHARS,
+            SPACE_MAX_CHARS,
+            TITLE_MAX_CHARS,
+            cut_utf16,
+            fit_to_budget,
+        )
 
         if limit_per_batch is None:
             limit_per_batch = getattr(self.settings, "claude_maintenance_batch_size", 25)
@@ -1920,10 +1934,10 @@ class MemoryEngine:
         def _norm(node: dict) -> dict:
             return {
                 "id": node.get("id", ""),
-                "title": node.get("title", ""),
+                "title": cut_utf16(node.get("title") or "", TITLE_MAX_CHARS),
                 "type": node.get("type", ""),
-                "space": node.get("space", ""),
-                "content": (node.get("content") or "")[:400],
+                "space": cut_utf16(node.get("space") or "", SPACE_MAX_CHARS),
+                "content": cut_utf16(node.get("content") or "", CONTENT_MAX_CHARS),
             }
 
         def _norm_pair(c: dict) -> dict:
@@ -1933,27 +1947,28 @@ class MemoryEngine:
                 "similarity": c.get("similarity", 0.0),
             }
 
-        parts = []
-        if link_candidates:
-            parts.append(f"{len(link_candidates)} link candidates")
-        if conflict_candidates:
-            parts.append(f"{len(conflict_candidates)} conflict candidates")
-        if merge_candidates:
-            parts.append(f"{len(merge_candidates)} merge candidates")
-        if consolidation_clusters:
-            parts.append(f"{len(consolidation_clusters)} cluster(s)")
-        summary = ", ".join(parts) if parts else "nothing to process"
+        # The budget cut is the single owner of what Phase 1 issues; the formatter never cuts.
+        batches = fit_to_budget(
+            {
+                "link_candidates": [_norm_pair(c) for c in link_candidates],
+                "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
+                "merge_candidates": [_norm_pair(c) for c in merge_candidates],
+                "consolidation_clusters": [
+                    [_norm(n) for n in cluster] for cluster in consolidation_clusters
+                ],
+            },
+            self.settings.claude_maintenance_payload_max_chars,
+        )
 
-        return {
-            "link_candidates": [_norm_pair(c) for c in link_candidates],
-            "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
-            "merge_candidates": [_norm_pair(c) for c in merge_candidates],
-            "consolidation_clusters": [
-                [_norm(n) for n in cluster]
-                for cluster in consolidation_clusters
-            ],
-            "summary": summary,
-        }
+        labels = (
+            ("link_candidates", "link candidates"),
+            ("conflict_candidates", "conflict candidates"),
+            ("merge_candidates", "merge candidates"),
+            ("consolidation_clusters", "cluster(s)"),
+        )
+        parts = [f"{len(batches[key])} {label}" for key, label in labels if batches[key]]
+        batches["summary"] = ", ".join(parts) if parts else "nothing to process"
+        return batches
 
     @_serialized_memory_operation
     def apply_maintenance_results(self, results: dict) -> dict:

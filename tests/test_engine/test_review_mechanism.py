@@ -71,12 +71,13 @@ def mock_graph(tmp_path):
 
 def _make_mock_engine(conn, *, maintenance_enabled=False):
     engine = MagicMock()
+    engine.maintenance_is_active = None
     engine.settings = SimpleNamespace(
         claude_maintenance_enabled=maintenance_enabled,
         claude_maintenance_interval_hours=24,
     )
     engine._get_hybrid_search.return_value = None
-    engine.recall_search_structured.return_value = []
+    engine._search_structured.return_value = []
     engine.has_searchable_preferences.return_value = False
 
     @contextmanager
@@ -159,7 +160,7 @@ def test_selected_context_never_appends_historical_review_or_writes_review_log(
     held_back = _seed_historical_review_data(conn)
     before = _review_rows(conn)
     engine = _make_mock_engine(conn)
-    engine.recall_search_structured.return_value = [_admitted_ordinary_result()]
+    engine._search_structured.return_value = [_admitted_ordinary_result()]
 
     result = ContextBuilder(mock_graph, engine=engine).build_whisper_context(
         prompt="how does the current authentication design work",
@@ -189,7 +190,7 @@ def test_preference_only_context_never_appends_historical_review_or_writes_revie
     )
     engine = _make_mock_engine(conn)
     engine.has_searchable_preferences.return_value = True
-    engine.recall_search_structured.side_effect = [
+    engine._search_structured.side_effect = [
         [],
         [{"node": preference, "score": 0.65, "source": "hybrid"}],
     ]
@@ -284,7 +285,7 @@ def test_gate_rejection_stays_silent_and_preserves_historical_review_records(moc
     _seed_historical_review_data(conn)
     before = _review_rows(conn)
     engine = _make_mock_engine(conn)
-    engine.recall_search_structured.return_value = [_admitted_ordinary_result()]
+    engine._search_structured.return_value = [_admitted_ordinary_result()]
 
     result = ContextBuilder(mock_graph, engine=engine).build_whisper_context(
         prompt="how does the current authentication design work",
@@ -324,7 +325,7 @@ def test_selected_context_and_maintenance_signal_remain_intact_without_review(mo
     held_back = _seed_historical_review_data(conn)
     before = _review_rows(conn)
     engine = _make_mock_engine(conn, maintenance_enabled=True)
-    engine.recall_search_structured.return_value = [_admitted_ordinary_result()]
+    engine._search_structured.return_value = [_admitted_ordinary_result()]
 
     result = ContextBuilder(mock_graph, engine=engine).build_whisper_context(
         prompt="how does the current authentication design work",
@@ -338,3 +339,20 @@ def test_selected_context_and_maintenance_signal_remain_intact_without_review(mo
     assert _REVIEW_HEADING not in result
     assert held_back["title"] not in result
     assert _review_rows(conn) == before
+
+
+def test_maintenance_signal_is_suppressed_by_active_reservation(mock_graph):
+    conn = mock_graph.conn
+    _seed_historical_review_data(conn)
+    engine = _make_mock_engine(conn, maintenance_enabled=True)
+    engine.maintenance_is_active = MagicMock(return_value=True)
+
+    result = ContextBuilder(mock_graph, engine=engine).build_whisper_context(
+        prompt="an unrelated question with enough words",
+        space="myspace",
+        recent_prompts=None,
+        session_id="reserved-maintenance",
+    )
+
+    assert MAINTENANCE_DUE_SIGNAL not in result
+    engine.maintenance_is_active.assert_called_once_with()

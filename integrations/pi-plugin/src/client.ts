@@ -213,23 +213,32 @@ export class OrmahClient {
 
 	/**
 	 * POST /agent/maintenance — two-step graph maintenance.
-	 * No results -> phase 1 (returns batches + job_id, status "awaiting_results").
-	 * With results -> phase 2 (applies decisions, returns apply_summary).
+	 * No arguments -> phase 1 (returns batches + job_id, or terminal busy).
+	 * Only jobId -> observe that assignment's current status.
+	 * With results + explicit jobId -> phase 2 (applies decisions, returns apply_summary).
 	 */
 	async runMaintenance(
 		opts: { jobId?: string; results?: MaintenanceResults },
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>> {
+		const submitting = opts.results !== undefined;
+		if (submitting && !opts.jobId) {
+			throw new Error("job_id is required with results; echo the Phase 1 assignment receipt.");
+		}
 		const body: Record<string, unknown> = {};
 		if (opts.jobId) body.job_id = opts.jobId;
-		if (opts.results) body.results = opts.results;
+		if (submitting) body.results = opts.results;
 		const initial = await this.req<Record<string, unknown>>("/agent/maintenance", {
 			method: "POST",
 			body: JSON.stringify(body),
 			signal,
 			timeoutMs: this.cfg.maintenanceTimeoutMs,
 		});
-		return this._pollMaintenance(initial, !!opts.results, signal);
+		if (opts.jobId && initial.job_id !== opts.jobId) {
+			throw new Error("Maintenance assignment was lost or replaced. Discard stale analysis; stop this run.");
+		}
+		if (opts.jobId && !submitting) return initial;
+		return this._pollMaintenance(initial, submitting, signal);
 	}
 
 	/** Poll /agent/maintenance until the requested phase is ready. Mirrors
@@ -242,16 +251,27 @@ export class OrmahClient {
 	): Promise<Record<string, unknown>> {
 		const deadline = Date.now() + this.cfg.maintenanceTimeoutMs;
 		let data = initial;
-		let jobId = (data.job_id as string | undefined) ?? undefined;
+		const jobId = data.job_id as string | undefined;
 		while (true) {
 			const status = data.status as string | undefined;
-			if (expectApplySummary) {
-				if (status === "completed" && typeof data.apply_summary === "object") return data;
-			} else {
-				if (status === "awaiting_results" && typeof data.batches === "object") return data;
-			}
+			if (status === "busy" && !expectApplySummary) return data;
 			if (status === "failed") {
-				throw new Error(`maintenance job failed: ${(data.last_error as string) || "unknown"}`);
+				throw new Error(`Maintenance failed: ${data.last_error ?? "unknown error"}. Discard stale analysis; stop this run.`);
+			}
+			if (["idle", "replaced", "expired"].includes(status ?? "")) {
+				throw new Error(String(data.last_error ?? data.message ??
+					`Maintenance assignment is ${status}. Discard stale analysis; stop this run.`));
+			}
+			if (!jobId || data.job_id !== jobId) {
+				throw new Error("Maintenance job mismatch. Discard stale analysis; stop this run.");
+			}
+			const readyStatus = expectApplySummary ? "completed" : "awaiting_results";
+			const readyField = expectApplySummary ? data.apply_summary : data.batches;
+			if (status === readyStatus && readyField !== null &&
+				typeof readyField === "object" && !Array.isArray(readyField)) return data;
+			const runningStatus = expectApplySummary ? "running_phase2" : "running_phase1";
+			if (status !== runningStatus) {
+				throw new Error(`Maintenance job is ${status}. Stop this run; do not resubmit results.`);
 			}
 			if (Date.now() >= deadline) {
 				throw new OrmahHttpError(0, `run_maintenance timed out after ${this.cfg.maintenanceTimeoutMs}ms`);
@@ -263,8 +283,8 @@ export class OrmahClient {
 	}
 
 	/** GET /agent/maintenance — poll a running maintenance job. */
-	async getMaintenanceStatus(jobId?: string): Promise<Record<string, unknown>> {
-		const params = jobId ? `?job_id=${encodeURIComponent(jobId)}` : "";
+	async getMaintenanceStatus(jobId: string): Promise<Record<string, unknown>> {
+		const params = `?job_id=${encodeURIComponent(jobId)}`;
 		return this.req(`/agent/maintenance${params}`, {
 			method: "GET",
 			timeoutMs: this.cfg.toolTimeoutMs,

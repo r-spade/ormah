@@ -6,7 +6,7 @@ product:
 1. **Bundled runtime** — ships a `uv` sidecar that installs `ormah` from PyPI on
    first launch. No curl, no terminal. `~/.local/bin/ormah` is created
    automatically by `uv tool install`, giving hooks a stable binary path.
-2. **One-click agent setup** — detects Claude Code / Claude Desktop / Codex and
+2. **One-click agent setup** — detects Claude Code / Claude Desktop / Codex / Pi and
    wires hooks/MCP via `ormah setup --json`.
 3. **Menubar presence** — tray icon whose title is the weekly *whispers-used*
    count, with a dropdown for stats and actions.

@@ -97,3 +97,34 @@ def test_get_tags_batch_no_tags(db, graph):
     result = graph.get_tags_batch(["n1"])
     # Node exists but has no tags — should not appear in result
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# get_node — Prefix resolution
+# ---------------------------------------------------------------------------
+
+FIRST = "deadbeef-0000-0000-0000-00000000000a"
+SECOND = "deadbeef-0000-0000-0000-00000000000b"
+
+
+def test_get_node_resolves_an_ambiguous_prefix_to_nothing(db, graph):
+    """Two nodes share the Short id `deadbeef`: the prefix names neither of them."""
+    _insert_node(db, FIRST, "first")
+    _insert_node(db, SECOND, "second")
+
+    assert graph.get_node("deadbeef") is None
+
+
+def test_get_node_resolves_a_unique_prefix(db, graph):
+    _insert_node(db, FIRST, "first")
+    _insert_node(db, "cafebabe-0000-0000-0000-00000000000b", "other")
+
+    assert graph.get_node("deadbeef")["id"] == FIRST
+
+
+def test_get_node_by_full_id_ignores_a_node_sharing_its_prefix(db, graph):
+    _insert_node(db, FIRST, "first")
+    _insert_node(db, SECOND, "second")
+
+    assert graph.get_node(SECOND)["content"] == "second"
+    assert graph.get_node("deadbeef-0000-0000-0000-00000000000c") is None

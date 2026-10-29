@@ -92,7 +92,7 @@ def test_delete_of_a_node_whose_file_is_malformed_leaves_the_index_alone(engine)
 def test_delete_by_a_prefix_the_store_does_not_resolve_mutates_nothing(engine):
     """The store resolves only a Full id or an 8-character Short id, so a shorter prefix
     is a confirmed absence there. The index fallback must not turn it into a target:
-    `get_node` answers a prefix with `LIKE ... LIMIT 1`, one arbitrary row of many."""
+    `get_node` still answers a unique prefix, and the store has no file for it."""
     first = _index_collider(engine, "a", "Collider A")
     second = _index_collider(engine, "b", "Collider B")
     files_before = _live_files(engine)

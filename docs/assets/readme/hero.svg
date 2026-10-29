@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="290" viewBox="0 0 960 290" role="img" aria-labelledby="title desc">
+<title id="title">ormah — Is your memory still yours?</title><desc id="desc">Private. Portable. Yours. A gold wordmark and off-white question on a quiet, near-black sky.</desc>
+<style>text{font-family:Arial,Helvetica,sans-serif} .mono{font-family:monospace}</style>
+<rect x="0" y="0" width="960" height="290" rx="12" fill="#101110"/>
+<rect x="0.5" y="0.5" width="959" height="289" rx="12" fill="none" stroke="#30332d"/>
+<circle cx="77" cy="29" r="1.2" fill="#484036"/>
+<circle cx="326" cy="17" r="0.8" fill="#484036"/>
+<circle cx="739" cy="49" r="0.8" fill="#484036"/>
+<circle cx="835" cy="119" r="1.2" fill="#484036"/>
+<circle cx="902" cy="23" r="0.8" fill="#484036"/>
+<circle cx="624" cy="220" r="0.8" fill="#484036"/>
+<circle cx="874" cy="252" r="1.2" fill="#484036"/>
+<circle cx="538" cy="264" r="0.8" fill="#484036"/>
+<circle cx="691" cy="136" r="0.8" fill="#484036"/>
+<circle cx="403" cy="226" r="1.2" fill="#484036"/>
+<circle cx="931" cy="188" r="0.8" fill="#484036"/>
+<circle cx="499" cy="81" r="0.8" fill="#484036"/>
+<text x="44" y="57" fill="#d4a574" font-size="34" font-weight="400" letter-spacing="-1.3">ormah</text>
+<circle cx="61" cy="66" r="6" fill="#1e3630"/>
+<circle cx="61" cy="66" r="2.8" fill="#85b9aa"/>
+<text x="44" y="142" fill="#eee9e1" font-size="55" font-weight="400">Is your memory</text><text x="44" y="204" fill="#eee9e1" font-size="55" font-weight="400">still yours?</text>
+<text x="44" y="255" fill="#d4a574" font-size="14" font-weight="400" letter-spacing="2">Private. Portable. Yours.</text>
+</svg>

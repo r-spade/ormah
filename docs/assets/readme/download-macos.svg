@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="192" viewBox="0 0 440 192" role="img" aria-labelledby="title desc">
+<title id="title">Download Ormah for macOS</title><desc id="desc">Ormah desktop app for macOS, Apple Silicon.</desc>
+<style>text{font-family:Arial,Helvetica,sans-serif} .mono{font-family:monospace}</style>
+<rect x="8" y="8" width="424" height="176" rx="12" fill="#101110"/>
+<rect x="8.5" y="8.5" width="423" height="175" rx="12" fill="none" stroke="#65543f"/>
+<rect x="30" y="30" width="52" height="60" rx="10" fill="#25251e"/>
+<rect x="39" y="42" width="34" height="24" rx="3" fill="none" stroke="#d4a574"/>
+<path d="M56 66 L56 75" stroke="#d4a574" fill="none"/>
+<path d="M47 75 L65 75" stroke="#d4a574" fill="none"/>
+<circle cx="66" cy="49" r="2.5" fill="#85b9aa"/>
+<text x="100" y="58" fill="#eee9e1" font-size="31" font-weight="500">macOS</text>
+<text x="100" y="89" fill="#b4afa5" font-size="22" font-weight="400">Apple Silicon</text>
+<path d="M30 113 L410 113" stroke="#393b34" fill="none"/>
+<text x="30" y="153" fill="#d4a574" font-size="22" font-weight="600">Download for macOS</text>
+<path d="M390 132 v16 m-6-6 6 6 6-6 M380 155 h20" fill="none" stroke="#d4a574" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

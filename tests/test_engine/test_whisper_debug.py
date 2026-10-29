@@ -33,7 +33,7 @@ class TestWhisperDebugMode:
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         node = _make_node("node-abc12345", "Port fact")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.9, "source": "hybrid"},
         ]
         result = builder.build_whisper_context(
@@ -48,7 +48,7 @@ class TestWhisperDebugMode:
         mock_engine = MagicMock()
         mock_engine.settings.claude_maintenance_enabled = False
         builder = ContextBuilder(mock_graph, engine=mock_engine)
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
         whisper_text, injected_ids = builder.build_whisper_context(
             prompt="what port", _return_debug=True
         )
@@ -59,7 +59,7 @@ class TestWhisperDebugMode:
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         nodes = [_make_node(f"node-{i:08d}", f"Fact {i}") for i in range(3)]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": n, "score": 0.9 - i * 0.1, "source": "hybrid"}
             for i, n in enumerate(nodes)
         ]
@@ -72,7 +72,7 @@ class TestWhisperDebugMode:
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         node = _make_node("node-1", "A fact")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.9, "source": "hybrid"},
         ]
         result = builder.build_whisper_context(
@@ -85,7 +85,7 @@ class TestWhisperDebugMode:
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         nodes = [_make_node(f"node-{i}", f"Fact {i}") for i in range(2)]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
             {"node": nodes[1], "score": 0.3, "source": "hybrid"},
         ]

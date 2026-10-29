@@ -5,10 +5,16 @@ Verified against the current repository state on 2026-04-07.
 Ormah exposes the same core memory engine through several adapter layers:
 
 - MCP for supported MCP clients such as Claude Code and Codex
+- a Pi extension with native memory tools and lifecycle hooks over HTTP
 - a synchronous CLI HTTP adapter
 - an OpenAI-style schema exporter for tool-calling agents
 
 The core engine is not Claude-specific. What differs between clients is mostly setup and transport glue.
+
+For installation and current per-client automation, see the
+[client matrix](<11 - Setup and Installation.md#hooks>). Pi's extension setup is
+documented in [its own guide](../integrations/pi-plugin/SETUP.md). These entry
+points were checked against `b56eda99` on 2026-10-01.
 
 ## Adapter Architecture
 
@@ -76,12 +82,25 @@ So the docs should not say that the MCP `list_tools` call exposes all 13 tools. 
 
 `run_maintenance` is special:
 
-1. phase 1: MCP calls `/agent/maintenance` with `{}` and gets raw JSON batches back
-2. MCP formats those batches into readable text with `_format_maintenance_batches()`
-3. phase 2: the agent submits `results`
-4. MCP posts those results back to `/agent/maintenance`
+1. Phase 1: MCP posts `{}` to `/agent/maintenance` to reserve one assignment.
+2. Only the winner receives `job_id`; the adapter polls that receipt until batches
+   are ready, then returns readable batches, `job_id`, and UTC `expires_at`.
+3. Phase 2: the agent submits `{"job_id": "<receipt>", "results": {...}}`.
+4. MCP posts that receipt and payload, polls the same assignment, and reports
+   `applied` only on matching completion. Empty `results: {}` is a submission.
 
-The formatting happens in the adapter, not in the API route itself.
+A no-argument call during an active reservation returns terminal `busy` immediately,
+without the active receipt or batches. A `job_id`-only call polls that assignment.
+Expired, replaced, failed, or lost assignments stop polling; discard stale analysis
+and stop that run. Duplicate submissions are rejected, including during application.
+A result already being applied can be checked with its receipt; do not resubmit it.
+
+**Protocol update:** results now require the explicit Phase 1 `job_id`. MCP and Pi
+no longer infer it from session state, because agents may share a session. Update
+installed maintenance agent templates with the normal setup/update flow. There is
+no compatibility fallback for results lacking a receipt. The normal human flow is
+still two calls. Analysis expires after 30 minutes by default; see
+[configuration](12%20-%20Configuration%20Reference.md#agent-backed-maintenance).
 
 ## Tool Schemas
 

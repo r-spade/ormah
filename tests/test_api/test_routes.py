@@ -68,6 +68,29 @@ def test_recall_not_found(client):
     assert resp.status_code == 404
 
 
+def test_recall_by_an_ambiguous_short_id_names_every_candidate(client):
+    """Two memories share the Short id `deadbeef`. The agent holding only that Short id
+    must learn the reference is ambiguous and get the Full ids to retry with, not a
+    "not found" and not one of the two picked at random."""
+    from ormah.models.node import MemoryNode, NodeType, Tier
+
+    engine = client.app.state.engine
+    ids = [f"deadbeef-0000-0000-0000-00000000000{s}" for s in "ab"]
+    for node_id in ids:
+        node = MemoryNode(
+            id=node_id, type=NodeType.fact, tier=Tier.working,
+            title=f"Collider {node_id[-1]}", content="colliding", source="test",
+        )
+        engine.builder.index_single(engine.file_store.save(node))
+
+    resp = client.get("/agent/recall/deadbeef")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "ambiguous" in detail.lower()
+    assert all(node_id in detail for node_id in ids)
+
+
 def test_stats(client):
     resp = client.get("/stats")
     assert resp.status_code == 200
@@ -207,7 +230,7 @@ def test_maintenance_runs_in_background_and_stats_stay_available(client):
         release.set()
 
 
-def test_maintenance_reuses_single_inflight_job(client):
+def test_maintenance_rejects_competing_claim(client):
     app = client.app
     release = threading.Event()
     original = app.state.engine.get_maintenance_batches
@@ -228,8 +251,10 @@ def test_maintenance_reuses_single_inflight_job(client):
         second = client.post("/agent/maintenance", json={})
 
         assert first.status_code == 202
-        assert second.status_code == 202
-        assert first.json()["job_id"] == second.json()["job_id"]
+        assert second.status_code == 200
+        assert second.json()["status"] == "busy"
+        assert "job_id" not in second.json()
+        assert "batches" not in second.json()
     finally:
         app.state.engine.get_maintenance_batches = original
         release.set()

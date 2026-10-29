@@ -88,35 +88,43 @@ The route also maintains an in-memory recent-prompt buffer by session id before 
 
 ## Maintenance Endpoint
 
-`POST /agent/maintenance` is a two-phase endpoint.
+`POST /agent/maintenance` uses one in-memory expiring reservation.
 
 ### Phase 1
 
-Send `{}`.
+Send `{}`. An atomic claim returns HTTP 202 with `job_id` and
+`status: "running_phase1"`. Preparation runs in a background thread. A competing
+claim receives HTTP 200 with `status: "busy"` and a stop message, without the active
+receipt or batches. Poll `GET /agent/maintenance?job_id=<receipt>` (receipt required),
+or POST `{"job_id": "<receipt>"}`, until `awaiting_results` returns `batches` and UTC
+`expires_at`. The batches contain `link_candidates`, `conflict_candidates`,
+`merge_candidates`, `consolidation_clusters`, and `summary`.
 
-The route calls `engine.get_maintenance_batches()` and returns raw JSON batches:
-
-- `link_candidates`
-- `conflict_candidates`
-- `merge_candidates`
-- `consolidation_clusters`
-- `summary`
+Only analysis expires: its monotonic deadline starts when preparation finishes,
+30 minutes by default (`ORMAH_MAINTENANCE_TIMEOUT_MINUTES`, positive integer).
+Repeated status reads do not renew it. Expiry is checked on claim, submit, status,
+and maintenance eligibility. Preparation and application remain reserved.
 
 ### Phase 2
 
-Send:
+Send `{"job_id": "<receipt>", "results": {...}}` (including `results: {}` when empty).
+The matching unexpired assignment transitions atomically to `running_phase2` and
+returns HTTP 202. Poll the receipt until `completed` with `apply_summary`. Only
+successful application records `last_maintenance_run` and releases the reservation.
+The MCP adapter presents completion as `{"status": "applied", "job_id": "...",
+"summary": {...}}`; the HTTP route returns the job state.
 
-```json
-{"results": {...}}
-```
+Missing/wrong/expired receipts and duplicate submissions return HTTP 409; a lost
+assignment after restart returns HTTP 404. No rejected submission applies results.
+A duplicate while applying must poll its receipt instead of submitting again.
+Polling yields terminal `expired`, `replaced`, `failed`, or `idle` for unusable
+assignments: discard stale analysis and stop that run. Never relabel old decisions
+with a newer receipt. No session ID fallback is supported.
 
-The route calls `engine.apply_maintenance_results()` and returns:
-
-```json
-{"status": "applied", "summary": {...}}
-```
-
-The important implementation detail is that **MCP formats phase-1 batches into readable text**. The HTTP route itself does not.
+The whisper signal remains interval-based and is suppressed while any reservation
+is active. Expiry/failure restores eligibility without recording completion. Admin
+`/admin/maintenance-status` and health diagnostics retain current job metadata.
+Reservations are in memory; restart loses them and old receipts fail safely.
 
 ## Admin Routes
 
@@ -238,15 +246,15 @@ sequenceDiagram
     MCP->>API: POST /agent/maintenance {}
     API->>ENGINE: get_maintenance_batches()
     ENGINE-->>API: raw JSON batches
-    API-->>MCP: raw JSON batches
+    API-->>MCP: job_id (MCP polls until batches ready)
     MCP->>MCP: format batches into readable text
-    MCP-->>AGENT: formatted candidate list
+    MCP-->>AGENT: job_id, expires_at, formatted candidate list
 
-    AGENT->>MCP: run_maintenance({results: ...})
+    AGENT->>MCP: run_maintenance({job_id, results: ...})
     MCP->>API: POST /agent/maintenance
     API->>ENGINE: apply_maintenance_results()
     ENGINE-->>API: summary counts
-    API-->>MCP: {status, summary}
+    API-->>MCP: running_phase2 (MCP polls for completed + apply_summary)
     MCP-->>AGENT: text summary
 ```
 

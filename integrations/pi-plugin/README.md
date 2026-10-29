@@ -58,6 +58,13 @@ All settings are env vars (read from the environment and `~/.config/ormah/.env`)
 
 The Ormah server is the sole source of `maintenance_due` signals. `ormah setup` can enable agent-backed maintenance, or it can be enabled with `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` (the legacy shared server setting used for all supported agents).
 
+Maintenance uses an explicit assignment receipt: call `ormah_run_maintenance({})`,
+then submit `{"job_id": "<receipt>", "results": {...}}`. Results without `job_id`
+are rejected; session state no longer supplies it. The default analysis reservation
+is 30 minutes (`ORMAH_MAINTENANCE_TIMEOUT_MINUTES` on the server). Busy callers stop
+immediately. Expired or replaced analysis must be discarded. Refresh installed
+maintenance prompts through the normal setup/update flow when upgrading.
+
 > **Note:** whisper store (transcript extraction) and server-executed LLM maintenance need an Ormah LLM provider (`ORMAH_LLM_PROVIDER=ollama|litellm` + key). Agent-backed maintenance uses Pi's active model. Local recall, whisper retrieval, and the memory tools work without a server-side LLM.
 
 ## Publishing (maintainers)

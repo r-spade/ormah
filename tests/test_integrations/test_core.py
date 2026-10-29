@@ -139,3 +139,30 @@ async def test_mcp_explicit_null_bypasses_project_default(args, expected_space, 
     assert ('default_space' in request.url.params) == has_default
     assert json.loads(request.content).get('space') == expected_space
     assert request.headers['authorization'] == 'Bearer scratch'
+
+
+def test_json5_ownership_preserves_native_host_syntax(tmp_path):
+    config, receipt = tmp_path / 'host.json', tmp_path / 'receipt.json'
+    text = "{ // host comment\n model: 'chosen', nested: { value: 0x20, }, list: ['mine'],}"
+    config.write_text(text)
+    install = Installation(receipt, json5=True)
+    install.value(config, ['mcp', 'ormah'], {'command': 'python'})
+    install.item(config, ['list'], 'ormah')
+    install.commit()
+    assert Installation(receipt, json5=True).intact()
+    Installation(receipt, json5=True).disconnect()
+    result = config.read_text()
+    assert "model: 'chosen'" in result and 'value: 0x20' in result
+    assert '// host comment' in result
+    assert jc.get(result, ['list'], json5=True)[1] == ['mine']
+
+
+def test_json5_adjacent_comments_remain_outside_owned_value():
+    text = '{max:1/* keep number */, enabled:true// keep boolean\n}'
+    updated = jc.put(text, ['ormah'], {'command': 'python'}, json5=True)
+    assert jc.get(updated, ['max'], json5=True)[1] == 1
+    assert jc.get(updated, ['enabled'], json5=True)[1] is True
+    edited = jc.put(updated, ['max'], 2, json5=True)
+    assert '2/* keep number */' in edited
+    assert '// keep boolean' in edited
+    assert jc.get(edited, ['ormah'], json5=True)[1] == {'command': 'python'}

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="246" viewBox="0 0 400 246" role="img" aria-labelledby="title desc">
+<title id="title">Learn, maintain, whisper</title><desc id="desc">Save useful context, keep memory useful, and surface it before the next reply.</desc>
+<style>text{font-family:Arial,Helvetica,sans-serif} .mono{font-family:monospace}</style>
+<rect x="0" y="0" width="400" height="246" rx="10" fill="#101110"/>
+<rect x="0.5" y="0.5" width="399" height="245" rx="10" fill="none" stroke="#393b34"/>
+<path d="M28 39 L28 197" stroke="#6b5b46" fill="none"/>
+<circle cx="28" cy="37" r="8" fill="#101110"/>
+<circle cx="28" cy="37" r="4" fill="#d4a574"/>
+<text x="51" y="44" fill="#eee9e1" font-size="24" font-weight="400">Learn</text>
+<text x="51" y="71" fill="#b4afa5" font-size="20" font-weight="400">Save useful context</text>
+<circle cx="28" cy="113" r="8" fill="#101110"/>
+<circle cx="28" cy="113" r="4" fill="#d4a574"/>
+<text x="51" y="120" fill="#eee9e1" font-size="24" font-weight="400">Maintain</text>
+<text x="51" y="147" fill="#b4afa5" font-size="20" font-weight="400">Keep memory useful</text>
+<circle cx="28" cy="189" r="8" fill="#101110"/>
+<circle cx="28" cy="189" r="4" fill="#85b9aa"/>
+<text x="51" y="196" fill="#eee9e1" font-size="24" font-weight="400">Whisper</text>
+<text x="51" y="223" fill="#b4afa5" font-size="20" font-weight="400">Before the next reply</text>
+</svg>

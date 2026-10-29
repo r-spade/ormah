@@ -61,7 +61,6 @@ function safeText(raw: string): string {
 
 export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 	const { client } = tctx;
-	const maintenanceJobs = new Map<string, string>();
 
 	// ── remember ──────────────────────────────────────────────────────────────
 	pi.registerTool({
@@ -284,13 +283,17 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 		name: "ormah_run_maintenance",
 		label: "Ormah Maintenance",
 		description:
-			"Maintain the Ormah memory graph: link, conflict-check, dedupe, consolidate. Two-call protocol — Phase 1: call with no results to get pending batches (link_candidates, conflict_candidates, merge_candidates, consolidation_clusters). Phase 2: call with results (edges, merges, consolidations) to apply decisions. Use when whisper signals maintenance_due.",
+			"Maintain the Ormah memory graph: link, conflict-check, dedupe, consolidate. Two-call protocol — Phase 1: call with no arguments to reserve a job_id and pending batches (link_candidates, conflict_candidates, merge_candidates, consolidation_clusters). Phase 2: call with that exact job_id and results (edges, merges, consolidations) to apply decisions. Use when whisper signals maintenance_due.",
 		promptSnippet:
 			"Run Ormah graph maintenance (two-call link/dedup/consolidate flow)",
 		promptGuidelines: [
-			"Use ormah_run_maintenance when whisper includes a maintenance_due signal. Phase 1 with no results returns batches; Phase 2 with results applies your decisions.",
+			"Use ormah_run_maintenance when whisper includes a maintenance_due signal. Phase 1 with no arguments returns job_id and batches; Phase 2 requires that exact job_id with results, including {}. A job_id-only call polls that assignment. On busy, stop. On expired/replaced/failed/lost, discard stale analysis and stop. Do not retry in a loop.",
 		],
 		parameters: Type.Object({
+			job_id: Type.Optional(Type.String({
+				minLength: 1,
+				description: "Phase 1 assignment receipt; required with results. Alone polls that job.",
+			})),
 			results: Type.Optional(
 				Type.Object({
 					edges: Type.Optional(
@@ -326,23 +329,15 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 				}),
 			),
 		}),
-		async execute(_id, params, signal, _onUpdate, ctx: ExtensionContext) {
+		async execute(_id, params, signal) {
 			try {
-				const sessionId = getSessionId(ctx);
 				const resp = await client.runMaintenance(
 					{
-						jobId: params.results
-							? maintenanceJobs.get(sessionId)
-							: undefined,
+						jobId: params.job_id,
 						results: params.results as MaintenanceResults | undefined,
 					},
 					signal,
 				);
-				if (!params.results && typeof resp.job_id === "string") {
-					maintenanceJobs.set(sessionId, resp.job_id);
-				} else if (params.results && resp.status === "completed") {
-					maintenanceJobs.delete(sessionId);
-				}
 				return textResult(safeText(JSON.stringify(resp, null, 2)));
 			} catch (e) {
 				throw new Error(

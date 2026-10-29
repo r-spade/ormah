@@ -10,12 +10,13 @@ from typing import Literal
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.models.node import ConnectRequest, CreateNodeRequest, UpdateNodeRequest
 from ormah.models.proposals import ResolveProposalRequest
 from ormah.models.search import SearchQuery
+from ormah.store.file_store import UnresolvedNodeReference
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,10 @@ def recall_node(
 ):
     """Get a specific memory with its connections."""
     engine = request.app.state.engine
-    text = engine.recall_node(node_id, session_id=session_id)
+    try:
+        text = engine.recall_node(node_id, session_id=session_id)
+    except UnresolvedNodeReference as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if text is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return TextResponse(text=text, node_id=node_id)
@@ -402,11 +406,11 @@ def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, request: Re
 
 class MaintenanceRequest(BaseModel):
     results: dict | None = None
-    job_id: str | None = None
+    job_id: str | None = Field(default=None, min_length=1)
 
 
 @router.get("/maintenance")
-def get_maintenance_status(request: Request, job_id: str | None = Query(None)):
+def get_maintenance_status(request: Request, job_id: str = Query(..., min_length=1)):
     """Get current maintenance job status and any ready results."""
     manager = _maintenance_manager(request)
     return manager.get_status(job_id=job_id)
@@ -416,21 +420,26 @@ def get_maintenance_status(request: Request, job_id: str | None = Query(None)):
 def run_maintenance(request: Request, body: MaintenanceRequest, response: Response):
     """Claude-in-the-loop maintenance: get pending work or apply Claude's decisions.
 
-    Phase 1 — call with no body (or ``{}``):
-        Starts background batch generation and returns job status immediately.
+    Phase 1 — send ``{}``:
+        Reserve background preparation, or return busy without another assignment.
+        With only ``job_id``, observe that assignment's current status instead.
 
-    Phase 2 — call with ``{"results": {...}}``:
+    Phase 2 — call with ``{"job_id": "...", "results": {...}}``:
         Starts background application of Claude's decisions and returns job status immediately.
     """
     manager = _maintenance_manager(request)
     try:
-        if body.results is not None:
+        if "results" in body.model_fields_set:
+            if body.results is None:
+                raise ValueError("results must be an object (use {} for empty decisions)")
             payload = manager.submit_results(body.results, job_id=body.job_id)
             response.status_code = 202
             return payload
 
+        if body.job_id:
+            return manager.get_status(job_id=body.job_id)
         payload = manager.start_phase1()
-        response.status_code = 200 if payload["status"] == "awaiting_results" else 202
+        response.status_code = 200 if payload["status"] == "busy" else 202
         return payload
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

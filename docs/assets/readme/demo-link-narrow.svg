@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="94" viewBox="0 0 400 94" role="img" aria-labelledby="title desc">
+<title id="title">Watch the original demo</title><desc id="desc">Opens the existing Ormah video on YouTube, separate from this illustrative story.</desc>
+<style>text{font-family:Arial,Helvetica,sans-serif} .mono{font-family:monospace}</style>
+<rect x="0" y="0" width="400" height="94" rx="10" fill="#101110"/>
+<rect x="0.5" y="0.5" width="399" height="93" rx="10" fill="none" stroke="#393b34"/>
+<circle cx="35" cy="46" r="20" fill="#30291f"/>
+<path d="M30 38 L43 46 L30 54 Z" fill="#d4a574"/>
+<text x="70" y="42" fill="#eee9e1" font-size="21" font-weight="500">Watch the original demo</text>
+<text x="70" y="68" fill="#b4afa5" font-size="15" font-weight="400">Ormah · YouTube</text>
+</svg>

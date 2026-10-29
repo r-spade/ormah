@@ -6,6 +6,12 @@ This page is the system map for Ormah. Read it when you want the shape of the ru
 
 At a high level, Ormah is a local-first memory system for agents. Markdown node files are the durable source of truth, SQLite and vector indexes are derived state, FastAPI is the operational center, and whisper plus maintenance logic sit on top of that core.
 
+New to Ormah? Start with [installation and your first memory](<11 - Setup and Installation.md>).
+Connected agents share context by using the same Ormah store and project.
+Claude Code and Codex CLI use prompt hooks; Pi uses a native extension.
+Claude Desktop on macOS has memory tools without an automatic prompt hook.
+This client summary was checked against `b56eda99` on 2026-10-01.
+
 ## System Shape
 
 ```mermaid
@@ -13,6 +19,7 @@ flowchart LR
     subgraph Clients
         CLAUDE[Claude Code]
         CODEX[Codex]
+        PI[Pi]
         CLI[ormah CLI]
         WEB[Web UI]
         OTHER[Other tool-calling agent]
@@ -53,6 +60,7 @@ flowchart LR
 
     CLAUDE --> MCP
     CODEX --> MCP
+    PI --> AGENT
     CLI --> CLIA
     WEB --> UI
     OTHER -. uses exported tool schemas .-> OAIA
@@ -148,7 +156,8 @@ Read more: [01 - Data Model](<./01 - Data Model.md>), [02 - Storage Layer](<./02
 4. `MemoryEngine.get_whisper_context()` delegates to `ContextBuilder.build_whisper_context()`.
 5. Whisper searches, reranks, applies affinity and gating, formats the result, and may append `maintenance_due`.
 
-Claude Code and Codex both install this hook path today.
+Claude Code and Codex CLI install this hook path. Pi calls the same Whisper
+API from its extension before each agent turn.
 
 Read more: [03 - Search and Ranking](<./03 - Search and Ranking.md>), [04 - Whisper - Involuntary Recall](<./04 - Whisper - Involuntary Recall.md>), [09 - Affinity and Feedback](<./09 - Affinity and Feedback.md>)
 

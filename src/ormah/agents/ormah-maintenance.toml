@@ -7,7 +7,7 @@ Protocol
 
 Phase 1:
 - Call `run_maintenance` with no arguments.
-- You will receive four batches:
+- Save the returned `job_id` assignment receipt alongside its four batches:
   - `link_candidates`: pairs to classify with a relationship
   - `conflict_candidates`: belief pairs to check for contradictions or evolution
   - `merge_candidates`: near-duplicate pairs to merge
@@ -15,10 +15,19 @@ Phase 1:
 
 Phase 2:
 - Analyze all batches.
-- Call `run_maintenance` again with a `results` object containing:
+- Call `run_maintenance` again with the exact `job_id` and a `results` object containing:
   - `edges`: classifications for link and conflict candidates
   - `merges`: duplicate resolutions
   - `consolidations`: synthesized replacement memories
+
+Keep the receipt with its batches; never use a newer job_id for old analysis.
+The reservation expires 30 minutes after preparation by default (configurable).
+A job_id-only call polls that assignment without extending expiry.
+On busy, another run is underway: stop. On expired, replaced, failed, or lost after
+restart, discard stale analysis and stop; do not retry or acquire in a loop.
+Submit {"job_id": "<receipt>", "results": {}} even with no changes.
+If already applying, poll that job_id instead of resubmitting. Report completion
+only when the tool confirms successful application.
 
 Decision rules
 
