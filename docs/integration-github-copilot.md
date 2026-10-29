@@ -1,4 +1,4 @@
-# GitHub Copilot — VS Code Legacy Local harness
+# GitHub Copilot — VS Code Local and Copilot modes
 
 ```sh
 ormah agents connect github_copilot --project /absolute/workspace
@@ -6,15 +6,13 @@ ormah agents status github_copilot --project /absolute/workspace
 ormah agents disconnect github_copilot --project /absolute/workspace
 ```
 
-This integration targets the **Legacy Local** harness, not the newer shared
-Copilot runtime.
+Setup installs separate prompt hooks for **Local** and the newer **Copilot**
+session target in VS Code. Local uses `UserPromptSubmit`; the shared Copilot
+runtime uses `userPromptTransformed` and must support that event. Choose the
+session target using the Copilot/Local selector in a new chat. CLI and remote
+hosts have not been validated and are not claimed as supported by this setup.
 
-Select **Local** as the VS Code Session Target. The newer **Copilot Agent Host**
-and Copilot CLI have different hook contracts and are not covered by this
-integration. MCP alone may be forwarded to other harnesses; that does not
-establish automatic whisper there.
-
-Project setup adds `.vscode/mcp.json`, `.github/hooks/ormah-vscode.json`, and
+Project setup adds `.vscode/mcp.json`, `.github/hooks/ormah-vscode.json`, `.github/hooks/ormah-copilot.json`, and
 `.github/instructions/ormah.instructions.md`. User setup (without `--project`)
 uses the default VS Code profile's `mcp.json` and `~/.copilot/hooks`. Set
 `ORMAH_VSCODE_USER_DIR` to the directory opened by **MCP: Open User Configuration**
@@ -29,12 +27,16 @@ commands are quoted for the default PowerShell hook executor; Linux/macOS use
 the host shell. The macOS Local path has live validation below; Windows execution
 remains untested.
 
-The handler reads `prompt`, `session_id`, and `cwd` from `UserPromptSubmit`.
+The Local handler reads `prompt`, `session_id`, and `cwd` from `UserPromptSubmit`.
+The shared-runtime handler reads `prompt`, `sessionId`, `cwd`, and
+`transformedPrompt` from `userPromptTransformed`. It preserves the original
+transformed prompt verbatim and appends memory in `modifiedTransformedPrompt`.
+It never returns a permission or turn-handling decision.
 Project setup pins the workspace for both MCP and the hook; user MCP uses VS
 Code's `${workspaceFolder}` substitution and the hook's cwd is repository-relative
 `.`. For multi-root ambiguity prefer project setup. Missing identity/cwd, another
 harness's payload, an unavailable daemon, or invalid JSON produces `{}` with
-exit code 0. Success returns `hookSpecificOutput.additionalContext` for the Local
+exit code 0. Local success returns `hookSpecificOutput.additionalContext` for the Local
 model request, never an approval decision. Cancellation is handled by the host
 terminating the hook process; retrieval also has a bounded deadline.
 
@@ -89,8 +91,9 @@ answer with an empty `toolRequests` list. This establishes automatic whisper in
 that tested Local session.
 
 The newer **Copilot** session target ran the hook but did not produce the fact in
-its answer. It remains unsupported; hook discovery alone is not proof of context
-injection. In a new chat, select **Local** using the **Copilot/Local session
+its answer with the original Local-only implementation. The new transformed
+hook addresses that contract difference; live validation of the extension is
+still pending. Hook discovery alone is not proof of context injection. In a new chat, select **Local** using the **Copilot/Local session
 selector**, not the dropdown next to the new-chat button. Reloading or starting a
 new chat can choose the newer target, so check the target before testing.
 
@@ -108,3 +111,17 @@ confirmed both requests with `default_space=workspace`. The stored memory had
 Windows, remote profiles, and other installed versions have not been live-tested. `verified_live` remains false
 in status because setup checks configuration integrity, not whether that user
 has completed a successful live session.
+
+### Shared-runtime extension
+
+The installed Copilot0.72.0 SDK includes `userPromptTransformed` and consumes
+`modifiedTransformedPrompt` before emitting the model-facing user message. See
+the [official event contract](https://docs.github.com/en/copilot/reference/hooks-reference#userprompttransformed).
+
+Both hook files can be discovered by the newer runtime. It ignores the legacy
+`UserPromptSubmit` command output, so the transformed hook uses a separate
+session namespace: a discarded legacy retrieval must not suppress the real
+injection as already served. This can still cause an extra retrieval and a
+legacy exposure record on a prompt; it does not append that legacy output to
+the new runtime's prompt. Live tests must verify both event coexistence and the
+actual model-facing result. No shared-runtime live success is claimed yet.

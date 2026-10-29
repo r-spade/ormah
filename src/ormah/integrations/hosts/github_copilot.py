@@ -1,4 +1,4 @@
-"""GitHub Copilot in the VS Code Local harness."""
+"""GitHub Copilot in the VS Code Local and shared Copilot runtimes."""
 import json
 import os
 import platform
@@ -48,6 +48,16 @@ def connect(project: Path | None = None) -> None:
     install.file(hooks / "ormah-vscode.json", json.dumps({
         "hooks": {"UserPromptSubmit": [hook]},
     }, indent=2) + "\n")
+    # A separate file keeps the existing Local receipt stable during upgrades.
+    native_command = command + ["--event", "userPromptTransformed"]
+    native_hook = {
+        "type": "command", "command": shlex.join(native_command),
+        "windows": "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in native_command),
+        "cwd": ".", "timeoutSec": 12,
+    }
+    install.file(hooks / "ormah-copilot.json", json.dumps({
+        "version": 1, "hooks": {"userPromptTransformed": [native_hook]},
+    }, indent=2) + "\n")
     if project:
         install.file(project / ".github/instructions/ormah.instructions.md",
                      '---\napplyTo: "**"\n---\n\n' + common.instructions())
@@ -60,15 +70,16 @@ def disconnect(project: Path | None = None) -> None:
 
 def status(project: Path | None = None) -> dict:
     return common.capability(HOST, whisper="native_hook", project=project, detail=(
-        "VS Code Local harness only: MCP + UserPromptSubmit whisper configured. "
-        "Requires trusted workspace and enabled Local hooks. Copilot CLI/Agent Host unconfigured."
+        "VS Code Local and Copilot: MCP and prompt hooks configured. "
+        "Requires trusted workspace and enabled hooks. Shared Copilot requires "
+        "userPromptTransformed support. CLI and remote hosts are not verified."
     ))
 
 
 def descriptor():
     from ormah.setup import AgentDescriptor
     return AgentDescriptor(
-        id=HOST, name="GitHub Copilot (VS Code Local)", detect_fn=detected,
+        id=HOST, name="GitHub Copilot (VS Code)", detect_fn=detected,
         is_wired_fn=lambda: status()["tools"] == "mcp", wire_fn=connect,
         unwire_fn=disconnect, capabilities_fn=status,
     )
