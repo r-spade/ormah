@@ -13,7 +13,11 @@ def base_url() -> str:
     # Lazy import: shell hooks need not load Ormah's engine or embeddings.
     if value := os.environ.get("ORMAH_URL"):
         return value.rstrip("/")
-    return f"http://127.0.0.1:{os.environ.get('ORMAH_PORT', '8787')}"
+    if port := os.environ.get("ORMAH_PORT"):
+        return f"http://127.0.0.1:{port}"
+    from ormah.config import settings
+
+    return f"http://127.0.0.1:{settings.port}"
 
 
 def headers() -> dict[str, str]:

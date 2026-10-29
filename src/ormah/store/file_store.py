@@ -31,7 +31,7 @@ def _numbered_names(prefix: str, short_id: str):
 
 
 class UnresolvedNodeReference(LookupError):
-    """The store cannot tell which node a reference names, nor that none does.
+    """The store or the index cannot tell which node a reference names, nor that none does.
 
     Raised for an ambiguous Short id, and for a reference whose only candidate files
     will not parse. Neither is absence, so a caller about to mutate state on "not

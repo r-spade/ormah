@@ -671,6 +671,8 @@ class TestIngestEndpointExtraTags:
 class TestWhisperSetup:
     def test_whisper_setup_includes_precompact(self, monkeypatch, tmp_path):
         """Setup generates both UserPromptSubmit and PreCompact hooks when whisper_out_enabled."""
+        # --global writes ~/.claude/settings.json: keep it off the real HOME.
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
             "ormah.adapters.cli_adapter.settings",
             MagicMock(port=8787, whisper_out_enabled=True),
@@ -687,6 +689,8 @@ class TestWhisperSetup:
 
     def test_whisper_setup_always_registers_precompact(self, monkeypatch, tmp_path):
         """Setup always registers PreCompact hook (runtime flag gates execution, not registration)."""
+        # --global writes ~/.claude/settings.json: keep it off the real HOME.
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
             "ormah.adapters.cli_adapter.settings",
             MagicMock(port=8787, whisper_out_enabled=False, whisper_out_min_turns=5),

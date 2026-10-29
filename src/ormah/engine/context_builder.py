@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from ormah.embeddings.runtime import inference_request
+
 import hashlib
 import logging
 import re
 from datetime import datetime, timezone
+from threading import Lock
 
 import numpy as np
 
-from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
+from ormah.engine.maintenance_signal import maintenance_due_signal
 from ormah.engine.prompt_classifier import PromptIntent, is_clear_acknowledgement
 from ormah.index.graph import GraphIndex
 from ormah.text.tokens import distinctive_tokens
@@ -114,6 +117,7 @@ class ContextBuilder:
         self.graph = graph
         self.engine = engine
         self._classifier = None  # lazy-init PromptClassifier
+        self._classifier_lock = Lock()
 
     def _get_classifier(self):
         """Get or create the prompt intent classifier (uses engine's encoder)."""
@@ -121,23 +125,26 @@ class ContextBuilder:
             return self._classifier
         if not self.engine:
             return None
-        try:
-            from ormah.engine.prompt_classifier import PromptClassifier, parser_for
+        with self._classifier_lock:
+            if self._classifier is not None:
+                return self._classifier
+            try:
+                from ormah.engine.prompt_classifier import PromptClassifier, parser_for
 
-            hybrid_search = self.engine._get_hybrid_search()
-            if hybrid_search is None:
+                hybrid_search = self.engine._get_hybrid_search()
+                if hybrid_search is None:
+                    return None
+                encoder = hybrid_search.encoder
+                settings = getattr(self.engine, "settings", None)
+                threshold = settings.whisper_intent_threshold if settings else 0.65
+                temporal_parser = parser_for(settings.temporal_locale_codes) if settings else None
+                self._classifier = PromptClassifier(
+                    encoder, threshold=threshold, temporal_parser=temporal_parser
+                )
+                return self._classifier
+            except Exception as e:
+                logger.warning("Failed to create prompt classifier: %s", e)
                 return None
-            encoder = hybrid_search.encoder
-            settings = getattr(self.engine, "settings", None)
-            threshold = settings.whisper_intent_threshold if settings else 0.65
-            temporal_parser = parser_for(settings.temporal_locale_codes) if settings else None
-            self._classifier = PromptClassifier(
-                encoder, threshold=threshold, temporal_parser=temporal_parser
-            )
-            return self._classifier
-        except Exception as e:
-            logger.warning("Failed to create prompt classifier: %s", e)
-            return None
 
     def _topic_was_served(
         self,
@@ -214,6 +221,7 @@ class ContextBuilder:
         except Exception as e:
             logger.warning("whisper_decisions write failed: %s", e)
 
+    @inference_request("general")
     def build_whisper_context(
         self,
         prompt: str,
@@ -437,7 +445,7 @@ class ContextBuilder:
         }
         if intent is not None:
             # Extract search_query override before merging (it's not a
-            # recall_search_structured kwarg — it overrides our local query).
+            # _search_structured kwarg — it overrides our local query).
             intent_search_query = intent.search_params.pop("search_query", None)
             search_kwargs.update(intent.search_params)
             if intent_search_query is not None:
@@ -475,10 +483,75 @@ class ContextBuilder:
         if effective_query_vec is not None:
             search_kwargs["query_vec"] = effective_query_vec
 
+        # Affinity is prompt-specific, so keep its rows and computed deltas
+        # local to this whisper call. The preference channel can then reuse a
+        # delta computed for a candidate in the ordinary channel without
+        # applying it twice or carrying feedback into a later request.
+        affinity_rows_cache: dict[str, list[dict]] = {}
+        affinity_boost_cache: dict[str, float] = {}
+        affinity_unavailable = False
+
+        def _apply_affinity_boost(results: list[dict]) -> list[dict]:
+            """Apply the current raw-prompt affinity delta once per candidate.
+
+            The marker makes this helper safe if a caller passes an already
+            adjusted candidate. Lookup/compute errors are intentionally
+            propagated so each channel can retain its established unadjusted
+            fallback independently.
+            """
+            nonlocal affinity_unavailable
+            if not results or prompt_vec is None or affinity_unavailable:
+                return results
+
+            unadjusted = [
+                result for result in results if not result.get("_affinity_applied")
+            ]
+            if not unadjusted:
+                return results
+
+            from ormah.engine.affinity import batch_fetch_affinity, compute_affinity_boost
+
+            node_ids = list(dict.fromkeys(result["node"]["id"] for result in unadjusted))
+            missing_ids = [node_id for node_id in node_ids if node_id not in affinity_rows_cache]
+            if missing_ids:
+                try:
+                    rows_by_node = batch_fetch_affinity(self.graph.conn, missing_ids)
+                    for node_id in missing_ids:
+                        affinity_rows_cache[node_id] = rows_by_node.get(node_id, [])
+                except Exception:
+                    affinity_unavailable = True
+                    raise
+
+            try:
+                for node_id in node_ids:
+                    if node_id not in affinity_boost_cache:
+                        affinity_boost_cache[node_id] = compute_affinity_boost(
+                            prompt_vec,
+                            node_id,
+                            affinity_rows_cache[node_id],
+                            self.engine.settings,
+                        )
+            except Exception:
+                affinity_unavailable = True
+                raise
+
+            return [
+                result
+                if result.get("_affinity_applied")
+                else {
+                    **result,
+                    "score": result["score"] + affinity_boost_cache[result["node"]["id"]],
+                    "_pre_boost_score": result["score"],
+                    "_affinity_boost": affinity_boost_cache[result["node"]["id"]],
+                    "_affinity_applied": True,
+                }
+                for result in results
+            ]
+
         # Always run search — even for identity-only queries, search finds
         # location/work/study nodes that graph neighbors alone miss.
         try:
-            search_results = self.engine.recall_search_structured(**search_kwargs)
+            search_results = self.engine._search_structured(**search_kwargs)
         except Exception as e:
             logger.warning("Whisper search failed: %s", e)
             self._log_decision(
@@ -588,24 +661,7 @@ class ContextBuilder:
         pre_gate_candidates: list[dict] = []
         if not has_temporal and reranker_enabled and search_results and prompt_vec is not None:
             try:
-                from ormah.engine.affinity import batch_fetch_affinity, compute_affinity_boost
-
-                node_ids = [r["node"]["id"] for r in search_results]
-                affinity_rows_map = batch_fetch_affinity(self.graph.conn, node_ids)
-                boosted = []
-                for r in search_results:
-                    nid = r["node"]["id"]
-                    rows = affinity_rows_map.get(nid, [])
-                    boost = compute_affinity_boost(prompt_vec, nid, rows, self.engine.settings)
-                    boosted.append({
-                        **r,
-                        "score": r["score"] + boost,
-                        "_pre_boost_score": r["score"],
-                        # Tagged separately so the (absolute-signal) gate can
-                        # include learned feedback without inheriting the
-                        # rank-relative blended score.
-                        "_affinity_boost": boost,
-                    })
+                boosted = _apply_affinity_boost(search_results)
                 # Apply 0.40 floor AFTER boost (spec: reranker_min_score is now a post-boost floor).
                 # Use the reranker_min_score parameter (passed from engine.settings); fall back to 0.40.
                 effective_floor = reranker_min_score if reranker_min_score > 0.0 else 0.40
@@ -796,7 +852,7 @@ class ContextBuilder:
                 from ormah.embeddings.reranker import rerank
 
                 existing_ids = {r["node"]["id"] for r in search_results}
-                preference_candidates = self.engine.recall_search_structured(
+                preference_candidates = self.engine._search_structured(
                     query=preference_query,
                     limit=max_nodes * max(candidate_pool_multiplier, 1),
                     default_space=space,
@@ -823,6 +879,20 @@ class ContextBuilder:
                     {**r, "source": "preference_applicability"}
                     for r in applicability_results
                 ]
+                try:
+                    # Preferences use the same raw prompt context as ordinary
+                    # candidates. Apply feedback before their applicability
+                    # gate and sort again so the cap selects by adjusted
+                    # evidence rather than the raw reranker order.
+                    applicability_results = _apply_affinity_boost(applicability_results)
+                except Exception as e:
+                    # A missing vector or affinity failure must not make the
+                    # separate preference channel disappear.
+                    logger.warning(
+                        "Preference affinity boost failed, using unmodified scores: %s",
+                        e,
+                    )
+                applicability_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
                 _record_candidate_versions(applicability_results)
                 for result in applicability_results:
                     trace = candidate_trace[result["node"]["id"]]
@@ -914,7 +984,7 @@ class ContextBuilder:
                     )
                     for node_id, trace in candidate_trace.items():
                         r = trace["latest"]
-                        score = r.get("_pre_boost_score", r.get("score", 0.0))
+                        score = r.get("score", 0.0)
                         was_injected = 1 if node_id in injected_ids else 0
                         cursor = conn.execute(
                             "INSERT INTO whisper_log "
@@ -992,33 +1062,9 @@ class ContextBuilder:
             bool(result),
         )
 
-        # Maintenance due signal: fires once per interval regardless of node creation rate.
-        # Self-limiting: apply_maintenance_results records last_maintenance_run, silencing
-        # the signal for claude_maintenance_interval_hours.
-        if self.engine is not None:
-            settings = getattr(self.engine, "settings", None)
-            if settings and getattr(settings, "claude_maintenance_enabled", False):
-                interval_hours = getattr(settings, "claude_maintenance_interval_hours", 24)
-                try:
-                    row = self.graph.conn.execute(
-                        "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
-                    ).fetchone()
-                    last_run = row[0] if row else None
-                    due = True
-                    if last_run:
-                        parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-                        if parsed_last_run.tzinfo is None:
-                            parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
-                        elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
-                        due = elapsed.total_seconds() > interval_hours * 3600
-                    if due:
-                        result = (
-                            f"{result}\n{MAINTENANCE_DUE_SIGNAL}"
-                            if result
-                            else MAINTENANCE_DUE_SIGNAL
-                        )
-                except Exception as e:
-                    logger.warning("Failed to compute maintenance_due: %s", e)
+        signal = maintenance_due_signal(self.engine, self.graph.conn)
+        if signal:
+            result = f"{result}\n{signal}" if result else signal
 
         if _return_debug:
             return result, _injected_ids

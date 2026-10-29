@@ -109,6 +109,23 @@ export default function AgentsPanel({ open, onClose }: Props) {
                 )}
               </div>
 
+              {agent.id === "github_copilot" && (
+                <div className="admin-task-desc" style={{ marginBottom: 12 }}>
+                  <p>Automatic memory recall and memory tools in VS Code’s Local and Copilot chats.</p>
+                  <details>
+                    <summary>How to enable Ormah</summary>
+                    <ol>
+                      <li>Install VS Code and GitHub Copilot, then sign in to GitHub.</li>
+                      <li>Click connect here to configure the default VS Code profile on the machine running Ormah.</li>
+                      <li>Keep Ormah running. Reload VS Code, open your project, and approve the workspace, Ormah MCP server, and hooks when prompted.</li>
+                      <li>Start a Local or Copilot chat and ask Ormah to save and recall a test fact.</li>
+                    </ol>
+                    <p>For a single project or another VS Code profile, follow the setup guide. The connection status here reflects user-level setup.</p>
+                    <a href="https://github.com/r-spade/ormah/blob/main/docs/integration-github-copilot.md" target="_blank" rel="noopener noreferrer">Copilot setup guide</a>
+                  </details>
+                </div>
+              )}
+
               {agent.available_on_current_os && agent.detected && !agent.wired && (
                 <button
                   className="review-btn approve"

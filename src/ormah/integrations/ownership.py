@@ -13,6 +13,9 @@ from . import json_config
 
 
 def atomic_write(path: Path, text: str) -> None:
+    # Preserve dotfile links, including relative links to not-yet-created targets.
+    if path.is_symlink():
+        path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".ormah-", dir=path.parent)
     try:
@@ -97,7 +100,7 @@ class Installation:
     def _record(self, record: dict) -> bool:
         if self.recovery:
             self._recover()
-        if record in self.records:
+        if any(json_config.values_equal(record, existing) for existing in self.records):
             return True
         if any(r["path"] == record["path"] and r.get("keys") == record.get("keys")
                and r["kind"] != "item" for r in self.records):
@@ -110,7 +113,7 @@ class Installation:
         text = self._read(path)
         found, current = self.editor.get(text, keys)
         if found:
-            if owned and current == value:
+            if owned and json_config.values_equal(current, value):
                 return
             raise ValueError(f"Preserving existing configuration: {path}: {'.'.join(keys)}")
         self.pending[path] = self.editor.put(text, keys, value)
@@ -124,7 +127,7 @@ class Installation:
         found, current = self.editor.get(text, keys)
         if found and not isinstance(current, list):
             raise ValueError(f"Expected array in {path}: {'.'.join(keys)}")
-        if found and value in current:
+        if found and any(json_config.values_equal(value, item) for item in current):
             if owned:
                 return
             raise ValueError(f"Preserving unowned registration: {path}")
@@ -185,11 +188,13 @@ class Installation:
             if not found:
                 continue
             if record["kind"] == "item":
-                if isinstance(current, list) and value in current:
+                if isinstance(current, list) and any(
+                    json_config.values_equal(value, item) for item in current
+                ):
                     self.pending[path] = self.editor.remove_item(text, keys, value)
                 else:
                     preserved.append(str(path))
-            elif current == value:
+            elif json_config.values_equal(current, value):
                 self.pending[path] = self.editor.put(text, keys, None, delete=True)
             else:
                 preserved.append(str(path))
@@ -217,9 +222,11 @@ class Installation:
                     if not found:
                         return False
                     if record["kind"] == "item":
-                        if not isinstance(current, list) or record["value"] not in current:
+                        if not isinstance(current, list) or not any(
+                            json_config.values_equal(record["value"], item) for item in current
+                        ):
                             return False
-                    elif current != record["value"]:
+                    elif not json_config.values_equal(current, record["value"]):
                         return False
             return True
         except (OSError, ValueError):

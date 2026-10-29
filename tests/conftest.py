@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -69,6 +70,14 @@ def prevent_tests_mutating_real_ormah_install(monkeypatch):
 
     monkeypatch.setattr(Path, "unlink", guarded_unlink)
     monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
+
+
+@pytest.fixture(autouse=True)
+def isolate_settings_from_developer_env(monkeypatch):
+    """Keep a checkout ``.env`` and exported ``ORMAH_*`` variables out of every ``Settings()``."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for key in [k for k in os.environ if k.startswith("ORMAH_")]:
+        monkeypatch.delenv(key)
 
 
 @pytest.fixture(scope="session", autouse=True)

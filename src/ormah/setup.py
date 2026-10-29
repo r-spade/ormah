@@ -115,9 +115,9 @@ def _preload_local_models() -> None:
 
     if settings.embedding_provider == "local":
         try:
-            from fastembed import TextEmbedding
+            from ormah.embeddings.local_adapter import LocalAdapter
 
-            TextEmbedding(settings.embedding_model, cache_dir=str(cache_dir))
+            LocalAdapter(settings.embedding_model).model
             ok(f"Embedding model ready: {settings.embedding_model}")
         except Exception as e:
             warn(f"Could not preload embedding model {settings.embedding_model}: {e}")
@@ -132,9 +132,9 @@ def _preload_local_models() -> None:
         return
 
     try:
-        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        from ormah.embeddings.reranker import preload_model
 
-        TextCrossEncoder(settings.whisper_reranker_model, cache_dir=str(cache_dir))
+        preload_model(settings.whisper_reranker_model)
         ok(f"Whisper reranker ready: {settings.whisper_reranker_model}")
     except Exception as e:
         warn(f"Could not preload whisper reranker {settings.whisper_reranker_model}: {e}")
@@ -3138,6 +3138,7 @@ def run_setup(
     else:
         _diagnose_server_failure()
 
+    wiring_errors: list[str] = []
     if skip_client_setup:
         # Plugin-safe setup must not install client wiring, but it still needs to
         # remove stale CLI surfaces that override a working user-scoped plugin.
@@ -3145,7 +3146,11 @@ def run_setup(
     else:
         for agent in detected_agents:
             step(f"Hooking up {agent.name}")
-            agent.wire_fn()
+            try:
+                agent.wire_fn()
+            except Exception as exc:  # noqa: BLE001
+                wiring_errors.append(agent.name)
+                warn(f"Could not configure {agent.name}: {type(exc).__name__}: {exc}")
 
         if not detected_agents:
             supported = ", ".join(agent.name for agent in AGENT_REGISTRY)
@@ -3170,5 +3175,10 @@ def run_setup(
     if not ci:
         play_finale()
     _print_setup_summary(ormah_bin)
+    if wiring_errors:
+        warn(f"Some agents could not be configured: {', '.join(wiring_errors)}")
+        info("Resolve the errors above, then run 'ormah setup --update' again.")
+        if ci:
+            raise SystemExit(1)
     if not ci:
         webbrowser.open(f"http://localhost:{settings.port}")
