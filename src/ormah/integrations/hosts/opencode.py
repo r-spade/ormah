@@ -5,7 +5,7 @@ import sys
 from importlib.resources import files
 from pathlib import Path
 
-from ormah.integrations import common
+from ormah.integrations import common, json_config
 from ormah.integrations.ownership import Installation
 
 HOST = "opencode"
@@ -27,17 +27,35 @@ def connect(project: Path | None = None) -> None:
         config = root / "opencode.json"
     assets = (project / ".opencode" if project else root) / "ormah"
     install = Installation(common.receipt(HOST, project))
-    # OpenCode explicitly launches local MCP with InstanceState.directory as cwd.
-    install.value(config, ["mcp", "ormah"], {
+    text = config.read_text() if config.exists() else "{}"
+    native_plugins, _ = json_config.get(text, ["plugins"])
+    native_mcp, _ = json_config.get(text, ["mcp", "servers"])
+    for key in ("plugin", "plugins"):
+        found, plugins = json_config.get(text, [key])
+        if found and isinstance(plugins, list) and (assets / "plugin.mjs").as_uri() in plugins:
+            raise ValueError("Legacy OpenCode plugin configured; disconnect Ormah, then connect again")
+    if native_mcp and json_config.get(text, ["mcp", "ormah"])[0]:
+        raise ValueError(f"Preserving existing configuration: {config}: mcp.ormah; disconnect first")
+    # V2 normalizes V1 config; honor native keys when they already exist.
+    mcp_keys = ["mcp", "servers", "ormah"] if native_mcp else ["mcp", "ormah"]
+    # OpenCode launches local MCP with the session workspace as cwd.
+    install.value(config, mcp_keys, {
         "type": "local", "command": common.mcp_command(HOST, str(project) if project else "."),
-        "enabled": True,
+        **({"disabled": False} if native_mcp else {"enabled": True}),
     })
     source = files("ormah.integrations").joinpath("assets/opencode/plugin.mjs").read_text()
     plugin = assets / "plugin.mjs"
     guide = assets / "instructions.md"
     install.file(plugin, source.replace("__ORMAH_PYTHON__", json.dumps(sys.executable)))
+    v2 = files("ormah.integrations").joinpath("assets/opencode/v2.mjs").read_text()
+    install.file(assets / "v2.mjs", v2.replace("__ORMAH_PYTHON__", json.dumps(sys.executable)))
+    # V1 loads main; V2 loads exports["."]. Neither needs an npm dependency.
+    install.file(assets / "package.json", json.dumps({
+        "name": "ormah-opencode", "type": "module", "main": "./plugin.mjs",
+        "exports": {".": "./v2.mjs"},
+    }, indent=2) + "\n")
     install.file(guide, common.instructions())
-    install.item(config, ["plugin"], plugin.as_uri())
+    install.item(config, ["plugins" if native_plugins else "plugin"], assets.as_uri())
     install.item(config, ["instructions"], str(guide))
     install.commit()
 
@@ -48,8 +66,8 @@ def disconnect(project: Path | None = None) -> None:
 
 def status(project: Path | None = None) -> dict:
     return common.capability(HOST, whisper="native_extension", project=project, detail=(
-        "MCP tools and automatic chat.message whisper configured; reload OpenCode. "
-        "Contract checked against 1.18.32; no live model session validated."
+        "Supports OpenCode V1 and V2 with MCP tools and automatic memory recall. "
+        "Restart OpenCode after connecting; keep Ormah running."
     ))
 
 

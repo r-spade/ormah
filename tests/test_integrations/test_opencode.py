@@ -96,3 +96,71 @@ assert.equal(synthetic.parts.length,1);
     assert requests[0]['prompt'] == 'actual prompt'
     assert requests[0]['space'] == project.name
     assert requests[0]['session_id'].startswith('opencode:')
+
+
+def test_directory_package_routes_both_host_generations(tmp_path):
+    project = tmp_path / 'project'
+    opencode.connect(project)
+    data = jc.parse((project / 'opencode.jsonc').read_text()).value
+    assets = project / '.opencode/ormah'
+    assert data['plugin'] == [assets.as_uri()]
+    manifest = json.loads((assets / 'package.json').read_text())
+    assert manifest['main'] == './plugin.mjs'
+    assert manifest['exports']['.'] == './v2.mjs'
+    assert (assets / 'v2.mjs').is_file()
+
+
+def test_native_v2_config_keeps_other_plugins_and_servers(tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    config = project / 'opencode.jsonc'
+    config.write_text('{// native V2\n"plugins":["personal"],"mcp":{"servers":{"personal":{"type":"local","command":["personal"]}}}}')
+    opencode.connect(project)
+    first = config.read_bytes()
+    opencode.connect(project)
+    assert config.read_bytes() == first
+    data = jc.parse(config.read_text()).value
+    assert 'plugin' not in data
+    assert data['plugins'][0] == 'personal'
+    assert set(data['mcp']) == {'servers'}
+    assert data['mcp']['servers']['ormah']['disabled'] is False
+    assert data['mcp']['servers']['ormah']['command'][-1] == str(project)
+    opencode.disconnect(project)
+    data = jc.parse(config.read_text()).value
+    assert data['plugins'] == ['personal']
+    assert set(data['mcp']['servers']) == {'personal'}
+    assert '// native V2' in config.read_text()
+
+
+def test_native_v2_existing_ormah_is_not_shadowed(tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    config = project / 'opencode.jsonc'
+    before = '{"mcp":{"servers":{"ormah":{"type":"local","command":["personal"]}}}}'
+    config.write_text(before)
+    with pytest.raises(ValueError, match='Preserving existing configuration'):
+        opencode.connect(project)
+    assert config.read_text() == before
+    assert not (project / '.opencode/ormah').exists()
+
+
+def test_legacy_file_plugin_requires_disconnect_before_upgrade(tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    config = project / 'opencode.jsonc'
+    before = json.dumps({'plugin': [(project / '.opencode/ormah/plugin.mjs').as_uri()]})
+    config.write_text(before)
+    with pytest.raises(ValueError, match='disconnect'):
+        opencode.connect(project)
+    assert config.read_text() == before
+
+
+def test_native_config_does_not_shadow_existing_legacy_ormah(tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    config = project / 'opencode.jsonc'
+    before = '{"mcp":{"ormah":{"type":"local","command":["personal"]},"servers":{}}}'
+    config.write_text(before)
+    with pytest.raises(ValueError, match='Preserving existing configuration'):
+        opencode.connect(project)
+    assert config.read_text() == before
