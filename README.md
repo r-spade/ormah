@@ -116,6 +116,7 @@ Optional paid cloud backup encrypts snapshots on your device before upload. Keep
 | Codex CLI | MCP | Prompt hook, enabled by setup |
 | Pi | Ormah extension | Before each agent turn |
 | Claude Desktop on macOS | MCP | Tool access only |
+| [OpenCode V1 and V2](docs/integration-opencode.md) | MCP | Automatic prompt context |
 | [GitHub Copilot in VS Code](docs/integration-github-copilot.md) (Local and Copilot chats) | MCP | Automatic prompt hooks |
 
 Hooks need a compatible client version and a running Ormah server. Other clients can connect through MCP, the HTTP API, or custom tool schemas; automatic injection needs a client integration.

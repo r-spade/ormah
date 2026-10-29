@@ -109,6 +109,22 @@ export default function AgentsPanel({ open, onClose }: Props) {
                 )}
               </div>
 
+              {agent.id === "opencode" && (
+                <div className="admin-task-desc" style={{ marginBottom: 12 }}>
+                  <p>Automatic memory recall and memory tools in OpenCode V1 and V2.</p>
+                  <details>
+                    <summary>How to enable Ormah</summary>
+                    <ol>
+                      <li>Install OpenCode and connect a model provider.</li>
+                      <li>Click connect here to configure OpenCode for the user running Ormah.</li>
+                      <li>Keep Ormah running, restart OpenCode in your project, and ask Ormah to save and recall a test fact.</li>
+                    </ol>
+                    <p>For project-only setup, use the CLI command in the guide. This panel shows user-level configuration on the Ormah server machine.</p>
+                    <a href="https://github.com/r-spade/ormah/blob/main/docs/integration-opencode.md" target="_blank" rel="noopener noreferrer">OpenCode setup guide</a>
+                  </details>
+                </div>
+              )}
+
               {agent.id === "github_copilot" && (
                 <div className="admin-task-desc" style={{ marginBottom: 12 }}>
                   <p>Automatic memory recall and memory tools in VS Code’s Local and Copilot chats.</p>
