@@ -154,7 +154,16 @@ export function resumeAllTasks(): Promise<{ status: string }> {
 
 // ---- Agents -----------------------------------------------------------------
 
+export interface AgentCapabilities {
+  tools: string;
+  whisper: string;
+  maintenance: string;
+  detail: string;
+  verified_live: boolean;
+}
+
 export interface AgentInfo {
+  capabilities?: AgentCapabilities;
   id: string;
   name: string;
   detected: boolean;

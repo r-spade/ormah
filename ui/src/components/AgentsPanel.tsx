@@ -10,6 +10,12 @@ interface Props {
 function statusLabel(agent: AgentInfo): { text: string; cls: string } {
   if (!agent.available_on_current_os) return { text: "n/a on this OS", cls: "agent-status--na" };
   if (!agent.detected)               return { text: "not installed",    cls: "agent-status--absent" };
+  if (agent.capabilities && agent.wired) {
+    const whisper = agent.capabilities.whisper;
+    const text = whisper === "native_hook" || whisper === "native_extension"
+      ? "whisper configured" : "tools only";
+    return { text, cls: "agent-status--wired" };
+  }
   if (agent.wired)                   return { text: "connected",        cls: "agent-status--wired" };
   return                                    { text: "not wired",        cls: "agent-status--detected" };
 }
@@ -95,6 +101,7 @@ export default function AgentsPanel({ open, onClose }: Props) {
               <div className="admin-task-header">
                 <span className="admin-task-name">{agent.name}</span>
                 <span className={`agent-status ${cls}`}>{text}</span>
+                {agent.capabilities && <div className="admin-task-desc">{agent.capabilities.detail}</div>}
                 {errors[agent.id] && (
                   <div className="admin-task-desc" style={{ color: "var(--edge-contradicts)", marginTop: 4 }}>
                     {errors[agent.id]}
@@ -125,7 +132,7 @@ export default function AgentsPanel({ open, onClose }: Props) {
         })}
 
         {!loading && !hasUnwired && !fetchError && agents.length > 0 && (
-          <div className="admin-backup-note">All detected agents are connected.</div>
+          <div className="admin-backup-note">All detected agents are configured.</div>
         )}
 
         {fetchError && (
