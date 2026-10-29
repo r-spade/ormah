@@ -1,5 +1,29 @@
 # GitHub Copilot — VS Code Local and Copilot modes
 
+## Enable from the web app
+
+1. Install VS Code and GitHub Copilot, and sign in to GitHub.
+2. Keep Ormah running. Open its web app, choose **agents**, and find
+   **GitHub Copilot (VS Code)**. Click **connect**.
+3. Reload VS Code and open your project. Review and approve the workspace,
+   Ormah MCP server, and hooks when prompted; hooks must be enabled.
+4. Start a **Local** or **Copilot** chat. Ask: “Use Ormah to remember that this
+   project's test launch day is Friday, then recall it.” Check that the chat
+   actually calls Ormah's tools and retrieves the fact.
+
+The web app configures the **default VS Code profile on the machine running
+Ormah**, not necessarily the computer displaying the browser. Its connection
+status reflects user-level setup. For project-only setup, use the commands
+below instead. Do not configure both scopes for the same workspace. A connected
+status confirms configuration; it does not certify a successful chat session.
+
+Both session targets have been tested on macOS with VS Code 1.144.0 and Copilot
+Chat 0.72.0. See the validation details below for other platform limitations.
+
+## Enable for one project
+
+Run these commands on the computer where VS Code is installed:
+
 ```sh
 ormah agents connect github_copilot --project /absolute/workspace
 ormah agents status github_copilot --project /absolute/workspace

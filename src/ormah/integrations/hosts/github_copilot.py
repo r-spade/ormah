@@ -70,7 +70,7 @@ def disconnect(project: Path | None = None) -> None:
 
 def status(project: Path | None = None) -> dict:
     return common.capability(HOST, whisper="native_hook", project=project, detail=(
-        "VS Code Local and Copilot: MCP and prompt hooks configured. "
+        "Supports VS Code Local and Copilot with MCP and prompt hooks. "
         "Requires trusted workspace and enabled hooks. Shared Copilot requires "
         "userPromptTransformed support. CLI and remote hosts are not verified."
     ))
