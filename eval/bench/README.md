@@ -329,3 +329,38 @@ context size, retrieval recall, coverage, models and run ID. Tiny ordered smoke
 samples diagnose behavior; they are not full-dataset accuracy estimates. This
 track also differs from the private whisper eval, which scores expected injection
 and suppression directly rather than downstream answers on public datasets.
+
+## Matched reference methods and character budgets
+
+`--retrieval none` supplies an empty memory section using the same answer prompt
+and date. `--retrieval dense` performs exact cosine search over the same raw-turn
+vectors and query encoder, without hybrid fusion, graph signals, boosts, or gates.
+Both require raw mode. Dense normalizes vectors explicitly and breaks exact ties
+by node ID; `recall` remains Ormah's hybrid method, not the simple baseline.
+
+Set `--context-chars 12000 --k 30` on every paired memory-bearing run. The budget
+counts the dated headers, titles, content and blank-line separators, in Unicode
+characters. Selection takes the ranked prefix and clips the final entry, stopping
+at the cap; no lower-ranked refill or outcome-based selection occurs. The exact
+exposed string, pre-budget ranking and per-entry title/content spans are retained.
+The answerer consumes that string verbatim. Reports distinguish retrieval coverage
+from actual exposure, and include measured context denominators and percentiles.
+No-memory stays at zero characters even when the common cap is configured.
+Without `--context-chars`, existing tracks retain their previous formatting.
+Budget changes are resume parameters; source changes remain fingerprinted.
+
+The locked `matched-diagnostic-20261029.json` selection contains 120 LongMemEval
+questions and 200 LoCoMo questions. Its `diagnostic` split excludes inspected
+`diagnostic-v1` IDs, but is not advertised as fresh heldout or full-dataset accuracy.
+LoCoMo category 5 remains separate from primary J-score. Use a common frozen
+corpus via `--haystack-source-run` for paired retrieval methods; the exact
+historical extracted corpus is required for this particular diagnostic.
+
+**Inference preflight is mandatory for this experiment.** The October 29 job
+could not establish a tool-free Codex prompt with the available diagnostics;
+the alternative Claude subscription smoke hit a session limit. No matched
+benchmark answers/judges were run. An empty working directory, ignored config,
+and an instruction not to use tools are insufficient proof of isolation.
+Verify actual prompt inputs and event streams before resumption; do not treat
+this implementation or its synthetic tests as an isolation attestation.
+See [the research status](results/matched-comparison-2026-10-29.md).

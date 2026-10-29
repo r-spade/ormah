@@ -60,6 +60,8 @@ def diagnose_question(row: dict, stored_memories: list[dict], mode: str) -> dict
     stored_turns = set().union(*(_turn_tags(item) for item in stored_memories)) if stored_memories else set()
     retrieved_turns = set().union(*(_turn_tags(item) for item in retrieved)) if retrieved else set()
     retrieved_sessions = set().union(*(_session_tags(item) for item in retrieved)) if retrieved else set()
+    retrieval_result = row.get("retrieve", {}).get("result", {})
+    spans = {s["memory_id"]: s for s in retrieval_result.get("exposure_spans", [])}
 
     exposures = []
     fully_exposed_turns: set[str] = set()
@@ -71,6 +73,13 @@ def diagnose_question(row: dict, stored_memories: list[dict], mode: str) -> dict
             continue
         stored = next((m for m in stored_memories if m.get("id") == node.get("id")), None)
         content = node.get("content") or ""
+        title = node.get("title") or ""
+        if "exposure_spans" in retrieval_result:
+            span = spans.get(node.get("id"))
+            if span is None or not span["exposed_entry_chars"]:
+                continue
+            content = content[:span["exposed_content_chars"]]
+            title = title[:span["exposed_title_chars"]]
         stored_content = (stored or {}).get("content") or ""
         if not content:
             status = "title_only"
@@ -85,7 +94,7 @@ def diagnose_question(row: dict, stored_memories: list[dict], mode: str) -> dict
             "memory_id": node.get("id"),
             "turn_ids": turn_ids,
             "status": status,
-            "exposed_title": node.get("title") or "",
+            "exposed_title": title,
             "exposed_content": content,
             "stored_content_chars": len(stored_content),
             "exposed_content_chars": len(content),
@@ -113,8 +122,7 @@ def diagnose_question(row: dict, stored_memories: list[dict], mode: str) -> dict
     else:
         failure_stage = "not_classified"
 
-    retrieval_result = row.get("retrieve", {}).get("result", {})
-    exposed_context = memory_context(retrieved)
+    exposed_context = retrieval_result.get("answer_context_text", memory_context(retrieved))
     return {
         "question_id": row["question_id"],
         "dataset": row["dataset"],
@@ -159,6 +167,7 @@ def diagnose_question(row: dict, stored_memories: list[dict], mode: str) -> dict
             if mode == "raw" else None,
             "supporting_memories": exposures,
             "reported_context_chars": retrieval_result.get("answer_context_chars"),
+            "budget_spans": retrieval_result.get("exposure_spans"),
         },
         "answer": row.get("answer", {"status": "missing"}),
         "judge": judge or {"status": "missing"},

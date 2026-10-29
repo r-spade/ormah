@@ -139,7 +139,7 @@ class CLIProvider(TextProvider):
     def run(self, args, prompt, cwd):
         env = os.environ.copy()
         # Subscription providers must never silently switch to API billing.
-        for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY"):
             env.pop(key, None)
         result = subprocess.run(
             args,

@@ -60,7 +60,7 @@ def aggregate(rows, k, mode, strategy="recall"):
             metrics.append(retrieval_metrics(row, retrieval, limit, mode))
             if strategy == "recall":
                 gates.append(retrieval_metrics(row, retrieval, k, mode, gated=True))
-            counts.append(len(retrieval["ranked"]))
+            counts.append(len(retrieval.get("exposed_memory_ids", retrieval["ranked"])))
             context_chars.append(retrieval.get("answer_context_chars"))
             context_tokens.append(retrieval.get("answer_context_tokens_estimate"))
             if strategy == "whisper":
@@ -85,6 +85,10 @@ def aggregate(rows, k, mode, strategy="recall"):
         "injection_rate": mean([int(n > 0) for n in counts]),
         "mean_injected_memories": mean(counts),
         "mean_answer_context_chars": mean(context_chars),
+        "answer_context_chars_measured": sum(c is not None for c in context_chars),
+        "answer_context_chars_p50": percentile([c for c in context_chars if c is not None], 0.5),
+        "answer_context_chars_p95": percentile([c for c in context_chars if c is not None], 0.95),
+        "answer_context_chars_max": max((c for c in context_chars if c is not None), default=None),
         "mean_answer_context_tokens_estimate": mean(context_tokens),
         "seeding_total_s": sum(value for value in seeding_times if value is not None),
         "retrieval_labeled": sum(m["recall"] is not None for m in metrics),
