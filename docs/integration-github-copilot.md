@@ -100,7 +100,11 @@ CLI connect/disconnect checks in disposable projects preserved personal MCP
 entries, comments, symlinks, and user-edited hooks while removing untouched owned
 artifacts. These are process-level checks, not native GUI outage tests.
 
-Live MCP save/recall in VS Code is still pending. Windows, remote profiles, and
-other installed versions have not been live-tested. `verified_live` remains false
+Live MCP save/recall also passed in the same Local session. The transcript
+recorded successful `remember` and `recall` calls, and the isolated daemon
+confirmed both requests with `default_space=workspace`. The stored memory had
+`space: workspace`; an implicit feedback call also succeeded.
+
+Windows, remote profiles, and other installed versions have not been live-tested. `verified_live` remains false
 in status because setup checks configuration integrity, not whether that user
 has completed a successful live session.
