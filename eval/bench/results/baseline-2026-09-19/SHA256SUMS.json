@@ -1,0 +1,16 @@
+{
+  "LOCOMO-LICENSE.txt": "3711f963c05d0be80d53e5923308a6dee31b203da23435c9cfb7c7b6e4dd5e19",
+  "LONGMEMEVAL-LICENSE.txt": "d3c4b9aa54759df6ded337978a6f3b55b75615e5e4525c3b82d7e2627d4b9732",
+  "README.md": "06bc8192287e983fee8e14e559a76fd362ca526501d0bff43d580134d6ad18e4",
+  "audit.json": "b8170a014f7e060bd79129ee6be29b676fdb7e94c76eaaf3ae94d4c0c8a8827a",
+  "locomo/calls.jsonl.gz": "fe0b77e3f1579a57f152f2325f95188ddb0be5e7edcbeaf735a29a7344c14190",
+  "locomo/haystacks.json.gz": "642ed25001a0c3089aa9fbd0b82f1dd2f4905b7bf11e0f2a10d6abc882c06fb3",
+  "locomo/manifest.json": "1dbd20e8d5ba5c2a91eceae0f75cf95aa9754acb5847363f8c61d416c3163dee",
+  "locomo/questions.jsonl.gz": "be6492b632f82d180abc63bacfee2808b16b05b45b5f6a72c26799a777670186",
+  "locomo/summary.json": "15a8eaec81560bbd40a7251a16e0b995233677e73742c94504b9f4fa5054fc38",
+  "longmemeval/calls.jsonl.gz": "bbdbbdcd55bd8636b2245a08654e24e97e39ae0e734da7e2024b5830eaa857b6",
+  "longmemeval/manifest.json": "637c2226ca1f2152020f17f1773c51e31a4fdd67882eca511a0c63302f22fccf",
+  "longmemeval/questions.jsonl.gz": "a264685a4e48e4d9293862239156d2aee6f33e3f29cf536676366420323ba0b8",
+  "longmemeval/summary.json": "a170d8a5b51bc0df3ec56a99f92b589830d8f1aa3ed2b765fdde5703e3c88688",
+  "verify.py": "b8fa383362fef62ec7646642dc4d95fa06c97bfd274166d235951bcdf89e43ea"
+}

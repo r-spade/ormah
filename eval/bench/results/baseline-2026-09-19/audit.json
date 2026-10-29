@@ -1,0 +1,107 @@
+{
+  "audit_date": "2026-10-29",
+  "scope": "Historical complete recall runs; no new inference",
+  "runs": {
+    "longmemeval": {
+      "run_id": "lme-raw-full-codex-20260920",
+      "duplicate_id_haystack_rows": 143,
+      "duplicate_rows_with_different_date": 143,
+      "haystacks_with_duplicates": 13,
+      "questions": 500,
+      "scored": 500,
+      "correct": 409,
+      "score": 0.818,
+      "abstention_questions": 30,
+      "abstention_correct": 28,
+      "by_type": {
+        "knowledge-update": {
+          "questions": 78,
+          "scored": 78,
+          "correct": 73
+        },
+        "multi-session": {
+          "questions": 133,
+          "scored": 133,
+          "correct": 94
+        },
+        "single-session-assistant": {
+          "questions": 56,
+          "scored": 56,
+          "correct": 53
+        },
+        "single-session-preference": {
+          "questions": 30,
+          "scored": 30,
+          "correct": 22
+        },
+        "single-session-user": {
+          "questions": 70,
+          "scored": 70,
+          "correct": 69
+        },
+        "temporal-reasoning": {
+          "questions": 133,
+          "scored": 133,
+          "correct": 98
+        }
+      },
+      "mean_answer_context_chars": 10262.81,
+      "context_definition": "Historical dated memory payload, excluding instructions/question; reconstructed from exact ranked nodes",
+      "source_journal_sha256": "0be833eb74f427d411808b5e4b86c3b7e624ca76b192ebfc1ee0fd641ab109dc",
+      "source_calls_sha256": "56d15b05e48b920c9cced46aaa8b5e52d70b8b788d3e2e072357433492736711",
+      "dataset_sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
+      "dataset_metadata_matches": true,
+      "all_retrieved_nodes_match_saved_haystack_after_whitespace_strip": true,
+      "prompt_hashes_match_recorded_commit": true,
+      "api_spend_usd": 0
+    },
+    "locomo": {
+      "run_id": "locomo-extract-full-codex-20260920",
+      "duplicate_id_haystack_rows": 0,
+      "duplicate_rows_with_different_date": 0,
+      "haystacks_with_duplicates": 0,
+      "questions": 1986,
+      "scored": 1540,
+      "correct": 1105,
+      "score": 0.7175324675324676,
+      "abstention_questions": 446,
+      "abstention_correct": 413,
+      "by_type": {
+        "1": {
+          "questions": 282,
+          "scored": 282,
+          "correct": 229
+        },
+        "2": {
+          "questions": 321,
+          "scored": 321,
+          "correct": 197
+        },
+        "3": {
+          "questions": 96,
+          "scored": 96,
+          "correct": 48
+        },
+        "4": {
+          "questions": 841,
+          "scored": 841,
+          "correct": 631
+        },
+        "5": {
+          "questions": 446,
+          "scored": 0,
+          "correct": 0
+        }
+      },
+      "mean_answer_context_chars": 8966.778449144009,
+      "context_definition": "Historical dated memory payload, excluding instructions/question; reconstructed from exact ranked nodes",
+      "source_journal_sha256": "6de611480808c932e0cc5d5a4fa28f3b8ad37b9c2f1918981297b9917dcc3d0f",
+      "source_calls_sha256": "06e14dae860949490ca7697808436085c6daa26ac5e4ce327044d878e21ec297",
+      "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+      "dataset_metadata_matches": true,
+      "all_retrieved_nodes_match_saved_haystack_after_whitespace_strip": true,
+      "prompt_hashes_match_recorded_commit": true,
+      "api_spend_usd": 0
+    }
+  }
+}

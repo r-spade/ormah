@@ -1,3 +1,16 @@
+# Public benchmark results
+
+The [audited September 2026 historical baseline](baseline-2026-09-19/README.md)
+contains complete LongMemEval-S and LoCoMo recall results, per-question evidence,
+original manifests, usage, an offline verifier, and reproduction instructions.
+It reports 81.8% LongMemEval accuracy and 71.75% LoCoMo J-score under the documented
+configurations; these are not full-data whisper or current-production scores.
+
+The original smoke-run record below is retained as historical evidence. Its
+authentication failures were resolved before the complete baseline runs.
+
+---
+
 # Benchmark smoke validation — 2026-09-18
 
 These are **smoke validation results, not published end-to-end accuracy claims**.
