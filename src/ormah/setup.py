@@ -3138,6 +3138,7 @@ def run_setup(
     else:
         _diagnose_server_failure()
 
+    wiring_errors: list[str] = []
     if skip_client_setup:
         # Plugin-safe setup must not install client wiring, but it still needs to
         # remove stale CLI surfaces that override a working user-scoped plugin.
@@ -3145,7 +3146,11 @@ def run_setup(
     else:
         for agent in detected_agents:
             step(f"Hooking up {agent.name}")
-            agent.wire_fn()
+            try:
+                agent.wire_fn()
+            except Exception as exc:  # noqa: BLE001
+                wiring_errors.append(agent.name)
+                warn(f"Could not configure {agent.name}: {type(exc).__name__}: {exc}")
 
         if not detected_agents:
             supported = ", ".join(agent.name for agent in AGENT_REGISTRY)
@@ -3170,5 +3175,8 @@ def run_setup(
     if not ci:
         play_finale()
     _print_setup_summary(ormah_bin)
+    if wiring_errors:
+        warn(f"Some agents could not be configured: {', '.join(wiring_errors)}")
+        info("Resolve the errors above, then run 'ormah setup --update' again.")
     if not ci:
         webbrowser.open(f"http://localhost:{settings.port}")

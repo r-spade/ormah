@@ -13,6 +13,9 @@ from . import json_config
 
 
 def atomic_write(path: Path, text: str) -> None:
+    # Preserve dotfile links, including relative links to not-yet-created targets.
+    if path.is_symlink():
+        path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".ormah-", dir=path.parent)
     try:
