@@ -268,3 +268,35 @@ def test_migrated_mcp_boolean_edit_is_not_adopted(tmp_path, capsys):
     opencode.disconnect(project)
     assert 'Preserved user-edited' in capsys.readouterr().err
     assert jc.parse(config.read_text()).value['mcp']['servers']['ormah']['disabled'] == 0
+
+
+@pytest.mark.parametrize('project_scope', [True, False])
+def test_interrupted_connect_then_edit_can_disconnect(tmp_path, monkeypatch, project_scope):
+    from ormah.integrations import common, ownership
+    project = tmp_path / 'project' if project_scope else None
+    root = project or opencode.directory()
+    root.mkdir(parents=True)
+    config = root / 'opencode.jsonc'
+    config.write_text('{"model":"original"}')
+    atomic_write = ownership.atomic_write
+
+    def fail_config(path, text):
+        if path == config:
+            raise PermissionError('simulated interrupted setup')
+        atomic_write(path, text)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ownership, 'atomic_write', fail_config)
+        with pytest.raises(PermissionError):
+            opencode.connect(project)
+    receipt = common.receipt('opencode', project)
+    assert json.loads(receipt.read_text())['pending']
+    edited = '{"model":"personal-edit"}'
+    config.write_text(edited)
+    with pytest.raises(ValueError, match='disconnect first'):
+        opencode.connect(project)
+    opencode.disconnect(project)
+    assert config.read_text() == edited
+    assert not receipt.exists()
+    opencode.connect(project)
+    assert opencode.status(project)['whisper'] == 'native_extension'

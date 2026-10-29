@@ -21,7 +21,7 @@ def detected() -> bool:
 
 
 
-def _installation(project: Path | None) -> Installation:
+def _installation(project: Path | None, *, recover: bool = True) -> Installation:
     """Follow known config-key migrations without adopting edited values.
 
     Remap receipt locations in memory only. The normal ownership comparison still
@@ -29,7 +29,7 @@ def _installation(project: Path | None) -> Installation:
     Status is read-only; connect checkpoints remapped records with its writes.
     """
     install = Installation(common.receipt(HOST, project))
-    if install.recovery:
+    if recover and install.recovery:
         install._recover()
     records = []
     for original in install.records:
@@ -101,7 +101,8 @@ def connect(project: Path | None = None) -> None:
 
 
 def disconnect(project: Path | None = None) -> None:
-    preserved = _installation(project).disconnect()
+    # Disconnect is the escape hatch for an ambiguous interrupted setup.
+    preserved = _installation(project, recover=False).disconnect()
     if preserved:
         print("Preserved user-edited Ormah artifacts: " + ", ".join(preserved), file=sys.stderr)
 

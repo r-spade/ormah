@@ -128,7 +128,7 @@ OpenCode provider in an isolated project and Ormah store:
   connect/idempotency/disconnect preservation of personal configuration,
   symlinks, and user-edited plugin files. These are not native GUI outage tests.
 
-Full Python validation: **2,608 passed**, one expected failure, one deselected.
+Full Python validation: **2,610 passed**, one expected failure, one deselected.
 All **57 UI tests**, Ruff, production UI build, wheel/sdist builds, and package
 content checks passed. An independent review found no blocking findings.
 
