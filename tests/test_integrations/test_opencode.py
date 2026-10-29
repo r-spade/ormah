@@ -164,3 +164,107 @@ def test_native_config_does_not_shadow_existing_legacy_ormah(tmp_path):
     with pytest.raises(ValueError, match='Preserving existing configuration'):
         opencode.connect(project)
     assert config.read_text() == before
+
+
+def migrate_config(config, native):
+    data = jc.parse(config.read_text()).value
+    if native:
+        data['plugins'] = data.pop('plugin')
+        server = data['mcp'].pop('ormah')
+        server['disabled'] = not server.pop('enabled')
+        data['mcp']['servers'] = {'ormah': server}
+    else:
+        data['plugin'] = data.pop('plugins')
+        server = data['mcp']['servers'].pop('ormah')
+        del data['mcp']['servers']
+        server['enabled'] = not server.pop('disabled')
+        data['mcp']['ormah'] = server
+    config.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize('project_scope', [True, False])
+@pytest.mark.parametrize('native', [True, False])
+@pytest.mark.parametrize('reconnect_first', [True, False])
+def test_migrated_config_status_reconnect_disconnect(tmp_path, project_scope, native, reconnect_first):
+    project = tmp_path / 'project' if project_scope else None
+    root = project or opencode.directory()
+    root.mkdir(parents=True)
+    config = root / 'opencode.jsonc'
+    if not native:
+        config.write_text('{"plugins":[],"mcp":{"servers":{}}}')
+    opencode.connect(project)
+    migrate_config(config, native)
+    before = config.read_bytes()
+    assert opencode.status(project)['tools'] == 'mcp'
+    assert opencode.status(project)['whisper'] == 'native_extension'
+    assert config.read_bytes() == before  # status never rewrites host configuration
+    if reconnect_first:
+        opencode.connect(project)
+        assert config.read_bytes() == before
+    opencode.disconnect(project)
+    data = jc.parse(config.read_text()).value
+    assert data['plugins' if native else 'plugin'] == []
+    assert 'ormah' not in (data['mcp']['servers'] if native else data['mcp'])
+    assets = (project / '.opencode' if project else root) / 'ormah'
+    assert not (assets / 'package.json').exists()
+    opencode.connect(project)
+    assert opencode.status(project)['whisper'] == 'native_extension'
+
+
+def test_migrated_edited_mcp_preserved_with_warning(tmp_path, capsys):
+    project = tmp_path / 'project'
+    opencode.connect(project)
+    config = project / 'opencode.jsonc'
+    migrate_config(config, True)
+    data = jc.parse(config.read_text()).value
+    data['mcp']['servers']['ormah']['command'] = ['personal-command']
+    config.write_text(json.dumps(data))
+    assert opencode.status(project)['tools'] == 'unconfigured'
+    with pytest.raises(ValueError):
+        opencode.connect(project)
+    opencode.disconnect(project)
+    assert 'Preserved user-edited' in capsys.readouterr().err
+    data = jc.parse(config.read_text()).value
+    assert data['mcp']['servers']['ormah']['command'] == ['personal-command']
+    assert data['plugins'] == []
+
+
+@pytest.mark.parametrize('migrate_plugins', [True, False])
+def test_partial_migration_preserves_personal_entries(tmp_path, migrate_plugins):
+    project = tmp_path / 'project'
+    project.mkdir()
+    config = project / 'opencode.jsonc'
+    config.write_text('{"plugin":["personal"],"mcp":{"personal":{"command":["keep"]}}}')
+    opencode.connect(project)
+    data = jc.parse(config.read_text()).value
+    if migrate_plugins:
+        owned = data['plugin'].pop()
+        data['plugins'] = [owned]
+    else:
+        server = data['mcp'].pop('ormah')
+        server['disabled'] = not server.pop('enabled')
+        data['mcp']['servers'] = {'ormah': server}
+    config.write_text(json.dumps(data))
+    assert opencode.status(project)['whisper'] == 'native_extension'
+    opencode.connect(project)
+    opencode.disconnect(project)
+    data = jc.parse(config.read_text()).value
+    assert data['plugin'] == ['personal']
+    assert data['mcp']['personal'] == {'command': ['keep']}
+    assert data.get('plugins', []) == []
+    assert 'ormah' not in data['mcp']
+    assert 'ormah' not in data['mcp'].get('servers', {})
+
+
+def test_migrated_mcp_boolean_edit_is_not_adopted(tmp_path, capsys):
+    project = tmp_path / 'project'
+    opencode.connect(project)
+    config = project / 'opencode.jsonc'
+    migrate_config(config, True)
+    data = jc.parse(config.read_text()).value
+    data['mcp']['servers']['ormah']['disabled'] = 0
+    config.write_text(json.dumps(data))
+    assert opencode.status(project)['tools'] == 'unconfigured'
+    opencode.disconnect(project)
+    assert 'Preserved user-edited' in capsys.readouterr().err
+    assert jc.parse(config.read_text()).value['mcp']['servers']['ormah']['disabled'] == 0

@@ -32,7 +32,9 @@ configuration, not whether a live model session has succeeded.
 The package supports both V1 and V2. V1 loads its `main` entry; V2 loads the
 package's `exports["."]` entry. Fresh setup uses V1-compatible configuration that
 V2 normalizes. Existing V2 `plugins` and `mcp.servers` keys are respected.
-Setup does not migrate or overwrite personal settings. If you tried the earlier,
+Setup does not migrate or overwrite personal settings. If OpenCode moves Ormah
+entries between the V1 and native V2 keys, status and disconnect follow those
+entries using the ownership receipt. Edited values remain protected. If you tried the earlier,
 unreleased single-file plugin, disconnect and reconnect before upgrading.
 
 Set `ORMAH_URL` in the OpenCode process environment for a custom daemon address;
@@ -53,6 +55,8 @@ memory block to the existing prompt text. Session metadata supplies the current
 workspace. Original text, attachments, mention offsets, and other metadata stay
 intact. Metadata lookup is bounded to two seconds and fails open. V2 stores the
 appended text in the conversation, just as V1 retains its synthetic text part.
+That context can also reach the title-generation model and can be sent again
+when a saved message is edited or replayed.
 
 Both MCP and whisper use the active workspace; OpenCode explicitly launches
 local MCP processes from that directory. IDs separate host, workspace, and
@@ -124,7 +128,7 @@ OpenCode provider in an isolated project and Ormah store:
   connect/idempotency/disconnect preservation of personal configuration,
   symlinks, and user-edited plugin files. These are not native GUI outage tests.
 
-Full Python validation: **2,596 passed**, one expected failure, one deselected.
+Full Python validation: **2,608 passed**, one expected failure, one deselected.
 All **57 UI tests**, Ruff, production UI build, wheel/sdist builds, and package
 content checks passed. An independent review found no blocking findings.
 
