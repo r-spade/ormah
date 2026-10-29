@@ -1,10 +1,13 @@
-# GitHub Copilot — VS Code Local harness
+# GitHub Copilot — VS Code Legacy Local harness
 
 ```sh
 ormah agents connect github_copilot --project /absolute/workspace
 ormah agents status github_copilot --project /absolute/workspace
 ormah agents disconnect github_copilot --project /absolute/workspace
 ```
+
+This integration targets the **Legacy Local** harness, not the newer shared
+Copilot runtime.
 
 Select **Local** as the VS Code Session Target. The newer **Copilot Agent Host**
 and Copilot CLI have different hook contracts and are not covered by this
@@ -33,6 +36,10 @@ harness's payload, an unavailable daemon, or invalid JSON produces `{}` with
 exit code 0. Success returns `hookSpecificOutput.additionalContext` for the Local
 model request, never an approval decision. Cancellation is handled by the host
 terminating the hook process; retrieval also has a bounded deadline.
+
+The daemon port follows Ormah's normal configuration (`~/.config/ormah/.env`,
+then the process working directory's `.env`, then the process environment). An explicit
+`ORMAH_URL` takes precedence.
 
 Set custom `ORMAH_*` runtime variables before setup and in VS Code's launch
 environment. MCP configuration records `${env:NAME}` references only for names
