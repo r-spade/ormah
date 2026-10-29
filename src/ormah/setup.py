@@ -3178,5 +3178,7 @@ def run_setup(
     if wiring_errors:
         warn(f"Some agents could not be configured: {', '.join(wiring_errors)}")
         info("Resolve the errors above, then run 'ormah setup --update' again.")
+        if ci:
+            raise SystemExit(1)
     if not ci:
         webbrowser.open(f"http://localhost:{settings.port}")

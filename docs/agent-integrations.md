@@ -54,7 +54,7 @@ host versions, exact lifecycle evidence, setup scope and validation limits.
 | --- | --- | --- |
 | [Cursor](integration-cursor.md) | MCP only; per-prompt injection blocked | [#310](https://github.com/r-spade/ormah/pull/310), draft |
 | [OpenCode](integration-opencode.md) | Native `chat.message` plugin | [#311](https://github.com/r-spade/ormah/pull/311) |
-| [Copilot](integration-github-copilot.md) | VS Code Local `UserPromptSubmit`; CLI excluded | [#312](https://github.com/r-spade/ormah/pull/312) |
+| [Copilot](integration-github-copilot.md) | VS Code Local and Copilot prompt hooks; CLI excluded | [#312](https://github.com/r-spade/ormah/pull/312) |
 | [OpenClaw](integration-openclaw.md) | `before_prompt_build` plugin, one selected workspace | [#313](https://github.com/r-spade/ormah/pull/313) |
 | [Cline](integration-cline.md) | VS Code `UserPromptSubmit`, one selected workspace | [#314](https://github.com/r-spade/ormah/pull/314) |
 | [Antigravity](integration-antigravity.md) | CLI `PreInvocation`; desktop transcript validation pending | [#315](https://github.com/r-spade/ormah/pull/315), draft |
