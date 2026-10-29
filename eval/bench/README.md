@@ -1,5 +1,9 @@
 # Public memory benchmarks
 
+For complete scored results and downloadable evidence, see the
+[audited historical baseline](results/baseline-2026-09-19/README.md).
+
+
 A source-checkout harness for LongMemEval-S and LoCoMo. Read [DESIGN.md](DESIGN.md)
 for the approved scope. The default run performs **store, retrieve and report**
 in raw mode, with no LLM calls. Dataset files, caches, isolated databases and full

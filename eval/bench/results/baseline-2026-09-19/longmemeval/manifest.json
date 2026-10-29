@@ -1,0 +1,110 @@
+{
+  "run_id": "lme-raw-full-codex-20260920",
+  "parameters": {
+    "dataset": "longmemeval",
+    "mode": "raw",
+    "k": 30,
+    "limit": null,
+    "question_type": null,
+    "category": null,
+    "conversation": null,
+    "extract_provider": "claude-cli",
+    "extract_model": null,
+    "answer_provider": "codex",
+    "answer_model": "gpt-5.6-terra",
+    "judge_provider": "codex",
+    "judge_model": "gpt-5.6-terra"
+  },
+  "dataset_sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
+  "dataset_bytes": 278025796,
+  "timestamp": "2026-09-19T11:45:00.802516+00:00",
+  "ormah_version": "0.15.1",
+  "git_sha": "16d64577fb251fabcb0e53e60956a083aac83dc9",
+  "git_dirty": false,
+  "settings": {
+    "llm_provider": "none",
+    "embedding_provider": "local",
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_dim": 768,
+    "fts_weight": 0.4,
+    "vector_weight": 0.6,
+    "similarity_threshold": 0.4,
+    "rrf_k": 60,
+    "fts_only_dampening": 0.5,
+    "min_result_score": 0.1,
+    "rrf_min_spread_ratio": 0.05,
+    "question_fts_weight_scale": 0.3,
+    "question_vector_weight_scale": 1.5,
+    "question_similarity_blend_weight": 0.85,
+    "similarity_blend_weight": 0.5,
+    "title_match_boost": 2.0,
+    "length_penalty_threshold": 300,
+    "recency_boost": 0.05,
+    "recency_half_life_days": 7.0,
+    "access_boost": 0.05,
+    "tier_boost_core": 0.1,
+    "tier_boost_working": 0.0,
+    "tier_boost_archival": -0.1,
+    "space_boost_global": 1.0,
+    "space_boost_other": 0.6,
+    "recall_min_relevance_score": 0.35,
+    "whisper_injection_gate": 0.45,
+    "whisper_reranker_enabled": false,
+    "whisper_out_enabled": false,
+    "claude_maintenance_enabled": false,
+    "embedding_max_content_chars": 512,
+    "ingest_max_content_chars": 100000
+  },
+  "embedding_model": "BAAI/bge-base-en-v1.5",
+  "embedding_batch_size": 16,
+  "runtime": {
+    "python": "3.11.15",
+    "sqlite": "3.53.1",
+    "sqlite_vec": "0.1.9",
+    "fastembed": "0.8.0"
+  },
+  "prompt_hashes": {
+    "answer.py": "c243ae84373d49b8b7cc1cefe4cfe5181c78da72cade71d1287f67bee56c910d",
+    "judge.py": "79b043699430eb26b7afc38f2c282267c03003da533d2ab46e393c2258cff867"
+  },
+  "phase_wall_s": {
+    "store": 3252.3222094742378,
+    "retrieve": 5.150625872818637,
+    "answer": 827.8866369160096,
+    "judge": 762.0122242910002
+  },
+  "providers": {
+    "answer": {
+      "provider": "codex",
+      "model": "gpt-5.6-terra",
+      "version": "codex-cli 0.155.0"
+    },
+    "judge": {
+      "provider": "codex",
+      "model": "gpt-5.6-terra",
+      "version": "codex-cli 0.155.0"
+    }
+  },
+  "invocations": [
+    {
+      "phases": [
+        "answer",
+        "judge",
+        "report",
+        "retrieve",
+        "store"
+      ],
+      "workers": 4,
+      "max_usd": 5.0,
+      "resume": true,
+      "embedding_batch_size": 16,
+      "embedding_length_sorted": true
+    }
+  ],
+  "embedding_cache": {
+    "hits": 61630,
+    "misses": 184351
+  },
+  "invocation_wall_s": 4848.7856254579965,
+  "peak_rss_kib": 1810544.0
+}
