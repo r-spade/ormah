@@ -109,7 +109,7 @@ def disconnect(project: Path | None = None) -> None:
 
 def status(project: Path | None = None) -> dict:
     try:
-        install = _installation(project)
+        install = _installation(project, recover=False)
         tools, intact = install.intact("value"), install.intact()
     except (OSError, ValueError, KeyError, TypeError):
         tools = intact = False

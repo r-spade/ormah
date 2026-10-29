@@ -300,3 +300,34 @@ def test_interrupted_connect_then_edit_can_disconnect(tmp_path, monkeypatch, pro
     assert not receipt.exists()
     opencode.connect(project)
     assert opencode.status(project)['whisper'] == 'native_extension'
+
+
+@pytest.mark.parametrize('project_scope', [True, False])
+@pytest.mark.parametrize('asset', ['plugin.mjs', 'v2.mjs', 'package.json', 'instructions.md'])
+def test_partial_install_status_reports_missing_assets(tmp_path, monkeypatch, project_scope, asset):
+    from ormah.integrations import common, ownership
+    project = tmp_path / 'project' if project_scope else None
+    root = project or opencode.directory()
+    root.mkdir(parents=True)
+    config = root / 'opencode.jsonc'
+    atomic_write = ownership.atomic_write
+
+    def fail_asset(path, text):
+        if path.name == asset:
+            raise PermissionError('simulated partial installation')
+        atomic_write(path, text)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ownership, 'atomic_write', fail_asset)
+        with pytest.raises(PermissionError):
+            opencode.connect(project)
+    receipt = common.receipt('opencode', project)
+    before_config, before_receipt = config.read_bytes(), receipt.read_bytes()
+    assert opencode.status(project)['tools'] == 'mcp'
+    assert opencode.status(project)['whisper'] == 'unconfigured'
+    assert config.read_bytes() == before_config
+    assert receipt.read_bytes() == before_receipt
+    opencode.connect(project)
+    assert opencode.status(project)['whisper'] == 'native_extension'
+    opencode.disconnect(project)
+    assert not receipt.exists()
