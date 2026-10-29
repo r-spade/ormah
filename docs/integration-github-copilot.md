@@ -92,8 +92,8 @@ that tested Local session.
 
 The newer **Copilot** session target ran the hook but did not produce the fact in
 its answer with the original Local-only implementation. The new transformed
-hook addresses that contract difference; live validation of the extension is
-still pending. Hook discovery alone is not proof of context injection. In a new chat, select **Local** using the **Copilot/Local session
+hook fixes that contract difference and passed the live test below. Hook
+discovery alone is not proof of context injection. In a new chat, select **Local** using the **Copilot/Local session
 selector**, not the dropdown next to the new-chat button. Reloading or starting a
 new chat can choose the newer target, so check the target before testing.
 
@@ -124,4 +124,31 @@ session namespace: a discarded legacy retrieval must not suppress the real
 injection as already served. This can still cause an extra retrieval and a
 legacy exposure record on a prompt; it does not append that legacy output to
 the new runtime's prompt. Live tests must verify both event coexistence and the
-actual model-facing result. No shared-runtime live success is claimed yet.
+actual model-facing result.
+
+### Dual-mode live results — 2026-10-29
+
+Tested runtime commit `961417d` on the same macOS / VS Code1.144.0 /
+Copilot Chat0.72.0 installation:
+
+- **New Copilot automatic whisper passed.** Native SDK events recorded a
+  successful `userPromptTransformed` output; the following `user.message`
+  contained that exact memory in `transformedContent`, preserving the original
+  datetime and prompt. The assistant returned the fresh synthetic verification
+  phrase with no tool requests.
+- **New Copilot MCP save/recall passed.** Native `ormah-remember` and
+  `ormah-recall` calls succeeded. The isolated daemon received both with
+  `default_space=workspace`; the resulting memory had `space: workspace`.
+- **Local coexistence passed after installing both hook files.** A fresh Local
+  session ran one `UserPromptSubmit` hook, received the synthetic fact through
+  `additionalContext`, and the user confirmed the correct answer. The Local
+  MCP save/recall/feedback round-trip had already passed before the additional
+  hook was introduced; the MCP configuration was unchanged.
+
+The full suite passed **2,573 tests** (one deselected, one expected failure),
+463 focused tests passed, Ruff passed, and GitHub test/lint/desktop checks
+passed on the runtime commit. Independent review also passed.
+
+These results cover both VS Code session targets on the tested macOS versions.
+They do not establish Windows, remote/SSH, standalone CLI, user-profile setup,
+or native GUI outage behavior.
