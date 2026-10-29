@@ -57,7 +57,7 @@ def test_vector_search_works_from_worker_thread(tmp_path):
     def search():
         try:
             rows = db.conn.execute(
-                "SELECT id FROM node_vectors WHERE embedding MATCH ? ORDER BY distance LIMIT 1",
+                "SELECT id FROM node_vectors WHERE embedding MATCH ? AND k = 1 ORDER BY distance",
                 (blob,),
             ).fetchall()
             result["ids"] = [r[0] for r in rows]

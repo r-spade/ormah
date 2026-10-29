@@ -1,0 +1,429 @@
+{
+  "publication_status": "full_run_internal_review_not_yet_published",
+  "run_id": "locomo-extract-full-codex-20260920",
+  "date": "2026-09-19",
+  "dataset": "locomo10",
+  "mode": "extract",
+  "k": 30,
+  "models": {
+    "extract": "codex/gpt-5.6-terra via Ormah's production ingest prompt",
+    "answer": "codex/gpt-5.6-terra",
+    "judge": "codex/gpt-5.6-terra (Mem0 LoCoMo CORRECT/WRONG prompt)"
+  },
+  "summary": {
+    "manifest": {
+      "run_id": "locomo-extract-full-codex-20260920",
+      "parameters": {
+        "dataset": "locomo",
+        "mode": "extract",
+        "k": 30,
+        "limit": null,
+        "question_type": null,
+        "category": null,
+        "conversation": null,
+        "extract_provider": "codex",
+        "extract_model": "gpt-5.6-terra",
+        "answer_provider": "codex",
+        "answer_model": "gpt-5.6-terra",
+        "judge_provider": "codex",
+        "judge_model": "gpt-5.6-terra"
+      },
+      "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+      "dataset_bytes": 2805274,
+      "timestamp": "2026-09-19T11:45:04.406526+00:00",
+      "ormah_version": "0.15.1",
+      "git_sha": "16d64577fb251fabcb0e53e60956a083aac83dc9",
+      "git_dirty": false,
+      "settings": {
+        "llm_provider": "none",
+        "embedding_provider": "local",
+        "embedding_model": "BAAI/bge-base-en-v1.5",
+        "embedding_dim": 768,
+        "fts_weight": 0.4,
+        "vector_weight": 0.6,
+        "similarity_threshold": 0.4,
+        "rrf_k": 60,
+        "fts_only_dampening": 0.5,
+        "min_result_score": 0.1,
+        "rrf_min_spread_ratio": 0.05,
+        "question_fts_weight_scale": 0.3,
+        "question_vector_weight_scale": 1.5,
+        "question_similarity_blend_weight": 0.85,
+        "similarity_blend_weight": 0.5,
+        "title_match_boost": 2.0,
+        "length_penalty_threshold": 300,
+        "recency_boost": 0.05,
+        "recency_half_life_days": 7.0,
+        "access_boost": 0.05,
+        "tier_boost_core": 0.1,
+        "tier_boost_working": 0.0,
+        "tier_boost_archival": -0.1,
+        "space_boost_global": 1.0,
+        "space_boost_other": 0.6,
+        "recall_min_relevance_score": 0.35,
+        "whisper_injection_gate": 0.45,
+        "whisper_reranker_enabled": false,
+        "whisper_out_enabled": false,
+        "claude_maintenance_enabled": false,
+        "embedding_max_content_chars": 512,
+        "ingest_max_content_chars": 100000
+      },
+      "embedding_model": "BAAI/bge-base-en-v1.5",
+      "embedding_batch_size": 16,
+      "runtime": {
+        "python": "3.11.2",
+        "sqlite": "3.40.1",
+        "sqlite_vec": "0.1.9",
+        "fastembed": "0.8.0"
+      },
+      "prompt_hashes": {
+        "answer.py": "c243ae84373d49b8b7cc1cefe4cfe5181c78da72cade71d1287f67bee56c910d",
+        "judge.py": "79b043699430eb26b7afc38f2c282267c03003da533d2ab46e393c2258cff867"
+      },
+      "phase_wall_s": {
+        "store": 2922.0434028001036,
+        "retrieve": 249.8078591658268,
+        "answer": 3454.024142016191,
+        "judge": 2764.2290426869877
+      },
+      "providers": {
+        "extract": {
+          "provider": "codex",
+          "model": "gpt-5.6-terra",
+          "version": "codex-cli 0.154.0"
+        },
+        "answer": {
+          "provider": "codex",
+          "model": "gpt-5.6-terra",
+          "version": "codex-cli 0.154.0"
+        },
+        "judge": {
+          "provider": "codex",
+          "model": "gpt-5.6-terra",
+          "version": "codex-cli 0.154.0"
+        }
+      },
+      "invocations": [
+        {
+          "phases": [
+            "answer",
+            "judge",
+            "report",
+            "retrieve",
+            "store"
+          ],
+          "workers": 4,
+          "max_usd": 5.0,
+          "resume": true,
+          "embedding_batch_size": 16,
+          "embedding_length_sorted": true
+        }
+      ],
+      "embedding_cache": {
+        "hits": 0,
+        "misses": 870
+      },
+      "invocation_wall_s": 9402.802920171991,
+      "peak_rss_kib": 814404
+    },
+    "overall": {
+      "questions": 1986,
+      "retrieved": 1986,
+      "scored": 1540,
+      "accuracy": 0.7175324675324676,
+      "abstention_questions": 446,
+      "abstention_scored": 446,
+      "abstention_accuracy": 0.9260089686098655,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": 0.1267444280674681,
+      "retrieval_p95_s": 0.1653959034010768,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "by_type": {
+      "1": {
+        "questions": 282,
+        "retrieved": 282,
+        "scored": 282,
+        "accuracy": 0.8120567375886525,
+        "abstention_questions": 0,
+        "abstention_scored": 0,
+        "abstention_accuracy": null,
+        "recall@30": null,
+        "ndcg@30": null,
+        "retrieval_labeled": 0,
+        "production_recall@30": null,
+        "retrieval_p50_s": 0.11761133093386889,
+        "retrieval_p95_s": 0.15491173886694015,
+        "errors": {
+          "store": 0,
+          "retrieve": 0,
+          "answer": 0,
+          "judge": 0
+        }
+      },
+      "2": {
+        "questions": 321,
+        "retrieved": 321,
+        "scored": 321,
+        "accuracy": 0.6137071651090342,
+        "abstention_questions": 0,
+        "abstention_scored": 0,
+        "abstention_accuracy": null,
+        "recall@30": null,
+        "ndcg@30": null,
+        "retrieval_labeled": 0,
+        "production_recall@30": null,
+        "retrieval_p50_s": 0.11870861006900668,
+        "retrieval_p95_s": 0.16591595788486302,
+        "errors": {
+          "store": 0,
+          "retrieve": 0,
+          "answer": 0,
+          "judge": 0
+        }
+      },
+      "3": {
+        "questions": 96,
+        "retrieved": 96,
+        "scored": 96,
+        "accuracy": 0.5,
+        "abstention_questions": 0,
+        "abstention_scored": 0,
+        "abstention_accuracy": null,
+        "recall@30": null,
+        "ndcg@30": null,
+        "retrieval_labeled": 0,
+        "production_recall@30": null,
+        "retrieval_p50_s": 0.12225657852832228,
+        "retrieval_p95_s": 0.18600633746245876,
+        "errors": {
+          "store": 0,
+          "retrieve": 0,
+          "answer": 0,
+          "judge": 0
+        }
+      },
+      "4": {
+        "questions": 841,
+        "retrieved": 841,
+        "scored": 841,
+        "accuracy": 0.7502972651605232,
+        "abstention_questions": 0,
+        "abstention_scored": 0,
+        "abstention_accuracy": null,
+        "recall@30": null,
+        "ndcg@30": null,
+        "retrieval_labeled": 0,
+        "production_recall@30": null,
+        "retrieval_p50_s": 0.12958310404792428,
+        "retrieval_p95_s": 0.16545342886820436,
+        "errors": {
+          "store": 0,
+          "retrieve": 0,
+          "answer": 0,
+          "judge": 0
+        }
+      },
+      "5": {
+        "questions": 446,
+        "retrieved": 446,
+        "scored": 0,
+        "accuracy": null,
+        "abstention_questions": 446,
+        "abstention_scored": 446,
+        "abstention_accuracy": 0.9260089686098655,
+        "recall@30": null,
+        "ndcg@30": null,
+        "retrieval_labeled": 0,
+        "production_recall@30": null,
+        "retrieval_p50_s": 0.13130949949845672,
+        "retrieval_p95_s": 0.16503630724037066,
+        "errors": {
+          "store": 0,
+          "retrieve": 0,
+          "answer": 0,
+          "judge": 0
+        }
+      }
+    },
+    "calls": {
+      "extract": {
+        "calls": 272,
+        "errors": 0,
+        "usage_unknown": 0,
+        "input_tokens": 4243373,
+        "output_tokens": 87804,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "prompt_tokens_estimate": 592265,
+        "usd": 0,
+        "subscription_usd_estimate": 0,
+        "latency_p50_s": 9.69711729849223,
+        "latency_p95_s": 14.948835030477492,
+        "latency_total_s": 2778.2034074841067
+      },
+      "answer": {
+        "calls": 1986,
+        "errors": 0,
+        "usage_unknown": 0,
+        "input_tokens": 31423101,
+        "output_tokens": 96324,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "prompt_tokens_estimate": 4979210,
+        "usd": 0,
+        "subscription_usd_estimate": 0,
+        "latency_p50_s": 5.993852865532972,
+        "latency_p95_s": 14.21186266001314,
+        "latency_total_s": 13800.43356473744
+      },
+      "judge": {
+        "calls": 1986,
+        "errors": 0,
+        "usage_unknown": 0,
+        "input_tokens": 28131266,
+        "output_tokens": 48085,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "prompt_tokens_estimate": 1270319,
+        "usd": 0,
+        "subscription_usd_estimate": 0,
+        "latency_p50_s": 5.00347170047462,
+        "latency_p95_s": 9.003290023945738,
+        "latency_total_s": 11040.822308693314
+      }
+    },
+    "wall_s": 9390.10444666911
+  },
+  "failure_analysis": {
+    "scored_questions": 1540,
+    "wrong": 435,
+    "wrong_that_abstained": 255,
+    "note": "Most wrong answers say the memories lack the fact. The ingest prompt turned 5,882 turns into 870 memories and drops small details (places, dates, names) that LoCoMo asks about.",
+    "extracted_memories": 870,
+    "source_turns": 5882
+  },
+  "manifest": {
+    "run_id": "locomo-extract-full-codex-20260920",
+    "parameters": {
+      "dataset": "locomo",
+      "mode": "extract",
+      "k": 30,
+      "limit": null,
+      "question_type": null,
+      "category": null,
+      "conversation": null,
+      "extract_provider": "codex",
+      "extract_model": "gpt-5.6-terra",
+      "answer_provider": "codex",
+      "answer_model": "gpt-5.6-terra",
+      "judge_provider": "codex",
+      "judge_model": "gpt-5.6-terra"
+    },
+    "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "dataset_bytes": 2805274,
+    "timestamp": "2026-09-19T11:45:04.406526+00:00",
+    "ormah_version": "0.15.1",
+    "git_sha": "16d64577fb251fabcb0e53e60956a083aac83dc9",
+    "git_dirty": false,
+    "settings": {
+      "llm_provider": "none",
+      "embedding_provider": "local",
+      "embedding_model": "BAAI/bge-base-en-v1.5",
+      "embedding_dim": 768,
+      "fts_weight": 0.4,
+      "vector_weight": 0.6,
+      "similarity_threshold": 0.4,
+      "rrf_k": 60,
+      "fts_only_dampening": 0.5,
+      "min_result_score": 0.1,
+      "rrf_min_spread_ratio": 0.05,
+      "question_fts_weight_scale": 0.3,
+      "question_vector_weight_scale": 1.5,
+      "question_similarity_blend_weight": 0.85,
+      "similarity_blend_weight": 0.5,
+      "title_match_boost": 2.0,
+      "length_penalty_threshold": 300,
+      "recency_boost": 0.05,
+      "recency_half_life_days": 7.0,
+      "access_boost": 0.05,
+      "tier_boost_core": 0.1,
+      "tier_boost_working": 0.0,
+      "tier_boost_archival": -0.1,
+      "space_boost_global": 1.0,
+      "space_boost_other": 0.6,
+      "recall_min_relevance_score": 0.35,
+      "whisper_injection_gate": 0.45,
+      "whisper_reranker_enabled": false,
+      "whisper_out_enabled": false,
+      "claude_maintenance_enabled": false,
+      "embedding_max_content_chars": 512,
+      "ingest_max_content_chars": 100000
+    },
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_batch_size": 16,
+    "runtime": {
+      "python": "3.11.2",
+      "sqlite": "3.40.1",
+      "sqlite_vec": "0.1.9",
+      "fastembed": "0.8.0"
+    },
+    "prompt_hashes": {
+      "answer.py": "c243ae84373d49b8b7cc1cefe4cfe5181c78da72cade71d1287f67bee56c910d",
+      "judge.py": "79b043699430eb26b7afc38f2c282267c03003da533d2ab46e393c2258cff867"
+    },
+    "phase_wall_s": {
+      "store": 2922.0434028001036,
+      "retrieve": 249.8078591658268,
+      "answer": 3454.024142016191,
+      "judge": 2764.2290426869877
+    },
+    "providers": {
+      "extract": {
+        "provider": "codex",
+        "model": "gpt-5.6-terra",
+        "version": "codex-cli 0.154.0"
+      },
+      "answer": {
+        "provider": "codex",
+        "model": "gpt-5.6-terra",
+        "version": "codex-cli 0.154.0"
+      },
+      "judge": {
+        "provider": "codex",
+        "model": "gpt-5.6-terra",
+        "version": "codex-cli 0.154.0"
+      }
+    },
+    "invocations": [
+      {
+        "phases": [
+          "answer",
+          "judge",
+          "report",
+          "retrieve",
+          "store"
+        ],
+        "workers": 4,
+        "max_usd": 5.0,
+        "resume": true,
+        "embedding_batch_size": 16,
+        "embedding_length_sorted": true
+      }
+    ],
+    "embedding_cache": {
+      "hits": 0,
+      "misses": 870
+    },
+    "invocation_wall_s": 9402.802920171991,
+    "peak_rss_kib": 814404
+  }
+}

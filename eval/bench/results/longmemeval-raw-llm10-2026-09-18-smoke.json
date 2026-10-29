@@ -1,0 +1,398 @@
+{
+  "manifest": {
+    "run_id": "longmemeval-raw-smoke10",
+    "parameters": {
+      "dataset": "longmemeval",
+      "mode": "raw",
+      "k": 30,
+      "limit": 10,
+      "question_type": null,
+      "category": null,
+      "conversation": null,
+      "extract_provider": "claude-cli",
+      "extract_model": null,
+      "answer_provider": "claude-cli",
+      "answer_model": null,
+      "judge_provider": "codex",
+      "judge_model": null
+    },
+    "dataset_sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
+    "dataset_bytes": 278025796,
+    "timestamp": "2026-09-18T23:16:22.476532+00:00",
+    "ormah_version": "0.15.1",
+    "git_sha": "71094e83665da50d0e29b5d69cbd1470790e94c7",
+    "git_dirty": true,
+    "settings": {
+      "llm_provider": "none",
+      "embedding_provider": "local",
+      "embedding_model": "BAAI/bge-base-en-v1.5",
+      "embedding_dim": 768,
+      "fts_weight": 0.4,
+      "vector_weight": 0.6,
+      "similarity_threshold": 0.4,
+      "rrf_k": 60,
+      "fts_only_dampening": 0.5,
+      "min_result_score": 0.1,
+      "rrf_min_spread_ratio": 0.05,
+      "question_fts_weight_scale": 0.3,
+      "question_vector_weight_scale": 1.5,
+      "question_similarity_blend_weight": 0.85,
+      "similarity_blend_weight": 0.5,
+      "title_match_boost": 2.0,
+      "length_penalty_threshold": 300,
+      "recency_boost": 0.05,
+      "recency_half_life_days": 7.0,
+      "access_boost": 0.05,
+      "tier_boost_core": 0.1,
+      "tier_boost_working": 0.0,
+      "tier_boost_archival": -0.1,
+      "space_boost_global": 1.0,
+      "space_boost_other": 0.6,
+      "recall_min_relevance_score": 0.35,
+      "whisper_injection_gate": 0.45,
+      "whisper_reranker_enabled": false,
+      "whisper_out_enabled": false,
+      "claude_maintenance_enabled": false,
+      "embedding_max_content_chars": 512,
+      "ingest_max_content_chars": 100000
+    },
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_batch_size": 16,
+    "runtime": {
+      "python": "3.11.2",
+      "sqlite": "3.40.1",
+      "sqlite_vec": "0.1.9",
+      "fastembed": "0.8.0"
+    },
+    "prompt_hashes": {
+      "answer.py": "c243ae84373d49b8b7cc1cefe4cfe5181c78da72cade71d1287f67bee56c910d",
+      "judge.py": "79b043699430eb26b7afc38f2c282267c03003da533d2ab46e393c2258cff867"
+    },
+    "phase_wall_s": {
+      "store": 24.915809226222336,
+      "retrieve": 0.836007242789492,
+      "answer": 3.6226425650529563,
+      "judge": 0.02261577919125557
+    },
+    "providers": {
+      "answer": {
+        "provider": "claude-cli",
+        "model": "sonnet",
+        "version": "2.1.220 (Claude Code)"
+      },
+      "judge": {
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+        "version": "codex-cli 0.154.0"
+      }
+    },
+    "invocations": [
+      {
+        "phases": [
+          "answer",
+          "judge",
+          "report",
+          "retrieve",
+          "store"
+        ],
+        "workers": 4,
+        "max_usd": 5.0,
+        "resume": false,
+        "embedding_batch_size": 16,
+        "embedding_length_sorted": true
+      }
+    ],
+    "embedding_cache": {
+      "hits": 5173,
+      "misses": 0
+    },
+    "invocation_wall_s": 32.78533860016614,
+    "peak_rss_kib": 717776
+  },
+  "overall": {
+    "questions": 10,
+    "retrieved": 10,
+    "scored": 0,
+    "accuracy": null,
+    "abstention_questions": 0,
+    "abstention_scored": 0,
+    "abstention_accuracy": null,
+    "recall@30": 1.0,
+    "ndcg@30": 0.9261859507142916,
+    "retrieval_labeled": 10,
+    "production_recall@30": 1.0,
+    "retrieval_p50_s": 0.0732189203845337,
+    "retrieval_p95_s": 0.09422845672816037,
+    "errors": {
+      "store": 0,
+      "retrieve": 0,
+      "answer": 10,
+      "judge": 10
+    }
+  },
+  "by_type": {
+    "knowledge-update": {
+      "questions": 0,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "multi-session": {
+      "questions": 0,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "single-session-assistant": {
+      "questions": 0,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "single-session-preference": {
+      "questions": 0,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    },
+    "single-session-user": {
+      "questions": 10,
+      "retrieved": 10,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": 1.0,
+      "ndcg@30": 0.9261859507142916,
+      "retrieval_labeled": 10,
+      "production_recall@30": 1.0,
+      "retrieval_p50_s": 0.0732189203845337,
+      "retrieval_p95_s": 0.09422845672816037,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 10,
+        "judge": 10
+      }
+    },
+    "temporal-reasoning": {
+      "questions": 0,
+      "retrieved": 0,
+      "scored": 0,
+      "accuracy": null,
+      "abstention_questions": 0,
+      "abstention_scored": 0,
+      "abstention_accuracy": null,
+      "recall@30": null,
+      "ndcg@30": null,
+      "retrieval_labeled": 0,
+      "production_recall@30": null,
+      "retrieval_p50_s": null,
+      "retrieval_p95_s": null,
+      "errors": {
+        "store": 0,
+        "retrieve": 0,
+        "answer": 0,
+        "judge": 0
+      }
+    }
+  },
+  "calls": {
+    "extract": {
+      "calls": 0,
+      "errors": 0,
+      "usage_unknown": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 0,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": null,
+      "latency_p95_s": null,
+      "latency_total_s": 0
+    },
+    "answer": {
+      "calls": 10,
+      "errors": 10,
+      "usage_unknown": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 24877,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": 1.2749295009998605,
+      "latency_p95_s": 1.3055232236045413,
+      "latency_total_s": 12.173010275699198
+    },
+    "judge": {
+      "calls": 0,
+      "errors": 0,
+      "usage_unknown": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "prompt_tokens_estimate": 0,
+      "usd": 0,
+      "subscription_usd_estimate": 0,
+      "latency_p50_s": null,
+      "latency_p95_s": null,
+      "latency_total_s": 0
+    }
+  },
+  "wall_s": 29.39707481325604,
+  "publication_status": "smoke_validation_only_not_a_published_accuracy_claim",
+  "execution_measurements": {
+    "command_exit": 1,
+    "command_wall_s": 33.57057309593074,
+    "peak_rss_kib": 717776
+  },
+  "blocker": "Required claude --bare disables subscription OAuth in installed CLI; calls returned Not logged in. Zero questions scored; no successful answer/judge inference.",
+  "per_call_measurements": [
+    {
+      "item_id": "58bf7951",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.288518015993759,
+      "prompt_tokens_estimate": 2258
+    },
+    {
+      "item_id": "e47becba",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.3078765121754259,
+      "prompt_tokens_estimate": 2484
+    },
+    {
+      "item_id": "118b2229",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.3026469820179045,
+      "prompt_tokens_estimate": 2594
+    },
+    {
+      "item_id": "51a45a95",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.3008420849218965,
+      "prompt_tokens_estimate": 2529
+    },
+    {
+      "item_id": "1e043500",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.1086072628386319,
+      "prompt_tokens_estimate": 2260
+    },
+    {
+      "item_id": "c5e8278d",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.2549228849820793,
+      "prompt_tokens_estimate": 2345
+    },
+    {
+      "item_id": "6f9b354f",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.261340986005962,
+      "prompt_tokens_estimate": 2695
+    },
+    {
+      "item_id": "6ade9755",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.290389556903392,
+      "prompt_tokens_estimate": 2557
+    },
+    {
+      "item_id": "58ef2f1c",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.0238109568599612,
+      "prompt_tokens_estimate": 2520
+    },
+    {
+      "item_id": "f8c5f88b",
+      "phase": "answer",
+      "provider": "claude-cli",
+      "attempt": 1,
+      "latency_s": 1.034055033000186,
+      "prompt_tokens_estimate": 2635
+    }
+  ]
+}

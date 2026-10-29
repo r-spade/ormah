@@ -106,3 +106,9 @@ CLAUDE.md
 .council/.*-status.json
 .council/.*-stderr.log
 # <<< dev-council ephemerals <<<
+
+# Public benchmark datasets and run artifacts (eval/bench): large downloads
+# and per-run caches. Committed results live in eval/bench/results/.
+eval/bench/data/
+eval/bench/artifacts/
+eval/bench/eval_db/
