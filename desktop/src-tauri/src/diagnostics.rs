@@ -45,6 +45,10 @@ fn append(path: &Path, text: &str, limit: u64) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // The Linux daemon output collector can outlive the app. Lock a stable file
+    // across rename as well as append so both processes share one rotation.
+    #[cfg(unix)]
+    let _lock = lock_log(path)?;
     // Split unusually large events as well, maintaining a hard bound on both files.
     let mut remaining = text;
     while !remaining.is_empty() {
@@ -82,6 +86,98 @@ fn append(path: &Path, text: &str, limit: u64) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn lock_log(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(path.with_extension("lock"))?;
+    // SAFETY: file owns this descriptor for the duration of the lock. Closing
+    // the returned File releases flock, including on an append error.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+const COLLECTOR_ARG: &str = "--ormah-internal-log-collector";
+
+/// A pipe collector must outlive the app when a fallback daemon inherits its
+/// writers. This internal mode runs before Tauri/GTK initialization.
+#[cfg(target_os = "linux")]
+pub fn run_collector_if_requested() -> bool {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new(COLLECTOR_ARG)) {
+        return false;
+    }
+    let Some(path) = args.next().map(PathBuf::from) else {
+        return true;
+    };
+    if let Ok(mut target) = LOG.lock() {
+        *target = Some(path);
+    }
+    let mut reader = std::io::stdin().lock();
+    let mut redactor = OutputRedactor::default();
+    let mut buffer = [0u8; 4096];
+    while let Ok(count) = reader.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        let safe = redactor.push(&buffer[..count]);
+        if !safe.is_empty() {
+            log(&format!("daemon output: {safe}"));
+        }
+    }
+    let safe = redactor.finish();
+    if !safe.is_empty() {
+        log(&format!("daemon output: {safe}"));
+    }
+    true
+}
+
+/// Capture output without making daemon lifetime depend on the GUI's pipes.
+#[cfg(target_os = "linux")]
+pub fn daemon_status(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let collector = (|| -> std::io::Result<_> {
+        let path = path().ok_or_else(|| std::io::Error::other("log directory unavailable"))?;
+        let mut collector = Command::new(std::env::current_exe()?)
+            .arg(COLLECTOR_ARG)
+            .arg(path)
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let input: OwnedFd = collector.stdin.take().unwrap().into();
+        let writer = std::fs::File::from(input);
+        let stderr = writer.try_clone()?;
+        command
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(stderr));
+        Ok(collector)
+    })();
+    match collector {
+        Ok(mut collector) => {
+            // Reap when the writers close; do not wait for EOF to report CLI exit.
+            std::thread::spawn(move || {
+                let _ = collector.wait();
+            });
+        }
+        Err(error) => log(&format!("daemon output capture unavailable: {error}")),
+    }
+    command.status()
+}
+
 pub fn recent() -> String {
     let Some(path) = path() else {
         return "Setup log is unavailable.".into();
@@ -108,11 +204,11 @@ pub fn redact(text: &str) -> String {
     static USERINFO: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/]*@").unwrap());
     static AUTH: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?i)(authorization[\s"']*[:=]\s*)(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic)\s+)?[^\s"'&,;]+)"#)
+        Regex::new(r#"(?i)(authorization[\s"'\\]*[:=]\s*)(?:\\?"[^"]*"|\\?'[^']*'|(?:(?:bearer|basic)\s+)?[^\s"'&,;]+)"#)
             .unwrap()
     });
     static NAMED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?i)((?:bearer\s+)|(?:[a-z0-9_]*(?:token|secret|password|api[_-]?key)[a-z0-9_]*[\s"']*[:=]\s*))(?:"[^"]*"|'[^']*'|[^\s"'&,;]+)"#).unwrap()
+        Regex::new(r#"(?i)((?:bearer\s+)|(?:[a-z0-9_]*(?:token|secret|password|api[_-]?key)[a-z0-9_]*[\s"'\\]*[:=]\s*))(?:\\?"[^"]*"|\\?'[^']*'|[^\s"'&,;]+)"#).unwrap()
     });
     static TOKEN: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"\b(?:eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9_-]{32,}(?:\.[A-Za-z0-9_-]+)*|(?:AKIA|ASIA)[A-Z0-9]{16}|(?:sk|ghp|gho|github_pat|glpat)[-_][A-Za-z0-9_-]+)\b").unwrap()
@@ -232,6 +328,8 @@ mod tests {
             r#"{"Authorization": "Basic dXNlcjpwYXNz"}"#,
             "Authorization: 'Basic dXNlcjpwYXNz'",
             r#"{"Authorization": "short-token"}"#,
+            r#"{\"Authorization\": \"Basic dXNlcjpwYXNz\"}"#,
+            r#"token=\"short-token\""#,
         ] {
             assert!(!redact(text).contains("dXNlcjpwYXNz"));
             assert!(!redact(text).contains("short-token"));
@@ -266,6 +364,9 @@ mod tests {
                 .len(),
             100
         );
+        #[cfg(unix)]
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3); // two logs + stable lock
+        #[cfg(not(unix))]
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }

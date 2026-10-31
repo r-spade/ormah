@@ -252,21 +252,28 @@ pub async fn start_daemon() -> Result<(), String> {
         let bin = find_ormah().ok_or_else(|| "Ormah runtime was not found.".to_string())?;
         diagnostics::log(&format!("daemon command={bin:?} args=[server, start, -d]"));
         let started = Instant::now();
-        let output = clean_python_env(std::process::Command::new(&bin))
-            .args(["server", "start", "-d"])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut command = clean_python_env(std::process::Command::new(&bin));
+        command.args(["server", "start", "-d"]);
+        #[cfg(target_os = "linux")]
+        let status = diagnostics::daemon_status(&mut command).map_err(|e| e.to_string())?;
+        #[cfg(not(target_os = "linux"))]
+        let status = {
+            let output = command.output().map_err(|e| e.to_string())?;
+            diagnostics::log(&format!(
+                "daemon stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+            output.status
+        };
         diagnostics::log(&format!(
-            "daemon duration_ms={} status={} stdout:\n{}\nstderr:\n{}",
-            started.elapsed().as_millis(),
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            "daemon duration_ms={} status={status}",
+            started.elapsed().as_millis()
         ));
-        if output.status.success() {
+        if status.success() {
             Ok(())
         } else {
-            Err(format!("daemon exited {}", output.status))
+            Err(format!("daemon exited {status}"))
         }
     })
     .await

@@ -137,6 +137,8 @@ fn integrate_appimage() {
 }
 
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if diagnostics::run_collector_if_requested() { return; }
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
 
