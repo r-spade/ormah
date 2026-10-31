@@ -6,11 +6,13 @@
 //! No global hotkey, no native graph, no settings beyond start-at-login.
 
 mod commands;
+mod diagnostics;
 mod product_bridge;
 mod sidecar;
 mod stats;
 mod tray;
 mod updater;
+mod window_size;
 
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "linux")]
@@ -150,6 +152,7 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -167,6 +170,9 @@ pub fn run() {
             commands::stop_server,
             commands::server_status,
             commands::retry_runtime_setup,
+            commands::runtime_setup_status,
+            commands::copy_setup_details,
+            commands::reveal_setup_log,
             product_bridge::desktop_bridge_info,
             product_bridge::account_status,
             product_bridge::request_account_code,
@@ -227,6 +233,7 @@ pub fn run() {
             integrate_appimage();
 
             // Start the bundled server as a daemon (survives app closing).
+            diagnostics::init(app.handle());
             sidecar::start(app.handle().clone());
 
             // Always enable autostart — ormah should run at login by default.
@@ -235,11 +242,16 @@ pub fn run() {
             // Main window: shows the install/boot flow, then navigates to the
             // graph. Built in Rust so we can attach the scrollbar-hiding init
             // script that also applies after navigating to the graph.
+            let work_area = app.primary_monitor().ok().flatten().and_then(|monitor| {
+                let size = monitor.work_area().size;
+                window_size::logical_work_area(size.width, size.height, monitor.scale_factor())
+            });
+            let size = window_size::fit_window(work_area);
             let window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Ormah")
-                    .inner_size(1180.0, 820.0)
-                    .min_inner_size(860.0, 600.0)
+                    .inner_size(size.width, size.height)
+                    .min_inner_size(size.min_width, size.min_height)
                     .center()
                     .decorations(false) // custom dark title bar drawn in the UI
                     .initialization_script(HIDE_SCROLLBARS)

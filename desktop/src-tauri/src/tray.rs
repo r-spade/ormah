@@ -85,7 +85,7 @@ pub fn build(app: &App) -> tauri::Result<()> {
                 if currently_running {
                     sidecar::stop_daemon();
                 } else {
-                    sidecar::start_daemon();
+                    sidecar::start(app.clone());
                 }
                 // Optimistically flip labels; the poller will correct on next tick.
                 let now_running = !currently_running;

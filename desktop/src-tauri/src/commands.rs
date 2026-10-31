@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 use tauri::{AppHandle, Manager, Runtime};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_notification::NotificationExt;
 
 use crate::sidecar::find_ormah;
@@ -119,8 +120,7 @@ pub fn run_setup_notify<R: Runtime>(app: AppHandle<R>) {
 /// Start the ormah daemon. No-op if already running.
 #[tauri::command]
 pub async fn start_server() -> Result<(), String> {
-    crate::sidecar::start_daemon();
-    Ok(())
+    crate::sidecar::start_daemon().await
 }
 
 /// Stop the ormah daemon.
@@ -142,6 +142,49 @@ pub fn retry_runtime_setup<R: Runtime>(app: AppHandle<R>) -> bool {
     crate::sidecar::start(app)
 }
 
+/// Snapshot and event sequences let the bootstrap recover events emitted before mount.
+#[tauri::command]
+pub fn runtime_setup_status() -> Option<crate::sidecar::SetupStatus> {
+    crate::sidecar::latest_status()
+}
+
+#[tauri::command]
+pub fn copy_setup_details<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    app.clipboard()
+        .write_text(crate::diagnostics::recent())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn reveal_setup_log<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    crate::diagnostics::log("Setup log requested by user");
+    let path = crate::diagnostics::path()
+        .filter(|p| p.is_file())
+        .ok_or_else(|| "Setup log is unavailable.".to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(&path)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("Could not reveal the setup log.".into());
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_shell::ShellExt;
+        #[allow(deprecated)]
+        app.shell()
+            .open(path.parent().unwrap().to_string_lossy(), None)
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -155,11 +198,30 @@ mod tests {
             .map(|(bootstrap, _)| bootstrap)
             .unwrap_or(permissions);
 
-        for command in ["fetch_stats", "graph_url", "retry_runtime_setup"] {
+        for command in [
+            "fetch_stats",
+            "graph_url",
+            "retry_runtime_setup",
+            "server_status",
+            "runtime_setup_status",
+            "copy_setup_details",
+            "reveal_setup_log",
+        ] {
             assert!(
                 bootstrap.contains(&format!("\"{command}\"")),
                 "bootstrap command `{command}` is not allowed by the desktop capability"
             );
+        }
+        let product = permissions
+            .split_once("identifier = \"desktop-product-bridge\"")
+            .unwrap()
+            .1;
+        for command in [
+            "runtime_setup_status",
+            "copy_setup_details",
+            "reveal_setup_log",
+        ] {
+            assert!(!product.contains(&format!("\"{command}\"")));
         }
     }
 }
