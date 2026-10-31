@@ -4,6 +4,11 @@
 #        bash <(curl -fsSL https://www.ormah.me/install.sh) --no-setup
 set -euo pipefail
 
+# Standalone copy of desktop/uv-version; tests/test_install_uv.py enforces sync.
+UV_VERSION="0.13.6"
+# Oldest uv supported by this installer (Python 3.11 + tool install flags).
+UV_MIN_VERSION="0.10.9"
+
 # ── Output helpers ──────────────────────────────────────────────────────────
 
 _use_color=true
@@ -68,10 +73,22 @@ esac
 
 step "Checking for uv"
 if command -v uv >/dev/null 2>&1; then
-    ok "uv already installed ($(uv --version))"
+    UV_EXISTING_VERSION="$(uv --version)"
+    ok "uv already installed ($UV_EXISTING_VERSION)"
+    # Compare stable numeric components without requiring Python on a fresh machine.
+    if ! awk -v actual="${UV_EXISTING_VERSION#uv }" -v minimum="$UV_MIN_VERSION" 'BEGIN {
+        split(actual, a, "."); split(minimum, b, ".");
+        for (i=1; i<=3; i++) {
+            if (a[i]+0 > b[i]+0) exit 0;
+            if (a[i]+0 < b[i]+0) exit 1;
+        }
+        exit 0;
+    }'; then
+        warn "uv is below supported minimum $UV_MIN_VERSION; consider updating it yourself"
+    fi
 else
     info "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | sh
 
     # Get uv on PATH for this session
     if [[ -f "$HOME/.local/bin/env" ]]; then
@@ -112,8 +129,11 @@ if command -v ormah >/dev/null 2>&1 || uv tool list 2>/dev/null | grep -q '^orma
         cp -r "$_mem_dir" "$_backup_dest"
         ok "Memory backed up to $_backup_dest"
         # Keep only the 10 most recent backups
+        # Names are installer-generated timestamps, with no whitespace.
+        # shellcheck disable=SC2012
         _count=$(ls -1d "$_backup_dir"/memory_* 2>/dev/null | wc -l)
         if [[ "$_count" -gt 10 ]]; then
+            # shellcheck disable=SC2012
             ls -1dt "$_backup_dir"/memory_* | tail -n +11 | xargs rm -rf
         fi
     fi
@@ -122,7 +142,7 @@ fi
 _install_ok=false
 
 info "Installing from: $INSTALL_SOURCE"
-if uv tool install "$INSTALL_SOURCE" "${UV_FLAGS[@]}" 2>/dev/null; then
+if uv tool install "$INSTALL_SOURCE" "${UV_FLAGS[@]}"; then
     _install_ok=true
 else
     # Fallback to git if PyPI failed and user didn't override source

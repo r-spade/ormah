@@ -41,18 +41,24 @@ esac
 
 DEST="$BINARIES_DIR/uv-$TARGET"
 
-if [[ -f "$DEST" ]]; then
-    echo "uv sidecar already present: $DEST"
-    exit 0
-fi
+UV_VERSION="$(cat "$SCRIPT_DIR/../uv-version")"
+[[ "$UV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid uv pin" >&2; exit 1; }
 
-URL="https://github.com/astral-sh/uv/releases/latest/download/$UV_ASSET"
+# Always verify the release archive, including on repeat/cross-target builds.
+# Executing a cached target binary is not possible when cross-compiling.
+URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$UV_ASSET"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "Downloading $UV_ASSET for $TARGET..."
-curl -fsSL "$URL" | tar -xz -C "$TMP"
-
+echo "Downloading uv $UV_VERSION ($UV_ASSET)..."
+curl -fsSL "$URL" -o "$TMP/$UV_ASSET"
+curl -fsSL "$URL.sha256" -o "$TMP/$UV_ASSET.sha256"
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$TMP" && sha256sum -c "$UV_ASSET.sha256")
+else
+    (cd "$TMP" && shasum -a 256 -c "$UV_ASSET.sha256")
+fi
+tar --no-same-owner -xzf "$TMP/$UV_ASSET" -C "$TMP"
 cp "$TMP/uv-$TARGET/uv" "$DEST"
 chmod +x "$DEST"
-echo "Installed uv sidecar → $DEST"
+echo "Installed uv $UV_VERSION sidecar → $DEST"

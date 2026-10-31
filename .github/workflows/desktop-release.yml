@@ -14,10 +14,8 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-            uv_asset: uv-aarch64-apple-darwin.tar.gz
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            uv_asset: uv-x86_64-unknown-linux-gnu.tar.gz
 
     runs-on: ${{ matrix.os }}
 
@@ -64,12 +62,7 @@ jobs:
 
       - name: Download uv sidecar
         shell: bash
-        run: |
-          URL="https://github.com/astral-sh/uv/releases/latest/download/${{ matrix.uv_asset }}"
-          curl -fsSL "$URL" | tar -xz -C /tmp
-          mkdir -p desktop/src-tauri/binaries
-          cp /tmp/uv-${{ matrix.target }}/uv "desktop/src-tauri/binaries/uv-${{ matrix.target }}"
-          chmod +x "desktop/src-tauri/binaries/uv-${{ matrix.target }}"
+        run: bash desktop/scripts/build-sidecar.sh '${{ matrix.target }}'
 
       - name: Build desktop UI
         working-directory: desktop/ui
