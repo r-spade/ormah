@@ -118,8 +118,10 @@ class TestReleaseWorkflow:
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/desktop-release.yml").read_text()
 
-        assert 'REPO="${{ github.repository }}"' in workflow
-        assert 'gh release view "$GITHUB_REF_NAME" -R "$REPO"' in workflow
+        assert 'REPO: ${{ github.repository }}' in workflow
+        helper = (root / "scripts/release/desktop.py").read_text()
+        assert '"-R", REPO' in helper
+        assert 'desktop.py draft' in workflow
 
 
 class TestEvalCliFallback:

@@ -52,7 +52,9 @@ ormah.db
 memory/deleted/
 
 # Local scripts (not part of the repo)
-/scripts/
+/scripts/*
+!/scripts/release/
+!/scripts/acceptance/
 # Desktop build scripts are part of the repo
 !desktop/scripts/
 
