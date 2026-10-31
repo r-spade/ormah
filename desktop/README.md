@@ -44,12 +44,8 @@ identity set before recording readiness under the store lock. The direct
 ## Build & run (dev)
 
 ```bash
-# 1. Download the uv sidecar for your arch (Linux x86_64 shown).
-TRIPLE=$(rustc -Vv | sed -n 's/host: //p')
-curl -fsSL "https://github.com/astral-sh/uv/releases/latest/download/uv-${TRIPLE}.tar.gz" \
-  | tar -xz -C /tmp
-cp /tmp/uv-${TRIPLE}/uv desktop/src-tauri/binaries/uv-${TRIPLE}
-chmod +x desktop/src-tauri/binaries/uv-${TRIPLE}
+# 1. Download the pinned, checksum-verified sidecar for your arch.
+bash desktop/scripts/build-sidecar.sh
 
 # 2. Generate the full icon set from the source icon (one-time).
 cd desktop/src-tauri && cargo tauri icon icons/icon.png && cd -
@@ -63,20 +59,22 @@ Subsequent runs skip the install step since `ormah` is already on PATH.
 
 ## Release (CI — macOS + Linux)
 
-`.github/workflows/desktop-release.yml` triggers on `desktop-v*` tags. It
-verifies the tag matches `tauri.conf.json`'s version, builds per-arch on
-macOS (aarch64) and Linux (x86_64) runners, downloads the matching `uv`
-binary into `binaries/`, and attaches `.dmg`, `.AppImage`, and `.deb`
-artifacts to the GitHub release.
+The [release runbook](../CONTRIBUTING.md#coupled-python-and-desktop-releases)
+contains the complete sequence and commands. Each Python release requires a
+reviewed desktop version bump, followed by a new desktop candidate. The desktop
+workflow supports an owner dispatch and `desktop-v*` tags, keeps the bounded PyPI
+propagation check, signs/notarizes macOS, signs Linux updater packages, and puts
+all artifacts into a **draft** release with `candidate.json` checksums.
 
-Auto-update: `createUpdaterArtifacts` makes the build emit signed updater
-bundles (`.AppImage.sig`, `.app.tar.gz` + `.sig`, signed with the
-`TAURI_SIGNING_PRIVATE_KEY` secret). The publish job then generates
-`latest.json` and uploads it to the rolling `desktop-latest` prerelease,
-which the app's updater polls (`plugins.updater.endpoints` in
-`tauri.conf.json`). The rolling release is a prerelease on purpose — GitHub's
-`/releases/latest` alternates between desktop and Python releases, so the
-feed needs its own stable URL.
+The updater feed is generated only by the separate owner promotion command,
+after exact-artifact clean-VM acceptance and manual macOS/Linux checks pass.
+`latest.json` includes macOS, AppImage and Debian entries and lives on the rolling
+`desktop-latest` prerelease, which keeps its URL stable without taking over
+GitHub's `/releases/latest`. A failed acceptance leaves that feed untouched.
+
+uv is pinned in `desktop/uv-version`. The build script verifies Astral's SHA-256
+before extraction, including repeat builds, so a stale cached sidecar is replaced.
+Fresh terminal installs use the same version; existing user uv is preserved.
 
 The app pins which ormah Python package it installs: `build.rs` reads the
 version from the repo's `pyproject.toml` at compile time (no manual sync).
@@ -90,9 +88,9 @@ macOS-only secrets required for signing/notarization:
 | `APPLE_CERTIFICATE` | base64 Developer ID Application `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | password for the `.p12` |
 | `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: … (TEAMID)` |
-| `APPLE_ID` | Apple ID email for notarization |
-| `APPLE_APP_PASSWORD` | app-specific password for notarytool |
-| `APPLE_TEAM_ID` | Apple Developer Team ID |
+| `APPLE_API_ISSUER` | App Store Connect issuer ID |
+| `APPLE_API_KEY` | App Store Connect key ID |
+| `APPLE_API_KEY_P8` | base64 App Store Connect private key |
 | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | password for the updater key |
 
@@ -111,10 +109,85 @@ Also set `plugins.updater.pubkey` in `tauri.conf.json` and
   launch the app installs a missing/older version with `uv tool install`, then restarts
   the daemon so the new Python code and migrations are active. It never downgrades a
   newer installed runtime.
-- **Updater appcast** — the CI `publish` job attaches artifacts but the
-  `latest.json` regeneration/upload is a TODO.
+- **Release acceptance** — the first real Tart run and first signed draft using
+  the new gate must be verified on the owner's Mac. Linux checks remain manual.
 
 ## Backend coverage
 
 - `GET /stats` — `tests/test_api/test_stats.py`
 - `GET /agent/clients` + `ormah setup --json` — `tests/test_setup_json.py`
+
+
+## Clean-machine acceptance
+
+Run on an Apple Silicon Mac with Tart installed and owner GitHub CLI login.
+GitHub-hosted macOS runners cannot run this Tart test nested; no self-hosted runner
+is registered. The host also needs Python 3.11+, OpenSSH, curl and shasum.
+
+Prepare a stopped clean base once (do not install developer tooling in it):
+
+```bash
+tart clone ghcr.io/cirruslabs/macos-tahoe-vanilla:latest ormah-base
+tart set ormah-base --display 1920x1200
+tart run ormah-base
+# Verify auto-login to admin, Remote Login/SSH enabled, admin/admin works,
+# no uv, Homebrew, real Python, Xcode tools, Ormah or Ormah/model data.
+# Verify sudo -n works for reboot. Shut down this base cleanly in the guest.
+```
+
+Record the source image digest and Tart/macOS versions with release evidence.
+Never prepare the base by deleting an Ormah install from a used machine. The base
+must auto-login to its GUI session. `open -a` over SSH is checked by verifying the
+console user, the GUI launchd domain, the app process, and backend health; the first
+real run still needs owner verification. The image defaults to Gatekeeper
+assessments disabled (`spctl --status`); the script records this and applies
+quarantine metadata, but cannot prove Gatekeeper first-open behavior.
+
+From a checkout matching the candidate, download its draft assets with `gh release
+download` and run:
+
+```bash
+bash scripts/acceptance/macos-vm.sh app --dmg /path/to/exact-draft.dmg \
+  --expected-version X.Y.Z --desktop-version A.B.C --output /path/to/evidence/app
+bash scripts/acceptance/macos-vm.sh terminal --output /path/to/evidence/terminal
+# Optional: --base another-clean-base, --keep, --installer /path/or/https-url
+```
+
+Each invocation creates a unique clone, sets 1920x1200, boots, and waits up to
+three minutes for SSH. Each check has a timeout (first model/backend readiness:
+15 minutes; terminal installation/setup: 20 minutes). It records baseline tools,
+Gatekeeper, exact input SHA-256, runtime/desktop/uv versions, Python 3.11, both
+nonempty ONNX model weights, VM-user server ownership, a unique remember/recall,
+and reboot/autostart/recall. App mode checks the process before and after reboot;
+terminal mode checks a real new login shell before and after reboot. It does not
+manually launch the app or daemon after reboot. Only the created clone is stopped
+and deleted on success; `--keep` retains it. Any failure exits nonzero and retains
+the clone with its unique name in `result.json`. Logs, timings, every check and
+input artifact stay in the requested output directory. Passwords and known hosts
+use private temporary files, never process arguments or the user's SSH files.
+No host Ormah service or host localhost:8787 is contacted.
+
+The terminal installer defaults to the public script, uses `--no-setup` then
+`ormah setup --ci`, and needs no model API key. Interactive terminal setup is not
+covered. All AI-client release checks use subscription sign-in only.
+
+Manual release items (required in the owner promotion attestation):
+
+- Download the exact candidate through Safari on a clean Mac with Gatekeeper
+  **enabled**, then open DMG and app normally. Confirm signing/notarization and
+  first-open UX. A disabled Gatekeeper VM cannot substitute for this check.
+- Connect an AI tool using subscription sign-in, then remember/recall through it.
+- Check onboarding at 1024x768 for clipped content and inaccessible controls.
+- In a fresh clone, launch with HTTPS_PROXY/HTTP_PROXY/ALL_PROXY pointing at a dead
+  VM-local port (for example 127.0.0.1:9). Verify install failure is shown, retry is
+  available, and the UI stays responsive. Remove the proxy and confirm recovery.
+  Apply proxies to the GUI launch environment with `launchctl setenv` inside the
+  VM; setting only the SSH shell environment may not reach LaunchServices.
+- Test exact Linux AppImage and deb packages on clean supported Linux machines,
+  including startup, runtime version, models, persistence and login autostart.
+
+If acceptance fails, preserve logs and VM, fix through review, and use a new
+candidate version for changed bytes. See the runbook for transient retry, corrected
+candidates, and recovery from a failed feed upload after publication. Real Tart
+execution is **UNVERIFIED** by Linux-only development tests; stub tests exercise
+script flow and evidence rejection, not virtualization or GUI behavior.
