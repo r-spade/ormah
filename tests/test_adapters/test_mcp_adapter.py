@@ -45,7 +45,7 @@ async def test_dispatch_uses_extended_timeout_for_maintenance(monkeypatch):
     captured: dict[str, float] = {}
 
     class _FakeAsyncClient:
-        def __init__(self, *, base_url, timeout):
+        def __init__(self, *, base_url, timeout, trust_env):
             captured["base_url"] = base_url
             captured["timeout"] = timeout
 
@@ -129,7 +129,7 @@ async def test_dispatch_submit_feedback_includes_whisper_log_id(monkeypatch):
             return {"text": "Feedback recorded"}
 
     class _FakeAsyncClient:
-        def __init__(self, *, base_url, timeout):
+        def __init__(self, *, base_url, timeout, trust_env):
             captured["base_url"] = base_url
 
         async def __aenter__(self):
@@ -195,7 +195,7 @@ async def test_dispatch_polls_until_phase1_batches_are_ready(monkeypatch):
             return self._payload
 
     class _FakeAsyncClient:
-        def __init__(self, *, base_url, timeout):
+        def __init__(self, *, base_url, timeout, trust_env):
             self.base_url = base_url
             self.timeout = timeout
 
@@ -243,7 +243,7 @@ async def test_dispatch_polls_until_phase2_apply_completes(monkeypatch):
             return self._payload
 
     class _FakeAsyncClient:
-        def __init__(self, *, base_url, timeout):
+        def __init__(self, *, base_url, timeout, trust_env):
             self.base_url = base_url
             self.timeout = timeout
 

@@ -261,9 +261,11 @@ pub fn stop_daemon() {
 /// Ping /admin/health — true means the server is up and responding.
 pub async fn is_running() -> bool {
     let url = format!("{}/admin/health", crate::commands::base_url());
-    reqwest::Client::new()
+    let Ok(client) = crate::commands::local_client(Duration::from_secs(2)) else {
+        return false;
+    };
+    client
         .get(&url)
-        .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
         .map(|r| r.status().is_success())

@@ -204,7 +204,7 @@ async def _dispatch(
     headers: dict[str, str] | None = None,
 ) -> str:
     async with httpx.AsyncClient(
-        base_url=base_url, timeout=_timeout_for_tool(name),
+        base_url=base_url, timeout=_timeout_for_tool(name), trust_env=False,
         **({"headers": headers} if headers else {}),
     ) as client:
         if name == "remember":

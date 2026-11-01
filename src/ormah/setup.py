@@ -1524,7 +1524,7 @@ def backfill_transcripts() -> None:
             if space:
                 params["default_space"] = space
 
-            with httpx.Client(base_url=base_url, timeout=120.0) as client:
+            with httpx.Client(base_url=base_url, timeout=120.0, trust_env=False) as client:
                 r = client.post(
                     "/ingest/conversation",
                     json={"content": result.conversation},

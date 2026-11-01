@@ -14,6 +14,11 @@ pub fn base_url() -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+/// HTTP client for the local server. A proxy can't reach this machine's localhost.
+pub fn local_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder().no_proxy().timeout(timeout).build()
+}
+
 // ---- graph -----------------------------------------------------------------
 
 /// The URL the main window navigates to once the server is up — the existing
@@ -48,9 +53,9 @@ pub async fn fetch_stats() -> Result<Stats, String> {
 #[tauri::command]
 pub async fn detect_agents() -> Result<Value, String> {
     let url = format!("{}/agent/clients", base_url());
-    reqwest::Client::new()
+    local_client(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?
         .get(url)
-        .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
         .map_err(|e| e.to_string())?

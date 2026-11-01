@@ -33,9 +33,8 @@ fn fmt_num(n: i64) -> String {
 
 pub async fn fetch() -> Result<Stats, reqwest::Error> {
     let url = format!("{}/stats", base_url());
-    reqwest::Client::new()
+    crate::commands::local_client(Duration::from_secs(5))?
         .get(url)
-        .timeout(Duration::from_secs(5))
         .send()
         .await?
         .json::<Stats>()

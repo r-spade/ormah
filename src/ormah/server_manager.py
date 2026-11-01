@@ -89,7 +89,7 @@ def get_ormah_bin_path() -> str:
 def is_server_running() -> bool:
     """Check if the ormah server is reachable via health endpoint."""
     try:
-        with httpx.Client(timeout=3.0) as client:
+        with httpx.Client(timeout=3.0, trust_env=False) as client:
             r = client.get(f"http://localhost:{settings.port}/admin/health")
             return r.status_code == 200
     except Exception:
