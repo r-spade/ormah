@@ -211,6 +211,10 @@ jobs:
         run: |
           shopt -s globstar
           VERSION=$(python3 -c "import json; print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])")
+          if gh release view "desktop-v$VERSION" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::desktop-v$VERSION already has a release or draft. Bump the desktop version."
+            exit 1
+          fi
           gh release create "desktop-v$VERSION" -R "${{ github.repository }}" \
             --draft --target "$GITHUB_SHA" --generate-notes \
             --title "Ormah Desktop $VERSION" \

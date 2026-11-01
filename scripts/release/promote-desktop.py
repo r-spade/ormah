@@ -24,6 +24,20 @@ def check_results(dmg_sha256, app, terminal):
         raise SystemExit("App acceptance was run against a different DMG")
     if terminal.get("mode") != "terminal" or terminal.get("status") != "passed":
         raise SystemExit("Terminal acceptance did not pass")
+    if not app.get("ormah_version") or terminal.get("ormah_version") != app["ormah_version"]:
+        raise SystemExit("App and terminal acceptance tested different Ormah versions")
+
+
+def check_not_older(version, tags):
+    """Refuse to point the feed back at an older release when retrying an old promotion."""
+    def numbers(text):
+        return tuple(map(int, text.split(".")))
+
+    for tag in tags:
+        if tag["tagName"].startswith("desktop-v") and tag["tagName"] != "desktop-latest":
+            published = tag["tagName"].removeprefix("desktop-v")
+            if not tag["isDraft"] and numbers(published) > numbers(version):
+                raise SystemExit(f"Desktop {published} is already published")
 
 
 def feed(version, notes, directory):
@@ -55,6 +69,11 @@ def main():
     tag = f"desktop-v{args.version}"
 
     release = json.loads(gh("release", "view", tag, "--json", "isDraft,body"))
+    gh("release", "view", "desktop-latest", "--json", "tagName")  # Fail before publishing.
+    check_not_older(
+        args.version,
+        json.loads(gh("release", "list", "--limit", "1000", "--json", "tagName,isDraft")),
+    )
     with tempfile.TemporaryDirectory() as tmp:
         gh("release", "download", tag, "--dir", tmp)
         dmg = next(Path(tmp).glob("*.dmg"))

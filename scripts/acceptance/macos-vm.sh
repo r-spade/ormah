@@ -67,9 +67,11 @@ wait_for_ssh
 
 guest <<'GUEST'
 echo "--- clean baseline"
-for path in /Library/Developer/CommandLineTools "$HOME/.local/share/uv" "$HOME/.local/share/ormah" /Applications/Ormah.app; do
+for path in /Library/Developer/CommandLineTools /opt/homebrew /usr/local/bin/uv /usr/local/bin/python3 \
+    "$HOME/.local/bin/uv" "$HOME/.local/share/uv" "$HOME/.local/share/ormah" /Applications/Ormah.app; do
     [[ ! -e "$path" ]] || { echo "Base VM is not clean: $path"; exit 1; }
 done
+if lsof -nP -iTCP:8787 -sTCP:LISTEN; then echo "Base VM is not clean: port 8787 in use"; exit 1; fi
 spctl --status || true
 GUEST
 
@@ -111,17 +113,23 @@ ormah="\$HOME/.local/bin/ormah"
 [[ "\$("\$ormah" --version)" == "ormah $ORMAH" ]] || { "\$ormah" --version; exit 1; }
 python="\$HOME/.local/share/uv/tools/ormah/bin/python"
 "\$python" -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 11)'
-find "\$HOME/.local/share/ormah/models" -name '*.onnx' -size +0 | grep -q . || { echo "Models missing"; exit 1; }
+# Embedding and reranker: setup tolerates a failed reranker download, so check each.
+for model in "\$HOME"/.local/share/ormah/models/models--*; do
+    find "\$model/" -name '*.onnx' -size +0 | grep -q . || { echo "No weights in \$model"; exit 1; }
+done
+[[ \$(ls -d "\$HOME"/.local/share/ormah/models/models--* | wc -l) -ge 2 ]] || { echo "Models missing"; exit 1; }
 "\$ormah" remember '$TOKEN' --title 'Acceptance test'
 "\$ormah" recall '$TOKEN' | grep -F '$TOKEN'
 GUEST
 
-guest <<'GUEST' || true
-echo "--- reboot"
-echo admin | sudo -S shutdown -r now
-GUEST
+boot_time() { "${SSH[@]}" "admin@$(tart ip "$VM" --wait 5)" 'sysctl -n kern.boottime' </dev/null; }
+BOOT_BEFORE="$(boot_time)"
+echo "--- reboot" | tee -a "$OUT/guest.log"
+# SSH drops when the VM goes down, so success is judged by the boot time changing.
+"${SSH[@]}" "admin@$(tart ip "$VM")" 'echo admin | sudo -S shutdown -r now' </dev/null 2>&1 | tee -a "$OUT/guest.log" || true
 sleep 30
 wait_for_ssh
+[[ "$(boot_time)" != "$BOOT_BEFORE" ]] || { echo "VM did not reboot" >&2; exit 1; }
 guest <<< "$wait_healthy"
 guest <<GUEST
 echo "--- after reboot"

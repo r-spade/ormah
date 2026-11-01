@@ -69,6 +69,14 @@ jobs:
           printf 'version=%s\n' "$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
           printf 'tag=v%s\n' "$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Require an unused desktop version
+        run: |
+          DESKTOP=$(python3 -c "import json; print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])")
+          if git ls-remote --exit-code --tags origin "desktop-v$DESKTOP" >/dev/null; then
+            echo "::error::desktop-v$DESKTOP is already released. Bump the desktop version in the release PR."
+            exit 1
+          fi
+
       - name: Run tests
         run: uv run pytest
 
