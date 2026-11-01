@@ -30,6 +30,10 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 // may still be booting. A failure this slow gets extra time to become healthy.
 const SLOW_DAEMON_START: Duration = Duration::from_secs(250);
 const SLOW_DAEMON_GRACE: Duration = Duration::from_secs(300);
+// Above the CLI's own 600s wait, so only a truly hung command gets killed.
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(660);
+const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(60);
+const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 static STATUS: Mutex<Phase> = Mutex::new(Phase::Starting);
 static SETUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
@@ -80,16 +84,16 @@ pub fn start<R: Runtime>(app: AppHandle<R>) -> bool {
     // Publish synchronously so an accepted retry replaces the previous Failed.
     publish(Phase::Starting);
     tauri::async_runtime::spawn(async move {
-        let result = ensure_running(&app).await;
-        // Release before publishing: Try again only appears once Failed is visible.
-        SETUP_IN_PROGRESS.store(false, Ordering::Release);
-        publish(match result {
+        let phase = match ensure_running(&app).await {
             Ok(()) => Phase::Ready,
             Err(reason) => Phase::Failed {
                 reason,
                 can_open: is_running().await,
             },
-        });
+        };
+        // Release before publishing: Try again only appears once Failed is visible.
+        SETUP_IN_PROGRESS.store(false, Ordering::Release);
+        publish(phase);
     });
     true
 }
@@ -101,9 +105,13 @@ async fn ensure_running<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     diagnostics::log(&format!("runtime action={runtime_action:?}"));
     let runtime_changed = match runtime_action {
         RuntimeAction::Install | RuntimeAction::Upgrade => {
-            install_with_retry(app)
-                .await
-                .map_err(|failure| failure.public_reason().to_string())?;
+            if let Err(failure) = install_with_retry(app).await {
+                // A failed upgrade keeps the old runtime: start it so memories stay reachable.
+                if runtime_action == RuntimeAction::Upgrade {
+                    let _ = start_daemon().await;
+                }
+                return Err(failure.public_reason().to_string());
+            }
             true
         }
         RuntimeAction::Reuse => false,
@@ -241,7 +249,7 @@ fn run_daemon_command() -> Result<(), String> {
         Some((stdout, stderr)) => command.stdout(stdout).stderr(stderr),
         None => command.stdout(Stdio::null()).stderr(Stdio::null()),
     };
-    let status = command.status().map_err(|e| e.to_string())?;
+    let status = wait_bounded(&mut command, DAEMON_START_TIMEOUT).map_err(|e| e.to_string())?;
     diagnostics::log(&format!("daemon command={bin:?} status={status}"));
     if status.success() {
         Ok(())
@@ -250,12 +258,37 @@ fn run_daemon_command() -> Result<(), String> {
     }
 }
 
+/// Run a command, killing it at the deadline so setup can always finish.
+fn wait_bounded(
+    command: &mut std::process::Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("killed after {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Stop the ormah daemon. No-op if not running.
 pub fn stop_daemon() {
     let Some(bin) = find_ormah() else { return };
-    let _ = clean_python_env(std::process::Command::new(&bin))
-        .args(["server", "stop"])
-        .status();
+    let mut command = clean_python_env(std::process::Command::new(&bin));
+    command.args(["server", "stop"]);
+    if let Err(error) = wait_bounded(&mut command, DAEMON_STOP_TIMEOUT) {
+        diagnostics::log(&format!("daemon stop failed: {error}"));
+    }
 }
 
 /// Ping /admin/health — true means the server is up and responding.
@@ -276,16 +309,36 @@ fn needs_upgrade() -> bool {
     let Some(bin) = find_ormah() else {
         return false;
     };
-    let Ok(out) = clean_python_env(std::process::Command::new(bin))
+    let mut command = clean_python_env(std::process::Command::new(bin));
+    command
         .arg("--version")
-        .output()
-    else {
-        return true;
-    };
-    if !out.status.success() {
-        return true;
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped());
+    // A version line fits in the pipe buffer, so waiting before reading can't deadlock.
+    match spawn_output_bounded(&mut command) {
+        Some(stdout) => should_upgrade(&stdout, ORMAH_VERSION),
+        None => true,
     }
-    should_upgrade(&out.stdout, ORMAH_VERSION)
+}
+
+fn spawn_output_bounded(command: &mut std::process::Command) -> Option<Vec<u8>> {
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => break,
+            Some(_) => return None,
+            None if started.elapsed() >= VERSION_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let mut stdout = Vec::new();
+    std::io::Read::read_to_end(&mut child.stdout.take()?, &mut stdout).ok()?;
+    Some(stdout)
 }
 
 fn should_upgrade(output: &[u8], required: &str) -> bool {
@@ -516,6 +569,15 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(failure, InstallFailure::TimedOut);
+    }
+
+    #[test]
+    fn kills_a_hung_blocking_command() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]);
+        let started = Instant::now();
+        assert!(wait_bounded(&mut command, Duration::from_millis(100)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

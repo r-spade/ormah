@@ -15,7 +15,7 @@ from mcp.types import TextContent, Tool
 
 from ormah.adapters.space_detect import detect_space_from_cwd
 from ormah.adapters.tool_schemas import TOOLS
-from ormah.config import settings
+from ormah.config import settings, uses_env_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +204,7 @@ async def _dispatch(
     headers: dict[str, str] | None = None,
 ) -> str:
     async with httpx.AsyncClient(
-        base_url=base_url, timeout=_timeout_for_tool(name), trust_env=False,
+        base_url=base_url, timeout=_timeout_for_tool(name), trust_env=uses_env_proxy(base_url),
         **({"headers": headers} if headers else {}),
     ) as client:
         if name == "remember":

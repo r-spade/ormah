@@ -8,6 +8,8 @@ from pathlib import Path
 
 import httpx
 
+from ormah.config import uses_env_proxy
+
 
 def base_url() -> str:
     # Lazy import: shell hooks need not load Ormah's engine or embeddings.
@@ -82,7 +84,7 @@ async def whisper(host: str, prompt: str, session: str, workspace: str | None) -
             space = await space_for(workspace)
             async with httpx.AsyncClient(
                 base_url=base_url(), headers=headers(), timeout=timeout_seconds(),
-                follow_redirects=False,
+                follow_redirects=False, trust_env=uses_env_proxy(base_url()),
             ) as client:
                 response = await client.post("/agent/whisper", json={
                     "prompt": prompt, "space": space,

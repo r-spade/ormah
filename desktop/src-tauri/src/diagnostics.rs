@@ -52,14 +52,14 @@ fn append(path: &Path, line: &str, limit: u64) -> std::io::Result<()> {
     private_file(OpenOptions::new().create(true).append(true), path)?.write_all(line.as_bytes())
 }
 
-/// Stdout and stderr for `ormah server start -d`, replaced on each start.
+/// Stdout and stderr for `ormah server start -d`. Appends, because a running
+/// fallback daemon may still hold this file; old output rotates at each start.
 pub fn daemon_output() -> Option<(File, File)> {
     let path = log_dir()?.join("daemon.log");
-    let stdout = private_file(
-        OpenOptions::new().create(true).write(true).truncate(true),
-        &path,
-    )
-    .ok()?;
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= MAX_LOG_BYTES) {
+        std::fs::rename(&path, path.with_extension("log.1")).ok()?;
+    }
+    let stdout = private_file(OpenOptions::new().create(true).append(true), &path).ok()?;
     let stderr = stdout.try_clone().ok()?;
     Some((stdout, stderr))
 }
@@ -84,7 +84,12 @@ fn read_tail(path: &Path) -> std::io::Result<String> {
     file.seek(SeekFrom::Start(len.saturating_sub(COPIED_BYTES)))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    let tail = String::from_utf8_lossy(&bytes).into_owned();
+    // Start on a whole line, so a secret's name can't be cut off from its value.
+    Ok(match (len > COPIED_BYTES, tail.split_once('\n')) {
+        (true, Some((_, whole_lines))) => whole_lines.to_string(),
+        _ => tail,
+    })
 }
 
 /// Proxy URLs in uv errors are the main risk, so redact URL credentials and named secrets.
@@ -92,10 +97,14 @@ pub fn redact(text: &str) -> String {
     static USERINFO: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+@").unwrap());
     static NAMED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?i)(authorization["']?\s*[:=]\s*|bearer\s+|[a-z0-9_-]*(?:token|secret|password|api[_-]?key)[a-z0-9_-]*["']?\s*[:=]\s*)(?:basic\s+|bearer\s+)?("[^"]*"|'[^']*'|[^\s"'&,;]+)"#).unwrap()
+        Regex::new(r#"(?i)(authorization\\?["']?\s*[:=]\s*|bearer\s+|[a-z0-9_-]*(?:token|secret|password|api[_-]?key)[a-z0-9_-]*\\?["']?\s*[:=]\s*)(?:basic\s+|bearer\s+)?(\\?"[^"]*"|'[^']*'|[^\s"'&,;]+)"#).unwrap()
+    });
+    static KNOWN_TOKEN: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]+|github_pat_\w+|glpat-[\w-]+|sk-[\w-]{8,}|(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b").unwrap()
     });
     let text = USERINFO.replace_all(text, "${1}[REDACTED]@");
-    NAMED.replace_all(&text, "${1}[REDACTED]").into_owned()
+    let text = NAMED.replace_all(&text, "${1}[REDACTED]");
+    KNOWN_TOKEN.replace_all(&text, "[REDACTED]").into_owned()
 }
 
 #[cfg(test)]
@@ -112,10 +121,22 @@ mod tests {
             r#"{"Authorization": "secret1"}"#,
             "password=\"secret1 with spaces\"",
             "api_key: secret1",
+            r#"{\"token\":\"secret1\"}"#,
         ] {
             let safe = redact(text);
             assert!(!safe.contains("secret1"), "{safe}");
             assert!(safe.contains("[REDACTED]"), "{safe}");
+        }
+        for token in [
+            "https://host/ghp_abc123/x",
+            "gho_abc123",
+            "github_pat_abc_123",
+            "glpat-abc123",
+            "sk-abcdefgh123",
+            "AKIA1234567890123456",
+            "eyJhbGci.eyJzdWIi.signature",
+        ] {
+            assert!(redact(token).contains("[REDACTED]"), "{token}");
         }
         assert!(redact("http://u:p@proxy:9/p").contains("proxy:9"));
         let error = "Failed to download cpython-3.11.17 (os error 61) Connection refused";

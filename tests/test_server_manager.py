@@ -233,3 +233,20 @@ def test_health_check_ignores_proxy_settings(monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("http://localhost:8787", False),
+        ("http://127.0.0.1:8787", False),
+        ("http://[::1]:8787", False),
+        ("https://localhost:8787", True),
+        ("https://ormah.example.com", True),
+        ("http://server.internal:8787", True),
+    ],
+)
+def test_only_local_http_skips_env_proxy(url, expected):
+    from ormah.config import uses_env_proxy
+
+    assert uses_env_proxy(url) is expected
