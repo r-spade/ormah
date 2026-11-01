@@ -113,6 +113,7 @@ ormah="\$HOME/.local/bin/ormah"
 [[ "\$("\$ormah" --version)" == "ormah $ORMAH" ]] || { "\$ormah" --version; exit 1; }
 python="\$HOME/.local/share/uv/tools/ormah/bin/python"
 "\$python" -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 11)'
+"\$python" -c 'import importlib.util; assert importlib.util.find_spec("litellm"), "litellm missing"'
 # Embedding and reranker: setup tolerates a failed reranker download, so check each.
 for model in "\$HOME"/.local/share/ormah/models/models--*; do
     find "\$model/" -name '*.onnx' -size +0 | grep -q . || { echo "No weights in \$model"; exit 1; }
