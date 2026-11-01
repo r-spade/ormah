@@ -127,7 +127,7 @@ PATH or shell profiles. Network failures get five tries over about 105 seconds o
 waiting; each uv process has a ten-minute limit.
 
 `sidecar.rs` owns setup state and the splash screen polls it. Only `Ready` opens the
-graph. On failure the splash offers **Try again** and **Copy details**, plus **Open
+graph. On failure the splash offers **Try again** and **Copy error log**, plus **Open
 Ormah** when a server from before a failed upgrade is still healthy. A healthy
 endpoint does not show which macOS user owns the server.
 

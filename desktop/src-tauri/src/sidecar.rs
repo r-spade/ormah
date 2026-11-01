@@ -226,7 +226,7 @@ pub async fn start_daemon() -> Result<(), String> {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err("Ormah could not start its server. Try again, or copy the details for help.".into());
+            return Err("Ormah could not start its server. Try again, or copy the error log for help.".into());
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -346,10 +346,10 @@ impl InstallFailure {
                 "Ormah could not download Python. Check your connection, then try again."
             }
             Self::TimedOut => {
-                "Installing Ormah took too long. Try again, or copy the details for help."
+                "Installing Ormah took too long. Try again, or copy the error log for help."
             }
             Self::Other => {
-                "Ormah could not install its runtime. Try again, or copy the details for help."
+                "Ormah could not install its runtime. Try again, or copy the error log for help."
             }
         }
     }

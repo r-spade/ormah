@@ -71,9 +71,9 @@ export default function App() {
   async function copyDetails() {
     try {
       await invoke("copy_setup_details");
-      setNotice("Setup details copied.");
+      setNotice("Error log copied.");
     } catch (error) {
-      setNotice(`Couldn't copy setup details: ${error}`);
+      setNotice(`Couldn't copy the error log: ${error}`);
     }
   }
 
@@ -115,7 +115,7 @@ export default function App() {
           {failed && (
             <div className="boot-actions">
               <button onClick={() => void retrySetup()}>Try again</button>
-              <button onClick={() => void copyDetails()}>Copy details</button>
+              <button onClick={() => void copyDetails()}>Copy error log</button>
               {status.can_open && <button onClick={() => void goGraph()}>Open Ormah</button>}
             </div>
           )}

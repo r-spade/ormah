@@ -64,7 +64,7 @@ pub fn daemon_output() -> Option<(File, File)> {
     Some((stdout, stderr))
 }
 
-/// Redacted log tails for the failure screen's Copy details.
+/// Redacted log tails for the failure screen's Copy error log.
 pub fn recent() -> String {
     let Some(dir) = log_dir() else {
         return "Setup log is unavailable.".into();
