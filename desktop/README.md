@@ -122,7 +122,7 @@ Also set `plugins.updater.pubkey` in `tauri.conf.json` and
 ## Runtime setup and diagnostics
 
 The app installs its pinned package with
-`uv tool install --reinstall --force --python 3.11 ormah==<pin>`, and never edits
+`uv tool install --reinstall --force --python 3.11 ormah[litellm]==<pin>`, and never edits
 PATH or shell profiles. Network failures get five tries over about 105 seconds of
 waiting; each uv process has a ten-minute limit.
 

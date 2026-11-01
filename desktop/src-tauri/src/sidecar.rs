@@ -425,7 +425,7 @@ fn transient_install_error(details: &str) -> bool {
 }
 
 fn install_args(version: &str) -> Vec<String> {
-    let spec = format!("ormah=={version}");
+    let spec = format!("ormah[litellm]=={version}");
     [
         "tool", "install", "--reinstall", "--force", "--python", PYTHON_VERSION, &spec,
     ]
@@ -533,7 +533,7 @@ mod tests {
                 "--force",
                 "--python",
                 "3.11",
-                "ormah==1.2.3"
+                "ormah[litellm]==1.2.3"
             ]
         );
         assert_eq!(INSTALL_ATTEMPTS, 5);
