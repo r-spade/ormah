@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -99,7 +99,7 @@ jobs:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: echo "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
 
-      # macos-14 runners have a known mDNSResponder bug: sustained network
+      # macOS runners have had an mDNSResponder bug: sustained network
       # activity (notarytool's long-poll against Apple's notary API) exhausts
       # the resolver's connection pool and it wedges, so every DNS lookup
       # after that fails with "no network route" — this reproduced twice,
