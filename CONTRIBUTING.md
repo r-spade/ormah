@@ -42,7 +42,9 @@ Before running the workflow:
 
 1. Bump `pyproject.toml`.
 2. Bump `integrations/claude-plugin/.claude-plugin/plugin.json` to the same version.
-3. Merge the release PR to `main`.
+3. Bump the desktop patch version in `desktop/src-tauri/tauri.conf.json`, `Cargo.toml` and
+   `Cargo.lock`, so the matching desktop draft has its own version.
+4. Merge the release PR to `main`.
 
 Then open GitHub Actions, run `Release` from `main`, and enter the version without the
 leading `v`, for example `0.12.0`.
@@ -63,3 +65,35 @@ token only as a temporary environment-scoped GitHub Actions secret.
 
 
 Use the GitHub Actions release workflow; do not publish releases through local scripts or the local Makefile release target.
+
+### Desktop releases
+
+The desktop app pins the exact Ormah version from `pyproject.toml`, so each release needs
+a new app. The `Release` workflow starts `Desktop release`, which builds a signed **draft**.
+A draft reaches nobody: the updater feed only changes when it is promoted.
+
+1. Prepare the clean VM once:
+   `tart clone ghcr.io/cirruslabs/macos-tahoe-vanilla:latest ormah-base`. Don't run it.
+2. Download the draft's DMG and test both install routes on an Apple Silicon Mac:
+
+   ```bash
+   gh release download desktop-vX.Y.Z -p '*.dmg' -R r-spade/ormah
+   scripts/acceptance/macos-vm.sh app --dmg Ormah_X.Y.Z_aarch64.dmg
+   scripts/acceptance/macos-vm.sh terminal
+   ```
+
+   Each run prints where its `result.json` is. A failed run keeps its VM for inspection.
+3. Check by hand what the script can't: first open of a browser download with Gatekeeper
+   on (the VM image has it off), connecting a signed-in AI tool, a 1024x768 display, the
+   failure screen with `HTTPS_PROXY=http://127.0.0.1:9`, and the Linux AppImage and deb.
+4. Publish. This refuses unless both routes passed and the app result is for this DMG:
+
+   ```bash
+   scripts/release/promote-desktop.py X.Y.Z --app <app result.json> --terminal <terminal result.json>
+   ```
+
+If acceptance fails, fix it, bump the desktop version, and build a new draft. If only the
+feed upload fails, rerun the promote command.
+
+`desktop/uv-version` pins uv for app builds. `install.sh` is served standalone, so it embeds
+a copy, and `tests/test_install_uv.py` keeps them equal.

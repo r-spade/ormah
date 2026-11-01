@@ -14,10 +14,8 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-            uv_asset: uv-aarch64-apple-darwin.tar.gz
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            uv_asset: uv-x86_64-unknown-linux-gnu.tar.gz
 
     runs-on: ${{ matrix.os }}
 
@@ -25,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Verify tag matches app version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
         shell: bash
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#desktop-v}"
@@ -39,12 +37,7 @@ jobs:
         shell: bash
         run: |
           PY_VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)
-          PYPI_VERSION=$(curl -fsSL https://pypi.org/pypi/ormah/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
-          if [ "$PY_VERSION" != "$PYPI_VERSION" ]; then
-            echo "Desktop embeds ormah $PY_VERSION, but PyPI latest is $PYPI_VERSION" >&2
-            echo "Publish the Python release before tagging the desktop app." >&2
-            exit 1
-          fi
+          python3 scripts/release/wait-pypi.py "$PY_VERSION"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -64,12 +57,7 @@ jobs:
 
       - name: Download uv sidecar
         shell: bash
-        run: |
-          URL="https://github.com/astral-sh/uv/releases/latest/download/${{ matrix.uv_asset }}"
-          curl -fsSL "$URL" | tar -xz -C /tmp
-          mkdir -p desktop/src-tauri/binaries
-          cp /tmp/uv-${{ matrix.target }}/uv "desktop/src-tauri/binaries/uv-${{ matrix.target }}"
-          chmod +x "desktop/src-tauri/binaries/uv-${{ matrix.target }}"
+        run: bash desktop/scripts/build-sidecar.sh '${{ matrix.target }}'
 
       - name: Build desktop UI
         working-directory: desktop/ui
@@ -203,74 +191,31 @@ jobs:
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage*
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb*
 
-  publish:
+  # Users receive nothing until scripts/release/promote-desktop.py checks the
+  # clean-machine test results and publishes this draft (see CONTRIBUTING.md).
+  draft:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
 
-      - name: Attach artifacts to GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            dist/**/*.dmg
-            dist/**/*.AppImage*
-            dist/**/*.deb
-            dist/**/*.app.tar.gz*
-
-      # The updater feed lives on a rolling prerelease so its URL is stable and
-      # it can never hijack GitHub's "/releases/latest" (prereleases are
-      # excluded), which alternates between desktop and Python releases.
-      - name: Publish latest.json to rolling desktop-latest release
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#desktop-v}"
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
-          REPO="${{ github.repository }}"
-          gh release view "$GITHUB_REF_NAME" -R "$REPO" --json body --jq .body > release-notes.txt
-
-          APPIMAGE=$(find dist -name '*.AppImage' | head -1)
-          DEB=$(find dist -name '*.deb' | head -1)
-          APPTAR=$(find dist -name '*.app.tar.gz' | head -1)
-          for f in "$APPIMAGE" "$APPIMAGE.sig" "$DEB" "$DEB.sig" "$APPTAR" "$APPTAR.sig"; do
-            [ -s "$f" ] || { echo "missing updater artifact: $f" >&2; exit 1; }
-          done
-
-          python3 - "$VERSION" "$BASE_URL" "$APPIMAGE" "$DEB" "$APPTAR" release-notes.txt > latest.json <<'EOF'
-          import json, pathlib, sys
-          from datetime import datetime, timezone
-          version, base_url, appimage, deb, apptar, notes_path = sys.argv[1:7]
-          def entry(path):
-              p = pathlib.Path(path)
-              return {
-                  "signature": pathlib.Path(path + ".sig").read_text().strip(),
-                  "url": f"{base_url}/{p.name}",
-              }
-          print(json.dumps({
-              "version": version,
-              "notes": pathlib.Path(notes_path).read_text().strip(),
-              "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-              "platforms": {
-                  "linux-x86_64-deb": entry(deb),
-                  "linux-x86_64": entry(appimage),
-                  "darwin-aarch64": entry(apptar),
-              },
-          }, indent=2))
-          EOF
-          cat latest.json
-
-          if gh release view desktop-latest -R "$REPO" > /dev/null 2>&1; then
-            gh release upload desktop-latest latest.json --clobber -R "$REPO"
-          else
-            gh release create desktop-latest latest.json -R "$REPO" \
-              --prerelease \
-              --title "Desktop updater feed" \
-              --notes "Rolling release holding latest.json for the desktop auto-updater. Download the app from the versioned desktop-v* releases instead."
+          shopt -s globstar
+          VERSION=$(python3 -c "import json; print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])")
+          if gh release view "desktop-v$VERSION" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::desktop-v$VERSION already has a release or draft. Bump the desktop version."
+            exit 1
           fi
+          gh release create "desktop-v$VERSION" -R "${{ github.repository }}" \
+            --draft --target "$GITHUB_SHA" --generate-notes \
+            --title "Ormah Desktop $VERSION" \
+            dist/**/*.dmg dist/**/*.AppImage* dist/**/*.deb* dist/**/*.app.tar.gz*

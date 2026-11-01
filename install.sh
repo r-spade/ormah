@@ -4,6 +4,9 @@
 #        bash <(curl -fsSL https://www.ormah.me/install.sh) --no-setup
 set -euo pipefail
 
+# Standalone copy of desktop/uv-version; tests/test_install_uv.py enforces sync.
+UV_VERSION="0.13.6"
+
 # ── Output helpers ──────────────────────────────────────────────────────────
 
 _use_color=true
@@ -71,7 +74,7 @@ if command -v uv >/dev/null 2>&1; then
     ok "uv already installed ($(uv --version))"
 else
     info "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | sh
 
     # Get uv on PATH for this session
     if [[ -f "$HOME/.local/bin/env" ]]; then
@@ -122,7 +125,7 @@ fi
 _install_ok=false
 
 info "Installing from: $INSTALL_SOURCE"
-if uv tool install "$INSTALL_SOURCE" "${UV_FLAGS[@]}" 2>/dev/null; then
+if uv tool install "$INSTALL_SOURCE" "${UV_FLAGS[@]}"; then
     _install_ok=true
 else
     # Fallback to git if PyPI failed and user didn't override source

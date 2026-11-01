@@ -113,13 +113,7 @@ class TestReleaseWorkflow:
         assert "pypa/gh-action-pypi-publish@release/v1" in workflow
         assert "id-token: write" in workflow
         assert "gh release create" in workflow
-
-    def test_desktop_publish_commands_have_explicit_repository_context(self):
-        root = Path(__file__).resolve().parents[1]
-        workflow = (root / ".github/workflows/desktop-release.yml").read_text()
-
-        assert 'REPO="${{ github.repository }}"' in workflow
-        assert 'gh release view "$GITHUB_REF_NAME" -R "$REPO"' in workflow
+        assert "gh workflow run desktop-release.yml" in workflow
 
 
 class TestEvalCliFallback:

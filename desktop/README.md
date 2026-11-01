@@ -44,12 +44,8 @@ identity set before recording readiness under the store lock. The direct
 ## Build & run (dev)
 
 ```bash
-# 1. Download the uv sidecar for your arch (Linux x86_64 shown).
-TRIPLE=$(rustc -Vv | sed -n 's/host: //p')
-curl -fsSL "https://github.com/astral-sh/uv/releases/latest/download/uv-${TRIPLE}.tar.gz" \
-  | tar -xz -C /tmp
-cp /tmp/uv-${TRIPLE}/uv desktop/src-tauri/binaries/uv-${TRIPLE}
-chmod +x desktop/src-tauri/binaries/uv-${TRIPLE}
+# 1. Download the pinned uv sidecar for your arch.
+bash desktop/scripts/build-sidecar.sh
 
 # 2. Generate the full icon set from the source icon (one-time).
 cd desktop/src-tauri && cargo tauri icon icons/icon.png && cd -
@@ -67,12 +63,12 @@ Subsequent runs skip the install step since `ormah` is already on PATH.
 verifies the tag matches `tauri.conf.json`'s version, builds per-arch on
 macOS (aarch64) and Linux (x86_64) runners, downloads the matching `uv`
 binary into `binaries/`, and attaches `.dmg`, `.AppImage`, and `.deb`
-artifacts to the GitHub release.
+artifacts to a draft GitHub release. See "Desktop releases" in `CONTRIBUTING.md`.
 
 Auto-update: `createUpdaterArtifacts` makes the build emit signed updater
 bundles (`.AppImage.sig`, `.app.tar.gz` + `.sig`, signed with the
-`TAURI_SIGNING_PRIVATE_KEY` secret). The publish job then generates
-`latest.json` and uploads it to the rolling `desktop-latest` prerelease,
+`TAURI_SIGNING_PRIVATE_KEY` secret). `scripts/release/promote-desktop.py` then
+generates `latest.json` and uploads it to the rolling `desktop-latest` prerelease,
 which the app's updater polls (`plugins.updater.endpoints` in
 `tauri.conf.json`). The rolling release is a prerelease on purpose — GitHub's
 `/releases/latest` alternates between desktop and Python releases, so the
@@ -111,8 +107,6 @@ Also set `plugins.updater.pubkey` in `tauri.conf.json` and
   launch the app installs a missing/older version with `uv tool install`, then restarts
   the daemon so the new Python code and migrations are active. It never downgrades a
   newer installed runtime.
-- **Updater appcast** — the CI `publish` job attaches artifacts but the
-  `latest.json` regeneration/upload is a TODO.
 
 ## Backend coverage
 
