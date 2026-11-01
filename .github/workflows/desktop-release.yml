@@ -5,18 +5,6 @@ on:
     tags:
       - "desktop-v*"
   workflow_dispatch:
-    inputs:
-      source_sha:
-        description: Exact reviewed source commit (must be on main)
-        required: true
-        type: string
-
-permissions:
-  contents: read
-
-concurrency:
-  group: desktop-candidate-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -33,8 +21,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Verify tag matches app version
         if: startsWith(github.ref, 'refs/tags/desktop-v')
@@ -52,13 +38,6 @@ jobs:
         run: |
           PY_VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)
           python3 scripts/release/wait-pypi.py "$PY_VERSION"
-
-      - name: Refuse an existing candidate or published desktop version
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
-        run: python3 scripts/release/desktop.py preflight
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -212,6 +191,8 @@ jobs:
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage*
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb*
 
+  # Users receive nothing until scripts/release/promote-desktop.py checks the
+  # clean-machine test results and publishes this draft (see CONTRIBUTING.md).
   draft:
     needs: build
     runs-on: ubuntu-latest
@@ -219,13 +200,18 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
-      - name: Create immutable draft candidate
+
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: python3 scripts/release/desktop.py draft --artifacts dist --source-sha "$GITHUB_SHA"
+        run: |
+          shopt -s globstar
+          VERSION=$(python3 -c "import json; print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])")
+          gh release create "desktop-v$VERSION" -R "${{ github.repository }}" \
+            --draft --target "$GITHUB_SHA" --generate-notes \
+            --title "Ormah Desktop $VERSION" \
+            dist/**/*.dmg dist/**/*.AppImage* dist/**/*.deb* dist/**/*.app.tar.gz*
