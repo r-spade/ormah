@@ -33,6 +33,8 @@ class OllamaAdapter(LLMAdapter):
     ) -> str | None:
         import httpx
 
+        from ormah.config import uses_env_proxy
+
         options: dict = {"num_predict": max_tokens or self.num_predict}
         if temperature is not None:
             options["temperature"] = temperature
@@ -57,6 +59,7 @@ class OllamaAdapter(LLMAdapter):
                 f"{self.base_url}/api/generate",
                 json=payload,
                 timeout=self.timeout,
+                trust_env=uses_env_proxy(self.base_url),
             )
             resp.raise_for_status()
             return resp.json().get("response")

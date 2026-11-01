@@ -11,6 +11,8 @@ commands.allow = [
   "stop_server",
   "server_status",
   "retry_runtime_setup",
+  "runtime_setup_status",
+  "copy_setup_details",
   "desktop_bridge_info",
 ]
 

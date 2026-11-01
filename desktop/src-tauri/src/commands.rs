@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 use tauri::{AppHandle, Manager, Runtime};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_notification::NotificationExt;
 
 use crate::sidecar::find_ormah;
@@ -11,6 +12,11 @@ use crate::stats::{self, Stats};
 pub fn base_url() -> String {
     let port = std::env::var("ORMAH_PORT").unwrap_or_else(|_| "8787".to_string());
     format!("http://127.0.0.1:{port}")
+}
+
+/// HTTP client for the local server. A proxy can't reach this machine's localhost.
+pub fn local_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder().no_proxy().timeout(timeout).build()
 }
 
 // ---- graph -----------------------------------------------------------------
@@ -47,9 +53,9 @@ pub async fn fetch_stats() -> Result<Stats, String> {
 #[tauri::command]
 pub async fn detect_agents() -> Result<Value, String> {
     let url = format!("{}/agent/clients", base_url());
-    reqwest::Client::new()
+    local_client(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?
         .get(url)
-        .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
         .map_err(|e| e.to_string())?
@@ -119,8 +125,7 @@ pub fn run_setup_notify<R: Runtime>(app: AppHandle<R>) {
 /// Start the ormah daemon. No-op if already running.
 #[tauri::command]
 pub async fn start_server() -> Result<(), String> {
-    crate::sidecar::start_daemon();
-    Ok(())
+    crate::sidecar::start_daemon().await
 }
 
 /// Stop the ormah daemon.
@@ -142,6 +147,19 @@ pub fn retry_runtime_setup<R: Runtime>(app: AppHandle<R>) -> bool {
     crate::sidecar::start(app)
 }
 
+/// Polled by the splash screen, so setup state can't be missed before the window exists.
+#[tauri::command]
+pub fn runtime_setup_status() -> crate::sidecar::Phase {
+    crate::sidecar::status()
+}
+
+#[tauri::command]
+pub fn copy_setup_details<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    app.clipboard()
+        .write_text(crate::diagnostics::recent())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -155,11 +173,25 @@ mod tests {
             .map(|(bootstrap, _)| bootstrap)
             .unwrap_or(permissions);
 
-        for command in ["fetch_stats", "graph_url", "retry_runtime_setup"] {
+        for command in [
+            "fetch_stats",
+            "graph_url",
+            "retry_runtime_setup",
+            "server_status",
+            "runtime_setup_status",
+            "copy_setup_details",
+        ] {
             assert!(
                 bootstrap.contains(&format!("\"{command}\"")),
                 "bootstrap command `{command}` is not allowed by the desktop capability"
             );
+        }
+        let product = permissions
+            .split_once("identifier = \"desktop-product-bridge\"")
+            .unwrap()
+            .1;
+        for command in ["runtime_setup_status", "copy_setup_details"] {
+            assert!(!product.contains(&format!("\"{command}\"")));
         }
     }
 }

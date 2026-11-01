@@ -83,9 +83,10 @@ pub fn build(app: &App) -> tauri::Result<()> {
                 let currently_running =
                     toggle.text().map(|t| t.contains("Stop")).unwrap_or(true);
                 if currently_running {
-                    sidecar::stop_daemon();
+                    // Stopping can take a while; never block the app's event thread.
+                    std::thread::spawn(sidecar::stop_daemon);
                 } else {
-                    sidecar::start_daemon();
+                    sidecar::start(app.clone());
                 }
                 // Optimistically flip labels; the poller will correct on next tick.
                 let now_running = !currently_running;

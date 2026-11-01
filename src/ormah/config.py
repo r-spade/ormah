@@ -5,11 +5,20 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+from urllib.parse import urlsplit
+
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from ormah.engine.maintenance_budget import max_item_cost
 from ormah.engine.temporal import parse_locale_codes
+
+
+def uses_env_proxy(url: str) -> bool:
+    """A proxy can't reach this machine's localhost; remote URLs may need one."""
+    parts = urlsplit(url)
+    return not (parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1", "::1"})
+
 
 
 _ENV_FILES = [

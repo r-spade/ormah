@@ -715,9 +715,7 @@ async fn request_json<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, String> {
     let token = load_local_admin_token(&local_admin_token_path()?)?;
     let url = format!("{}{path}", base_url());
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
+    let client = crate::commands::local_client(REQUEST_TIMEOUT)
         .map_err(|_| "Could not initialize the local Ormah connection.".to_string())?;
     let mut request = match method {
         "GET" => client.get(url),

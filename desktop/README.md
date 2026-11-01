@@ -112,3 +112,19 @@ Also set `plugins.updater.pubkey` in `tauri.conf.json` and
 
 - `GET /stats` — `tests/test_api/test_stats.py`
 - `GET /agent/clients` + `ormah setup --json` — `tests/test_setup_json.py`
+
+## Runtime setup and diagnostics
+
+The app installs its pinned package with
+`uv tool install --reinstall --force --python 3.11 ormah[litellm]==<pin>`, and never edits
+PATH or shell profiles. Network failures get five tries over about 105 seconds of
+waiting; each uv process has a ten-minute limit.
+
+`sidecar.rs` owns setup state and the splash screen polls it. Only `Ready` opens the
+graph. On failure the splash offers **Try again** and **Copy error log**, plus **Open
+Ormah** when a server from before a failed upgrade is still healthy. A healthy
+endpoint does not show which macOS user owns the server.
+
+Logs live in Tauri's `app_log_dir()` (`~/Library/Logs/dev.ormah.desktop` on macOS):
+`setup.log`, rotated at 1 MiB, and `daemon.log`, replaced on each server start.
+Known secret shapes are redacted, and environment variable values are never logged.

@@ -9,18 +9,35 @@
 //! server directly. Falls back to a system `ormah` on PATH when the `uv`
 //! sidecar is absent (dev builds).
 
+use crate::diagnostics;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter, Runtime};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Runtime};
+use tauri_plugin_shell::process::{Command, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 // Injected by build.rs from the repo's pyproject.toml, so the pinned Python
 // package version can never drift from the released one.
 const ORMAH_VERSION: &str = env!("ORMAH_PY_VERSION");
-const INSTALL_ATTEMPTS: u8 = 3;
+const PYTHON_VERSION: &str = "3.11";
+const RETRY_DELAYS: [u64; 4] = [10, 20, 30, 45];
+const INSTALL_ATTEMPTS: u8 = RETRY_DELAYS.len() as u8 + 1;
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+// `server start -d` gives up after 300s, or 600s on first run, while the server
+// may still be booting. A failure this slow gets extra time to become healthy.
+const SLOW_DAEMON_START: Duration = Duration::from_secs(250);
+const SLOW_DAEMON_GRACE: Duration = Duration::from_secs(300);
+// Above the CLI's own 600s wait, so only a truly hung command gets killed.
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(660);
+const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(60);
+const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
+static STATUS: Mutex<Phase> = Mutex::new(Phase::Starting);
 static SETUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
-/// Phase emitted on the "ormah://status" event so the UI can show progress.
+/// Setup state, polled by the splash screen. Only Ready means the server is up.
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
@@ -30,16 +47,30 @@ pub enum Phase {
         attempts: u8,
     },
     Retrying {
-        version: &'static str,
         attempt: u8,
         attempts: u8,
-        delay_seconds: u64,
     },
     Starting,
+    Ready,
     Failed {
         reason: String,
-        can_retry: bool,
+        /// A server from before a failed upgrade is still healthy and usable.
+        can_open: bool,
     },
+}
+
+pub fn status() -> Phase {
+    STATUS.lock().map(|s| s.clone()).unwrap_or(Phase::Starting)
+}
+
+fn publish(phase: Phase) {
+    diagnostics::log(&format!(
+        "status {}",
+        serde_json::to_string(&phase).unwrap_or_default()
+    ));
+    if let Ok(mut status) = STATUS.lock() {
+        *status = phase;
+    }
 }
 
 /// Start runtime setup once. Returns false when another attempt is still active.
@@ -50,42 +81,75 @@ pub fn start<R: Runtime>(app: AppHandle<R>) -> bool {
     {
         return false;
     }
+    // Publish synchronously so an accepted retry replaces the previous Failed.
+    publish(Phase::Starting);
     tauri::async_runtime::spawn(async move {
-        ensure_running(app).await;
+        let phase = match ensure_running(&app).await {
+            Ok(()) => Phase::Ready,
+            Err(reason) => Phase::Failed {
+                reason,
+                can_open: is_running().await,
+            },
+        };
+        // Release before publishing: Try again only appears once Failed is visible.
         SETUP_IN_PROGRESS.store(false, Ordering::Release);
+        publish(phase);
     });
     true
 }
 
-async fn ensure_running<R: Runtime>(app: AppHandle<R>) {
+async fn ensure_running<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    log_platform(app).await;
     let installed = find_ormah().is_some();
     let runtime_action = choose_runtime_action(installed, installed && needs_upgrade());
+    diagnostics::log(&format!("runtime action={runtime_action:?}"));
     let runtime_changed = match runtime_action {
         RuntimeAction::Install | RuntimeAction::Upgrade => {
-            if let Err(failure) = install_with_retry(&app).await {
-                eprintln!("uv install failed after retries:\n{}", failure.details);
-                let _ = app.emit(
-                    "ormah://status",
-                    Phase::Failed {
-                        reason: failure.public_reason(),
-                        can_retry: true,
-                    },
-                );
-                return;
+            if let Err(failure) = install_with_retry(app).await {
+                // A failed upgrade keeps the old runtime: start it so memories stay reachable.
+                if runtime_action == RuntimeAction::Upgrade {
+                    let _ = start_daemon().await;
+                }
+                return Err(failure.public_reason().to_string());
             }
             true
         }
         RuntimeAction::Reuse => false,
     };
 
-    // A uv reinstall replaces files on disk but cannot replace modules in the already-running
-    // daemon. Restart after successful install/upgrade so migrations and model provisioning run
-    // under the newly pinned Python package.
+    // Reinstall replaces disk files; restart the daemon to load the new package.
     if runtime_changed {
-        stop_daemon();
+        let _ = tauri::async_runtime::spawn_blocking(stop_daemon).await;
     }
-    let _ = app.emit("ormah://status", Phase::Starting);
-    start_daemon();
+    publish(Phase::Starting);
+    start_daemon().await
+}
+
+async fn log_platform<R: Runtime>(app: &AppHandle<R>) {
+    let os_version = std::process::Command::new("uname")
+        .arg("-srv")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    // Names only: values can contain proxy credentials.
+    let mut environment_names: Vec<_> = std::env::vars_os()
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .filter(|key| {
+            key.starts_with("UV_")
+                || ["http_proxy", "https_proxy", "all_proxy", "no_proxy"]
+                    .contains(&key.to_ascii_lowercase().as_str())
+        })
+        .collect();
+    environment_names.sort();
+    diagnostics::log(&format!(
+        "app={} pinned_ormah={ORMAH_VERSION} os={} version={os_version} arch={} environment_names={environment_names:?}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    if let Ok(uv) = app.shell().sidecar("uv") {
+        let _ = run_uv(uv.arg("--version"), Duration::from_secs(10)).await;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,7 +197,11 @@ pub fn find_ormah() -> Option<PathBuf> {
         .and_then(|o| {
             if o.status.success() {
                 let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(s))
+                }
             } else {
                 None
             }
@@ -142,34 +210,95 @@ pub fn find_ormah() -> Option<PathBuf> {
 
 /// Start the ormah server as an independent background daemon.
 /// Safe to call when already running — ormah server start is idempotent.
-pub fn start_daemon() {
-    let Some(bin) = find_ormah() else {
-        eprintln!("ormah binary not found — cannot start server");
-        return;
+pub async fn start_daemon() -> Result<(), String> {
+    let started = Instant::now();
+    let result = tauri::async_runtime::spawn_blocking(run_daemon_command)
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+    let Err(error) = result else { return Ok(()) };
+    let elapsed = started.elapsed();
+    diagnostics::log(&format!(
+        "daemon start failed after {}s: {error}",
+        elapsed.as_secs()
+    ));
+    let deadline = Instant::now()
+        + if elapsed >= SLOW_DAEMON_START {
+            SLOW_DAEMON_GRACE
+        } else {
+            Duration::ZERO
+        };
+    loop {
+        if is_running().await {
+            diagnostics::log("daemon command failed but the health check passed");
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("Ormah could not start its server. Try again, or copy the error log for help.".into());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+fn run_daemon_command() -> Result<(), String> {
+    let bin = find_ormah().ok_or("Ormah runtime was not found")?;
+    let mut command = clean_python_env(std::process::Command::new(&bin));
+    command.args(["server", "start", "-d"]);
+    // Files, not pipes: a fallback daemon inherits these and outlives this command.
+    match diagnostics::daemon_output() {
+        Some((stdout, stderr)) => command.stdout(stdout).stderr(stderr),
+        None => command.stdout(Stdio::null()).stderr(Stdio::null()),
     };
-    match clean_python_env(std::process::Command::new(&bin))
-        .args(["server", "start", "-d"])
-        .status()
-    {
-        Ok(s) => eprintln!("ormah server start -d exited {s}"),
-        Err(e) => eprintln!("failed to start ormah server ({bin:?}): {e}"),
+    let status = wait_bounded(&mut command, DAEMON_START_TIMEOUT).map_err(|e| e.to_string())?;
+    diagnostics::log(&format!("daemon command={bin:?} status={status}"));
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("exit status {status}"))
+    }
+}
+
+/// Run a command, killing it at the deadline so setup can always finish.
+fn wait_bounded(
+    command: &mut std::process::Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("killed after {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
 /// Stop the ormah daemon. No-op if not running.
 pub fn stop_daemon() {
     let Some(bin) = find_ormah() else { return };
-    let _ = clean_python_env(std::process::Command::new(&bin))
-        .args(["server", "stop"])
-        .status();
+    let mut command = clean_python_env(std::process::Command::new(&bin));
+    command.args(["server", "stop"]);
+    if let Err(error) = wait_bounded(&mut command, DAEMON_STOP_TIMEOUT) {
+        diagnostics::log(&format!("daemon stop failed: {error}"));
+    }
 }
 
 /// Ping /admin/health — true means the server is up and responding.
 pub async fn is_running() -> bool {
     let url = format!("{}/admin/health", crate::commands::base_url());
-    reqwest::Client::new()
+    let Ok(client) = crate::commands::local_client(Duration::from_secs(2)) else {
+        return false;
+    };
+    client
         .get(&url)
-        .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -177,17 +306,39 @@ pub async fn is_running() -> bool {
 }
 
 fn needs_upgrade() -> bool {
-    let Some(bin) = find_ormah() else { return false };
-    let Ok(out) = clean_python_env(std::process::Command::new(bin))
-        .arg("--version")
-        .output()
-    else {
+    let Some(bin) = find_ormah() else {
         return false;
     };
-    if !out.status.success() {
-        return true;
+    let mut command = clean_python_env(std::process::Command::new(bin));
+    command
+        .arg("--version")
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped());
+    // A version line fits in the pipe buffer, so waiting before reading can't deadlock.
+    match spawn_output_bounded(&mut command) {
+        Some(stdout) => should_upgrade(&stdout, ORMAH_VERSION),
+        None => true,
     }
-    should_upgrade(&out.stdout, ORMAH_VERSION)
+}
+
+fn spawn_output_bounded(command: &mut std::process::Command) -> Option<Vec<u8>> {
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => break,
+            Some(_) => return None,
+            None if started.elapsed() >= VERSION_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let mut stdout = Vec::new();
+    std::io::Read::read_to_end(&mut child.stdout.take()?, &mut stdout).ok()?;
+    Some(stdout)
 }
 
 fn should_upgrade(output: &[u8], required: &str) -> bool {
@@ -219,20 +370,40 @@ pub(crate) fn clean_python_env(mut cmd: std::process::Command) -> std::process::
     cmd
 }
 
-#[derive(Debug)]
-struct InstallFailure {
-    details: String,
-    transient: bool,
+#[derive(Debug, PartialEq)]
+enum InstallFailure {
+    Network,
+    PythonDownload,
+    TimedOut,
+    Other,
 }
 
 impl InstallFailure {
-    fn public_reason(&self) -> String {
-        if self.transient {
-            "Ormah could not reach the package service. Check your connection, then try again."
-                .into()
+    fn from_stderr(stderr: &str) -> Self {
+        let stderr = stderr.to_ascii_lowercase();
+        if !transient_install_error(&stderr) {
+            Self::Other
+        } else if stderr.contains("cpython-") {
+            Self::PythonDownload
         } else {
-            "Ormah could not install its runtime. Try again; if it keeps failing, reinstall the desktop app."
-                .into()
+            Self::Network
+        }
+    }
+
+    fn public_reason(&self) -> &'static str {
+        match self {
+            Self::Network => {
+                "Ormah could not reach the package service. Check your connection, then try again."
+            }
+            Self::PythonDownload => {
+                "Ormah could not download Python. Check your connection, then try again."
+            }
+            Self::TimedOut => {
+                "Installing Ormah took too long. Try again, or copy the error log for help."
+            }
+            Self::Other => {
+                "Ormah could not install its runtime. Try again, or copy the error log for help."
+            }
         }
     }
 }
@@ -244,7 +415,7 @@ fn transient_install_error(details: &str) -> bool {
         "failed to lookup address",
         "temporary failure in name resolution",
         "timed out",
-        "timeout",
+        "network timeout",
         "connection reset",
         "connection refused",
         "network is unreachable",
@@ -253,77 +424,161 @@ fn transient_install_error(details: &str) -> bool {
     .any(|pattern| details.contains(pattern))
 }
 
+fn install_args(version: &str) -> Vec<String> {
+    let spec = format!("ormah[litellm]=={version}");
+    [
+        "tool", "install", "--reinstall", "--force", "--python", PYTHON_VERSION, &spec,
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
 async fn install_with_retry<R: Runtime>(app: &AppHandle<R>) -> Result<(), InstallFailure> {
     for attempt in 1..=INSTALL_ATTEMPTS {
-        let _ = app.emit(
-            "ormah://status",
-            Phase::Installing {
-                version: ORMAH_VERSION,
-                attempt,
-                attempts: INSTALL_ATTEMPTS,
-            },
-        );
-        match install_via_uv(app).await {
+        publish(Phase::Installing {
+            version: ORMAH_VERSION,
+            attempt,
+            attempts: INSTALL_ATTEMPTS,
+        });
+        let failure = match install_via_uv(app).await {
             Ok(()) => return Ok(()),
-            Err(failure) if failure.transient && attempt < INSTALL_ATTEMPTS => {
-                let delay_seconds = if attempt == 1 { 2 } else { 5 };
-                eprintln!(
-                    "transient uv install failure on attempt {attempt}/{INSTALL_ATTEMPTS}: {}",
-                    failure.details
-                );
-                let _ = app.emit(
-                    "ormah://status",
-                    Phase::Retrying {
-                        version: ORMAH_VERSION,
-                        attempt,
-                        attempts: INSTALL_ATTEMPTS,
-                        delay_seconds,
-                    },
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
+            Err(failure) => failure,
+        };
+        let delay = RETRY_DELAYS.get(attempt as usize - 1);
+        match delay {
+            Some(delay) if failure != InstallFailure::Other => {
+                publish(Phase::Retrying {
+                    attempt: attempt + 1,
+                    attempts: INSTALL_ATTEMPTS,
+                });
+                tokio::time::sleep(Duration::from_secs(*delay)).await;
             }
-            Err(failure) => return Err(failure),
+            _ => return Err(failure),
         }
     }
     unreachable!("the bounded install loop always returns")
 }
 
 async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> Result<(), InstallFailure> {
-    let uv = match app.shell().sidecar("uv") {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(InstallFailure {
-                details: format!("uv sidecar not available ({e})"),
-                transient: false,
-            });
+    let uv = app.shell().sidecar("uv").map_err(|e| {
+        diagnostics::log(&format!("uv sidecar not available: {e}"));
+        InstallFailure::Other
+    })?;
+    let args = install_args(ORMAH_VERSION);
+    diagnostics::log(&format!("uv arguments: {args:?}"));
+    run_uv(uv.args(args), INSTALL_TIMEOUT).await
+}
+
+/// Run uv, logging each line as it arrives so a hung or killed run leaves evidence.
+async fn run_uv(command: Command, timeout: Duration) -> Result<(), InstallFailure> {
+    let started = Instant::now();
+    let (mut rx, child) = command.spawn().map_err(|e| {
+        diagnostics::log(&format!("uv spawn failed: {e}"));
+        InstallFailure::from_stderr(&e.to_string())
+    })?;
+    let mut stderr = String::new();
+    let result = tokio::time::timeout(timeout, async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stderr(line) | CommandEvent::Stdout(line) => {
+                    let line = String::from_utf8_lossy(&line);
+                    diagnostics::log(&format!("uv: {}", line.trim_end()));
+                    stderr.push_str(&line);
+                }
+                CommandEvent::Error(error) => {
+                    diagnostics::log(&format!("uv error: {error}"));
+                    stderr.push_str(&error);
+                }
+                CommandEvent::Terminated(status) => {
+                    diagnostics::log(&format!(
+                        "uv exit={:?} signal={:?} after {}s",
+                        status.code,
+                        status.signal,
+                        started.elapsed().as_secs()
+                    ));
+                    return status.code == Some(0);
+                }
+                _ => {}
+            }
         }
-    };
-    let spec = format!("ormah=={}", ORMAH_VERSION);
-    match uv.args(["tool", "install", "--reinstall", &spec]).output().await {
-        Ok(out) if out.status.success() => {
-            eprintln!("uv: installed {spec}");
-            Ok(())
-        }
-        Ok(out) => {
-            let details = String::from_utf8_lossy(&out.stderr).into_owned();
-            Err(InstallFailure {
-                transient: transient_install_error(&details),
-                details,
-            })
-        }
-        Err(e) => {
-            let details = e.to_string();
-            Err(InstallFailure {
-                transient: transient_install_error(&details),
-                details,
-            })
+        false
+    })
+    .await;
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(InstallFailure::from_stderr(&stderr)),
+        Err(_) => {
+            diagnostics::log(&format!(
+                "uv killed after {}s timeout: {:?}",
+                timeout.as_secs(),
+                child.kill()
+            ));
+            Err(InstallFailure::TimedOut)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_runtime_action, should_upgrade, transient_install_error, RuntimeAction};
+    use super::*;
+
+    #[test]
+    fn pins_python_and_the_exact_package() {
+        assert_eq!(
+            install_args("1.2.3"),
+            [
+                "tool",
+                "install",
+                "--reinstall",
+                "--force",
+                "--python",
+                "3.11",
+                "ormah[litellm]==1.2.3"
+            ]
+        );
+        assert_eq!(INSTALL_ATTEMPTS, 5);
+    }
+
+    #[test]
+    fn classifies_real_uv_failures() {
+        for (stderr, expected) in [
+            (include_str!("fixtures/uv-pypi-down.txt"), InstallFailure::Network),
+            (include_str!("fixtures/uv-python-down.txt"), InstallFailure::PythonDownload),
+            (include_str!("fixtures/uv-no-solution.txt"), InstallFailure::Other),
+            (
+                "Failed to download distribution due to network timeout. Try increasing UV_HTTP_TIMEOUT",
+                InstallFailure::Network,
+            ),
+            ("error: Connection refused via mirror.internal", InstallFailure::Network),
+            ("No solution for timeout-helper==1.0", InstallFailure::Other),
+        ] {
+            assert_eq!(InstallFailure::from_stderr(stderr), expected, "{stderr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn kills_a_hung_uv() {
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_shell::init())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let failure = run_uv(
+            app.shell().command("/bin/sh").args(["-c", "exec sleep 30"]),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, InstallFailure::TimedOut);
+    }
+
+    #[test]
+    fn kills_a_hung_blocking_command() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]);
+        let started = Instant::now();
+        assert!(wait_bounded(&mut command, Duration::from_millis(100)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn installs_when_runtime_is_missing() {
@@ -366,7 +621,9 @@ mod tests {
             "Temporary failure in name resolution while fetching pypi.org"
         ));
         assert!(transient_install_error("operation timed out"));
-        assert!(!transient_install_error("No solution found when resolving dependencies"));
+        assert!(!transient_install_error(
+            "No solution found when resolving dependencies"
+        ));
         assert!(!transient_install_error("permission denied"));
     }
 }

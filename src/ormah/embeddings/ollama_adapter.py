@@ -30,6 +30,8 @@ class OllamaEmbeddingAdapter(EmbeddingAdapter):
     def encode_batch(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
         import httpx
 
+        from ormah.config import uses_env_proxy
+
         all_embeddings: list[list[float]] = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
@@ -37,6 +39,7 @@ class OllamaEmbeddingAdapter(EmbeddingAdapter):
                 f"{self.base_url}/api/embed",
                 json={"model": self.model, "input": batch},
                 timeout=60,
+                trust_env=uses_env_proxy(self.base_url),
             )
             resp.raise_for_status()
             embeddings = resp.json()["embeddings"]

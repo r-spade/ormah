@@ -78,3 +78,6 @@ h1, h2, h3, h4, .display {
 }
 .boot-status button:hover { background: rgba(124, 194, 181, .14); }
 .boot-status button:disabled { cursor: default; opacity: .55; }
+.boot-status { z-index: 30; max-height: calc(100vh - 80px); overflow-y: auto; }
+.boot-status > span { max-width: 640px; overflow-wrap: anywhere; }
+.boot-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }

@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import GraphCanvas from "@/components/GraphCanvas";
 import Act1Void from "@/components/Act1Void";
 import {
-  invoke, graphUrl, waitForServer, sleep,
-  winMinimize, winClose, winToggleMaximize, onServerStatus,
+  invoke, graphUrl, sleep,
+  winMinimize, winClose, winToggleMaximize, type SetupStatus,
 } from "./lib/bridge";
 
 // Title bar for the startup splash (frameless window). On the graph view
@@ -27,32 +27,26 @@ function TitleBar() {
   );
 }
 
+function statusMessage(status: SetupStatus): string {
+  switch (status.phase) {
+    case "installing":
+      return `Installing Ormah ${status.version}… This can take a few minutes.`
+        + (status.attempt > 1 ? ` Try ${status.attempt} of ${status.attempts}.` : "");
+    case "retrying":
+      return `Couldn't connect. Trying again shortly (try ${status.attempt} of ${status.attempts})…`;
+    case "failed":
+      return status.reason;
+    default:
+      return "Starting Ormah… The first start downloads models and can take a few minutes.";
+  }
+}
+
 export default function App() {
   const progressRef = useRef(0);
   const selfNodeReadyRef = useRef<{ x: number; y: number } | null>(null);
-  const [statusMsg, setStatusMsg] = useState("");
-  const [canRetry, setCanRetry] = useState(false);
-  const [retryBusy, setRetryBusy] = useState(false);
-  const started = useRef(false);
+  const [status, setStatus] = useState<SetupStatus>({ phase: "starting" });
+  const [notice, setNotice] = useState("");
   const navigating = useRef(false);
-
-  useEffect(() => {
-    return onServerStatus((s) => {
-      if (s.phase === "installing") {
-        setCanRetry(false);
-        setStatusMsg(`Installing Ormah ${s.version} (attempt ${s.attempt} of ${s.attempts})…`);
-      } else if (s.phase === "retrying") {
-        setCanRetry(false);
-        setStatusMsg(`Connection unavailable. Trying again in ${s.delay_seconds} seconds…`);
-      } else if (s.phase === "starting") {
-        setCanRetry(false);
-        setStatusMsg("Starting Ormah…");
-      } else if (s.phase === "failed") {
-        setCanRetry(s.can_retry);
-        setStatusMsg(s.reason);
-      }
-    });
-  }, []);
 
   async function goGraph() {
     if (navigating.current) return;
@@ -66,35 +60,49 @@ export default function App() {
   }
 
   async function retrySetup() {
-    setRetryBusy(true);
-    setCanRetry(false);
+    setNotice("");
     try {
-      const accepted = await invoke<boolean>("retry_runtime_setup");
-      if (!accepted) {
-        setCanRetry(true);
-        return;
-      }
-      const ready = await waitForServer();
-      if (!ready) return;
-      await goGraph();
-    } finally {
-      setRetryBusy(false);
+      if (await invoke<boolean>("retry_runtime_setup")) setStatus({ phase: "starting" });
+    } catch (error) {
+      setNotice(`Couldn't retry: ${error}`);
+    }
+  }
+
+  async function copyDetails() {
+    try {
+      await invoke("copy_setup_details");
+      setNotice("Error log copied.");
+    } catch (error) {
+      setNotice(`Couldn't copy the error log: ${error}`);
     }
   }
 
   useEffect(() => {
-    if (started.current) return;
-    started.current = true;
+    let cancelled = false;
+    const t0 = Date.now();
 
     (async () => {
-      const t0 = Date.now();
-      const ready = await waitForServer();
-      if (!ready) return;
-
-      await sleep(Math.max(0, 2200 - (Date.now() - t0)));
-      goGraph();
+      while (!cancelled) {
+        try {
+          const next = await invoke<SetupStatus>("runtime_setup_status");
+          if (cancelled) return;
+          setStatus(next);
+          if (next.phase === "ready") {
+            await sleep(Math.max(0, 2200 - (Date.now() - t0)));
+            if (!cancelled) await goGraph();
+            return;
+          }
+        } catch (error) {
+          if (!cancelled) setNotice(`Couldn't read setup progress: ${error}`);
+        }
+        await sleep(500);
+      }
     })();
+
+    return () => { cancelled = true; };
   }, []);
+
+  const failed = status.phase === "failed";
 
   return (
     <>
@@ -102,16 +110,17 @@ export default function App() {
       <div className="stage-wrap">
         <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
         <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
-        {statusMsg && (
-          <div className="boot-status" role={canRetry ? "alert" : "status"}>
-            <span>{statusMsg}</span>
-            {canRetry && (
-              <button disabled={retryBusy} onClick={() => void retrySetup()}>
-                {retryBusy ? "Trying again…" : "Try again"}
-              </button>
-            )}
-          </div>
-        )}
+        <div className="boot-status" role={failed ? "alert" : "status"}>
+          <span>{statusMessage(status)}</span>
+          {failed && (
+            <div className="boot-actions">
+              <button onClick={() => void retrySetup()}>Try again</button>
+              <button onClick={() => void copyDetails()}>Copy error log</button>
+              {status.can_open && <button onClick={() => void goGraph()}>Open Ormah</button>}
+            </div>
+          )}
+          {notice && <span>{notice}</span>}
+        </div>
       </div>
     </>
   );

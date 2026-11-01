@@ -206,3 +206,47 @@ def test_restart_with_autostart_fails_closed_when_install_fails():
 
     assert result is False
     wait.assert_not_called()
+
+
+def test_health_check_ignores_proxy_settings(monkeypatch):
+    """A proxy can't reach this machine's localhost, so it must never be used for it."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(server_manager.settings, "port", server.server_port)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    try:
+        assert server_manager.is_server_running()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("http://localhost:8787", False),
+        ("http://127.0.0.1:8787", False),
+        ("http://[::1]:8787", False),
+        ("https://localhost:8787", True),
+        ("https://ormah.example.com", True),
+        ("http://server.internal:8787", True),
+    ],
+)
+def test_only_local_http_skips_env_proxy(url, expected):
+    from ormah.config import uses_env_proxy
+
+    assert uses_env_proxy(url) is expected

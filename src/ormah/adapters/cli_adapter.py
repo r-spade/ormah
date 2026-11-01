@@ -18,7 +18,7 @@ BASE = f"http://localhost:{settings.port}"
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=BASE, timeout=30.0)
+    return httpx.Client(base_url=BASE, timeout=30.0, trust_env=False)
 
 
 def _api(fn):
@@ -250,7 +250,7 @@ def cmd_status(args):
 
 def _whisper_client() -> httpx.Client:
     """Client with short timeout for whisper hook — fail fast, never block the user."""
-    return httpx.Client(base_url=BASE, timeout=5.0)
+    return httpx.Client(base_url=BASE, timeout=5.0, trust_env=False)
 
 
 def cmd_whisper_inject(args):
@@ -404,7 +404,7 @@ def _spawn_background_store(transcript_path: Path, cwd: str, session_id: str) ->
 
 def _whisper_store_client() -> httpx.Client:
     """Client with longer timeout for whisper-out — extraction can take 30s+."""
-    return httpx.Client(base_url=BASE, timeout=60.0)
+    return httpx.Client(base_url=BASE, timeout=60.0, trust_env=False)
 
 
 _WHISPER_CURSOR_DIR = Path(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))) / "ormah"
