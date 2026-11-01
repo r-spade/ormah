@@ -2,11 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import GraphCanvas from "@/components/GraphCanvas";
 import Act1Void from "@/components/Act1Void";
 import {
-  invoke, graphUrl, waitForServer, waitForGraphTransition, sleep, errorText,
-  winMinimize, winClose, winToggleMaximize, onServerStatus, type ServerStatus,
+  invoke, graphUrl, sleep,
+  winMinimize, winClose, winToggleMaximize, type SetupStatus,
 } from "./lib/bridge";
-
-import { initialSetup, receiveStatus, beginRetry, finishRetry, setupView, markHealthy, canOpenGraph, completeStatusInitialization, type SetupState } from "./lib/setup";
 
 // Title bar for the startup splash (frameless window). On the graph view
 // the graph's own top bar carries the window controls.
@@ -29,137 +27,82 @@ function TitleBar() {
   );
 }
 
+function statusMessage(status: SetupStatus): string {
+  switch (status.phase) {
+    case "installing":
+      return `Installing Ormah ${status.version}… This can take a few minutes.`
+        + (status.attempt > 1 ? ` Try ${status.attempt} of ${status.attempts}.` : "");
+    case "retrying":
+      return `Couldn't connect. Trying again shortly (try ${status.attempt} of ${status.attempts})…`;
+    case "failed":
+      return status.reason;
+    default:
+      return "Starting Ormah… The first start downloads models and can take a few minutes.";
+  }
+}
+
 export default function App() {
   const progressRef = useRef(0);
   const selfNodeReadyRef = useRef<{ x: number; y: number } | null>(null);
-  const [setup, setSetup] = useState(() => initialSetup(Date.now()));
-  const setupRef = useRef(setup);
-  function updateSetup(update: (state: SetupState) => SetupState) {
-    // Lifecycle callbacks update the ref synchronously, so a phase arriving
-    // during navigation cannot wait for a React render before blocking it.
-    const next = update(setupRef.current);
-    setupRef.current = next;
-    setSetup(next);
-  }
-  const [now, setNow] = useState(Date.now());
-  const [actionNotice, setActionNotice] = useState("");
-  const lifetime = useRef<AbortController | null>(null);
-  const retryRequest = useRef(0);
-  const view = setupView(setup, now);
+  const [status, setStatus] = useState<SetupStatus>({ phase: "starting" });
+  const [notice, setNotice] = useState("");
+  const navigating = useRef(false);
 
-  async function refreshSetupStatus(controller: AbortController, request = retryRequest.current) {
+  async function goGraph() {
+    if (navigating.current) return;
+    navigating.current = true;
+    const url = await graphUrl();
+    document.getElementById("root")?.classList.add("to-graph");
+    await sleep(620);
+    // Navigate to the graph; its TopBar becomes the window title bar.
+    // Cache-bust so a fresh UI build always loads in the webview.
+    window.location.replace(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
+  }
+
+  async function retrySetup() {
+    setNotice("");
     try {
-      const snapshot = await invoke<ServerStatus | null>("runtime_setup_status");
-      if (controller.signal.aborted || request !== retryRequest.current) return;
-      updateSetup((state) => completeStatusInitialization(
-        snapshot ? receiveStatus(state, snapshot, Date.now()) : state,
-      ));
+      if (await invoke<boolean>("retry_runtime_setup")) setStatus({ phase: "starting" });
     } catch (error) {
-      if (controller.signal.aborted || request !== retryRequest.current) return;
-      updateSetup((state) => completeStatusInitialization({
-        ...state, error: `Couldn't read setup progress: ${errorText(error)}`,
-      }));
+      setNotice(`Couldn't retry: ${error}`);
+    }
+  }
+
+  async function copyDetails() {
+    try {
+      await invoke("copy_setup_details");
+      setNotice("Setup details copied.");
+    } catch (error) {
+      setNotice(`Couldn't copy setup details: ${error}`);
     }
   }
 
   useEffect(() => {
-    const controller = new AbortController();
-    const { signal } = controller;
-    lifetime.current = controller;
-    const startedAt = Date.now();
-    let bootstrapSettled = false;
-    const reportError = (error: string) => {
-      if (!signal.aborted) updateSetup((state) => ({ ...state, error }));
-    };
-    const stop = onServerStatus(
-      (status) => updateSetup((state) => receiveStatus(state, status, Date.now())),
-      reportError,
-      () => {
-        bootstrapSettled = true;
-        // A pending mount snapshot must not settle a newer retry's barrier.
-        if (retryRequest.current === 0) updateSetup(completeStatusInitialization);
-      },
-    );
-    const clock = setInterval(() => setNow(Date.now()), 250);
+    let cancelled = false;
+    const t0 = Date.now();
 
-    // One health loop handles initial setup, retries and late recovery. Retry
-    // buttons only ask Rust to start setup; they never create another poller.
-    void (async () => {
-      while (!signal.aborted) {
+    (async () => {
+      while (!cancelled) {
         try {
-          const canOpen = () => canOpenGraph(setupRef.current);
-          await waitForServer(signal, reportError, 2000, canOpen, async () => {
-            // Keep the subscribe-before-snapshot startup ordering. Once that
-            // attempt settles, this same loop also covers missing events.
-            if (bootstrapSettled) await refreshSetupStatus(controller);
-          });
-          const url = await graphUrl();
-          const transitionReady = await waitForGraphTransition(signal, canOpen,
-            (active) => document.getElementById("root")?.classList.toggle("to-graph", active),
-            Math.max(0, 2200 - (Date.now() - startedAt)));
-          if (signal.aborted) return;
-          if (!transitionReady || !canOpen()) {
-            document.getElementById("root")?.classList.remove("to-graph");
-            continue;
+          const next = await invoke<SetupStatus>("runtime_setup_status");
+          if (cancelled) return;
+          setStatus(next);
+          if (next.phase === "ready") {
+            await sleep(Math.max(0, 2200 - (Date.now() - t0)));
+            if (!cancelled) await goGraph();
+            return;
           }
-          // The graph's own top bar becomes the window title bar.
-          window.location.replace(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
-          updateSetup((state) => markHealthy(state));
-          return;
         } catch (error) {
-          if (signal.aborted) return;
-          document.getElementById("root")?.classList.remove("to-graph");
-          reportError(`Couldn't open Ormah: ${errorText(error)}`);
-          try { await sleep(2000, signal); } catch { return; }
+          if (!cancelled) setNotice(`Couldn't read setup progress: ${error}`);
         }
+        await sleep(500);
       }
     })();
 
-    return () => {
-      controller.abort();
-      stop();
-      clearInterval(clock);
-      document.getElementById("root")?.classList.remove("to-graph");
-    };
+    return () => { cancelled = true; };
   }, []);
 
-  async function retrySetup() {
-    const controller = lifetime.current;
-    if (!controller || controller.signal.aborted || setupRef.current.retryBusy) return;
-    const request = ++retryRequest.current;
-    setActionNotice("");
-    updateSetup((state) => beginRetry(state));
-    try {
-      const accepted = await invoke<boolean>("retry_runtime_setup");
-      if (controller.signal.aborted || request !== retryRequest.current) return;
-      updateSetup((state) => finishRetry(state, accepted, Date.now()));
-      if (accepted) {
-        // Native event delivery can lag command acceptance. Refresh the snapshot
-        // while the existing subscription remains active; sequence numbers keep
-        // an intervening newer event from being replaced by an older snapshot.
-        await refreshSetupStatus(controller, request);
-      }
-    } catch (error) {
-      if (!controller.signal.aborted && request === retryRequest.current) {
-        updateSetup((state) => finishRetry(state, false, Date.now(), errorText(error)));
-      }
-    }
-  }
-
-  async function setupAction(command: "copy_setup_details" | "reveal_setup_log") {
-    const controller = lifetime.current;
-    setActionNotice("");
-    try {
-      await invoke(command);
-      if (!controller?.signal.aborted) {
-        setActionNotice(command === "copy_setup_details" ? "Setup details copied." : "Setup log shown in your file manager.");
-      }
-    } catch (error) {
-      if (!controller?.signal.aborted) {
-        setActionNotice(`Couldn't ${command === "copy_setup_details" ? "copy setup details" : "show the setup log"}: ${errorText(error)}`);
-      }
-    }
-  }
+  const failed = status.phase === "failed";
 
   return (
     <>
@@ -167,22 +110,16 @@ export default function App() {
       <div className="stage-wrap">
         <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
         <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
-        <div className="boot-status" role={view.failed ? "alert" : "status"}>
-          <span>{view.message}</span>
-          {view.hint && <span className="boot-hint">{view.hint}</span>}
-          {view.error && <span className="boot-error">{view.error}</span>}
-          {view.failed && (
+        <div className="boot-status" role={failed ? "alert" : "status"}>
+          <span>{statusMessage(status)}</span>
+          {failed && (
             <div className="boot-actions">
-              {view.canRetry && (
-                <button disabled={setup.retryBusy} onClick={() => void retrySetup()}>
-                  {setup.retryBusy ? "Trying again…" : "Try again"}
-                </button>
-              )}
-              <button onClick={() => void setupAction("copy_setup_details")}>Copy details</button>
-              <button onClick={() => void setupAction("reveal_setup_log")}>Show log</button>
+              <button onClick={() => void retrySetup()}>Try again</button>
+              <button onClick={() => void copyDetails()}>Copy details</button>
+              {status.can_open && <button onClick={() => void goGraph()}>Open Ormah</button>}
             </div>
           )}
-          {actionNotice && <span role="status">{actionNotice}</span>}
+          {notice && <span>{notice}</span>}
         </div>
       </div>
     </>

@@ -13,7 +13,6 @@ commands.allow = [
   "retry_runtime_setup",
   "runtime_setup_status",
   "copy_setup_details",
-  "reveal_setup_log",
   "desktop_bridge_info",
 ]
 

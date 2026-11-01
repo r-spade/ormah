@@ -142,10 +142,10 @@ pub fn retry_runtime_setup<R: Runtime>(app: AppHandle<R>) -> bool {
     crate::sidecar::start(app)
 }
 
-/// Snapshot and event sequences let the bootstrap recover events emitted before mount.
+/// Polled by the splash screen, so setup state can't be missed before the window exists.
 #[tauri::command]
-pub fn runtime_setup_status() -> Option<crate::sidecar::SetupStatus> {
-    crate::sidecar::latest_status()
+pub fn runtime_setup_status() -> crate::sidecar::Phase {
+    crate::sidecar::status()
 }
 
 #[tauri::command]
@@ -153,36 +153,6 @@ pub fn copy_setup_details<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     app.clipboard()
         .write_text(crate::diagnostics::recent())
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn reveal_setup_log<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    crate::diagnostics::log("Setup log requested by user");
-    let path = crate::diagnostics::path()
-        .filter(|p| p.is_file())
-        .ok_or_else(|| "Setup log is unavailable.".to_string())?;
-    #[cfg(target_os = "macos")]
-    {
-        let status = std::process::Command::new("/usr/bin/open")
-            .arg("-R")
-            .arg(&path)
-            .status()
-            .map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err("Could not reveal the setup log.".into());
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        use tauri_plugin_shell::ShellExt;
-        #[allow(deprecated)]
-        app.shell()
-            .open(path.parent().unwrap().to_string_lossy(), None)
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(target_os = "macos")]
-    let _ = app;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -205,7 +175,6 @@ mod tests {
             "server_status",
             "runtime_setup_status",
             "copy_setup_details",
-            "reveal_setup_log",
         ] {
             assert!(
                 bootstrap.contains(&format!("\"{command}\"")),
@@ -216,11 +185,7 @@ mod tests {
             .split_once("identifier = \"desktop-product-bridge\"")
             .unwrap()
             .1;
-        for command in [
-            "runtime_setup_status",
-            "copy_setup_details",
-            "reveal_setup_log",
-        ] {
+        for command in ["runtime_setup_status", "copy_setup_details"] {
             assert!(!product.contains(&format!("\"{command}\"")));
         }
     }

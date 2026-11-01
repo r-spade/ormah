@@ -137,8 +137,6 @@ fn integrate_appimage() {
 }
 
 pub fn run() {
-    #[cfg(target_os = "linux")]
-    if diagnostics::run_collector_if_requested() { return; }
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
 
@@ -174,7 +172,6 @@ pub fn run() {
             commands::retry_runtime_setup,
             commands::runtime_setup_status,
             commands::copy_setup_details,
-            commands::reveal_setup_log,
             product_bridge::desktop_bridge_info,
             product_bridge::account_status,
             product_bridge::request_account_code,
@@ -244,16 +241,16 @@ pub fn run() {
             // Main window: shows the install/boot flow, then navigates to the
             // graph. Built in Rust so we can attach the scrollbar-hiding init
             // script that also applies after navigating to the graph.
-            let work_area = app.primary_monitor().ok().flatten().and_then(|monitor| {
-                let size = monitor.work_area().size;
-                window_size::logical_work_area(size.width, size.height, monitor.scale_factor())
+            let work_area = app.primary_monitor().ok().flatten().map(|monitor| {
+                let size = monitor.work_area().size.to_logical(monitor.scale_factor());
+                (size.width, size.height)
             });
-            let size = window_size::fit_window(work_area);
+            let ((width, height), (min_width, min_height)) = window_size::fit_window(work_area);
             let window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Ormah")
-                    .inner_size(size.width, size.height)
-                    .min_inner_size(size.min_width, size.min_height)
+                    .inner_size(width, height)
+                    .min_inner_size(min_width, min_height)
                     .center()
                     .decorations(false) // custom dark title bar drawn in the UI
                     .initialization_script(HIDE_SCROLLBARS)

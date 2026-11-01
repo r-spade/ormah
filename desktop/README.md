@@ -121,74 +121,16 @@ Also set `plugins.updater.pubkey` in `tauri.conf.json` and
 
 ## Runtime setup and diagnostics
 
-The bundled app installs the exact package version from `pyproject.toml` with
-`uv tool install --reinstall --force --python 3.11 ormah==<pin>`. An older or
-broken runtime is repaired; an exact matching uv environment on another Python
-is rebuilt on 3.11. A newer installed package is still reused. `--force` replaces
-conflicting tool entry points; uv's tool environment is separate from Ormah's
-memory and configuration. The app does not edit PATH or shell profiles.
+The app installs its pinned package with
+`uv tool install --reinstall --force --python 3.11 ormah==<pin>`, and never edits
+PATH or shell profiles. Network failures get five tries over about 105 seconds of
+waiting; each uv process has a ten-minute limit.
 
-Transient network failures get five total attempts with waits of 10, 20, 30 and
-45 seconds (105 seconds total). Each uv process has a fixed ten-minute timeout,
-including a progressing download; there is no idle/progress heuristic. First
-installs may download substantial files, so the UI has no installation deadline.
-After server startup begins it allows ten minutes before offering recovery, and
-continues checking health afterward. The same poll loop refreshes sequenced setup
-snapshots as a fallback for unavailable lifecycle events. An already-healthy older daemon cannot bypass
-an active install or retry. A failed daemon command is reported unless
-the health endpoint confirms a running server. That endpoint cannot establish
-which macOS user owns a healthy server; multi-user ownership is unchanged.
+`sidecar.rs` owns setup state and the splash screen polls it. Only `Ready` opens the
+graph. On failure the splash offers **Try again** and **Copy details**, plus **Open
+Ormah** when a server from before a failed upgrade is still healthy. A healthy
+endpoint does not show which macOS user owns the server.
 
-The setup failure screen offers **Try again**, **Copy details**, and **Show log**.
-Copy uses a native clipboard command, rather than browser clipboard availability.
-Only the bundled bootstrap capability can copy or reveal setup diagnostics; the
-remote graph receives no generic clipboard or filesystem access.
-
-Setup diagnostics use Tauri's `app_log_dir()` and the bundle identifier
-`dev.ormah.desktop`:
-
-- macOS: `~/Library/Logs/dev.ormah.desktop/setup.log`
-- Linux: `$XDG_DATA_HOME/dev.ormah.desktop/logs/setup.log` (normally
-  `~/.local/share/dev.ormah.desktop/logs/setup.log`)
-
-The log records Unix-millisecond timestamps, app/runtime/uv/platform versions,
-Install/Upgrade/Reuse decisions, uv arguments, attempt timing and exit status,
-classification, streamed uv output and daemon exit/output. Only proxy and UV
-variable names are recorded. URL credentials and recognizable credentials/tokens
-are redacted before writing. Partial output lines are buffered across events;
-lines over 8 KiB are replaced with a redaction marker. A killed uv attempt flushes
-its remaining partial line. Files are bounded to 1 MiB plus one `setup.log.1`
-rotation, so very verbose runs can overwrite older evidence. Copy includes up to
-24 KiB from each file, redacted again. Logging errors never prevent setup.
-
-On Linux, a small internal output collector exits when daemon output writers
-close. It can outlive the GUI because the CLI's fallback background server may
-inherit stdout/stderr; waiting for pipe EOF in the GUI would otherwise hang
-startup, and closing GUI-owned readers could break the independent daemon's
-output. CLI exit status is collected independently. A stable `setup.lock` file
-coordinates rotation between the GUI and collector. macOS launchd startup
-captures the CLI's stdout/stderr directly.
-
-The initial frameless window fits the primary monitor's logical work area with a
-24-pixel margin on each edge, and its minimum size cannot exceed that area. If
-monitor information is unavailable it retains the 1180×820 default.
-
-### Verification
-
-```sh
-# Supply a local uv sidecar as described above before Rust tests.
-cd desktop/src-tauri
-CARGO_BUILD_JOBS=2 cargo test
-cd ../ui
-npm ci
-npm test
-npx tsc --noEmit
-npm run build
-```
-
-The desktop frontend tests compile its pure setup model and bridge with the
-existing TypeScript compiler and use Node's built-in test runner. They require no
-additional test dependency. macOS Finder startup, native clipboard and window
-placement need GUI verification; Linux compilation and browser layout checks do
-not establish those behaviors. Reliability changes do not establish the cause
-of the reported Mac install failure.
+Logs live in Tauri's `app_log_dir()` (`~/Library/Logs/dev.ormah.desktop` on macOS):
+`setup.log`, rotated at 1 MiB, and `daemon.log`, replaced on each server start.
+Known secret shapes are redacted, and environment variable values are never logged.
