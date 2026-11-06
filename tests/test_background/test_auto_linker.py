@@ -411,3 +411,210 @@ def test_checked_pairs_invalidated_on_update(engine):
         run_auto_linker(engine)
 
     assert mock_llm.call_count >= 1  # LLM was called again for this pair
+
+
+def test_apply_edge_is_idempotent_when_edge_already_exists(engine):
+    """A concurrent writer created the same edge between collection and apply.
+    _apply_edge must not raise, and must still record the pair as checked."""
+    from datetime import datetime, timezone
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            "VALUES (?, ?, 'supports', 0.9, ?, 'created by someone else')",
+            (id_a, id_b, now),
+        )
+
+    _apply_edge(engine, id_a, id_b, "supports", "auto-linker reason", 0.8)
+
+    # The pre-existing edge survives untouched; no duplicate was created.
+    rows = engine.db.conn.execute(
+        "SELECT reason FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = 'supports'",
+        (id_a, id_b),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "created by someone else"
+
+    # The pair is marked checked -> it will never be re-judged. This is exactly what
+    # the rollback used to erase, which is why the pair poisoned every future run.
+    pair = tuple(sorted([id_a, id_b]))
+    assert engine.db.conn.execute(
+        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+    ).fetchone() is not None
+
+
+def test_apply_edge_does_not_duplicate_the_markdown_connection(engine):
+    """The winner of the race already wrote its Connection to the file. We must not
+    append a second one for the same (target, edge)."""
+    from datetime import datetime, timezone
+    from ormah.models.node import Connection, EdgeType
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            "VALUES (?, ?, 'supports', 0.9, ?, 'x')",
+            (id_a, id_b, now),
+        )
+    node = engine.file_store.load(id_a)          # the winner persisted its markdown
+    node.connections.append(Connection(target=id_b, edge=EdgeType.supports, weight=0.9))
+    engine.file_store.save(node)
+
+    _apply_edge(engine, id_a, id_b, "supports", "reason", 0.8)
+
+    node = engine.file_store.load(id_a)
+    assert len([c for c in node.connections if c.target == id_b]) == 1
+
+
+def test_apply_edge_repairs_a_markdown_connection_the_winner_failed_to_save(engine):
+    """The winner committed the DB row but crashed before saving its markdown. The
+    file is the source of truth and a reindex rebuilds edges from it — so if we skip
+    the append just because we lost the race, the next reindex deletes the edge while
+    auto_link_checked stops the pair from ever being reconsidered. The link would be
+    lost forever. We must repair the file instead. (Codex R1, critical #1.)"""
+    from datetime import datetime, timezone
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:        # DB row exists, markdown does NOT
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            "VALUES (?, ?, 'supports', 0.9, ?, 'winner crashed before saving md')",
+            (id_a, id_b, now),
+        )
+    assert [c for c in engine.file_store.load(id_a).connections if c.target == id_b] == []
+
+    _apply_edge(engine, id_a, id_b, "supports", "reason", 0.8)
+
+    conns = [c for c in engine.file_store.load(id_a).connections if c.target == id_b]
+    assert len(conns) == 1
+    assert conns[0].edge.value == "supports"
+
+
+def test_run_survives_an_edge_apply_failure(engine, monkeypatch):
+    """A pair whose edge write blows up must not abort the whole run."""
+    import json
+    from unittest.mock import patch
+    from ormah.background import auto_linker as al
+
+    _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("FOREIGN KEY constraint failed")
+
+    monkeypatch.setattr(al, "_apply_edge", boom)
+
+    llm_response = json.dumps({"relationship": "supports", "reason": "r"})
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=llm_response):
+        al.run_auto_linker(engine)   # must return normally, not raise
+
+    # Fail closed: the watermark must NOT have advanced past the unresolved node.
+    watermark = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'auto_link_watermark'"
+    ).fetchone()
+    assert watermark is None or int(watermark["value"]) == 0
+
+
+def test_a_failing_pair_does_not_block_progress_on_earlier_nodes(engine, monkeypatch):
+    """Progress, not just survival (Codex R1, critical #2): the failing pair parks the
+    cursor AT that node, but every node before it still advances the watermark. Without
+    this, the fix would only be swapping one kind of total stall for another."""
+    import json
+    from unittest.mock import patch
+    from ormah.background import auto_linker as al
+
+    # A first pair that links cleanly, then a second pair whose apply always fails.
+    good_a, good_b = _create_pair(engine)
+    bad_a, bad_b = _create_pair(
+        engine, title_a="Rust language", content_a="Rust is a systems language.",
+        title_b="Rust lang", content_b="Rust is a popular systems language.",
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+
+    real_apply = al._apply_edge
+
+    def apply_or_boom(eng, a_id, b_id, *args, **kwargs):
+        if a_id in (bad_a, bad_b):
+            raise RuntimeError("FOREIGN KEY constraint failed")
+        return real_apply(eng, a_id, b_id, *args, **kwargs)
+
+    monkeypatch.setattr(al, "_apply_edge", apply_or_boom)
+
+    good_seq = engine.db.conn.execute(
+        "SELECT seq FROM nodes WHERE id = ?", (good_b,)
+    ).fetchone()["seq"]
+
+    llm_response = json.dumps({"relationship": "supports", "reason": "r"})
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=llm_response):
+        al.run_auto_linker(engine)
+
+    row = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'auto_link_watermark'"
+    ).fetchone()
+    assert row is not None, "the run made no progress at all — the failing pair stalled everything"
+    assert int(row["value"]) >= good_seq, "the clean nodes before the failing pair must advance"
+
+
+def test_apply_edge_reports_whether_it_actually_created_the_edge(engine):
+    """An INSERT OR IGNORE that inserted nothing is not a creation. Counting it as one
+    burns the run's edge budget on a link someone else already made, and logs a
+    creation that never happened (Codex R2, medium)."""
+    from datetime import datetime, timezone
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+
+    assert _apply_edge(engine, id_a, id_b, "supports", "r", 0.8) is True   # new edge
+
+    # Same edge again: a concurrent writer already has it -> ignored, not created.
+    now = datetime.now(timezone.utc).isoformat()
+    assert now  # keep the import honest
+    assert _apply_edge(engine, id_a, id_b, "supports", "r", 0.8) is False
+
+    # 'none' records the pair as checked without ever creating an edge.
+    id_c, id_d = _create_pair(
+        engine, title_a="Go language", content_a="Go is a systems language.",
+        title_b="Go lang", content_b="Go is a popular systems language.",
+    )
+    assert _apply_edge(engine, id_c, id_d, "none", "", 0.0) is False
+
+
+def test_a_failed_markdown_save_does_not_leave_the_pair_marked_checked(engine, monkeypatch):
+    """The markdown is the source of truth: a rebuild recreates the edge table from it.
+    If the connection cannot be persisted, the pair must NOT stay marked as checked —
+    otherwise the rebuild drops the DB-only edge and the checked row stops the pair from
+    ever being judged again. The link would be lost for good (Codex, PR A round 2)."""
+    import pytest
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+
+    def boom(_node):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(engine.file_store, "save", boom)
+
+    with pytest.raises(OSError):
+        _apply_edge(engine, id_a, id_b, "supports", "r", 0.8)
+
+    pair = tuple(sorted([id_a, id_b]))
+    assert engine.db.conn.execute(
+        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+    ).fetchone() is None, "the pair stayed checked, so it will never be judged again"
+
+    # The edge WE inserted is rolled back too, or the collection guard would skip the
+    # pair forever on the strength of a row whose markdown never existed.
+    assert engine.db.conn.execute(
+        "SELECT 1 FROM edges WHERE source_id = ? AND target_id = ?", (id_a, id_b)
+    ).fetchone() is None

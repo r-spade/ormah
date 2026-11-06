@@ -283,3 +283,37 @@ def test_project_scoped_nodes_skipped_by_default(engine):
 
     # LLM should never be called since project-scoped nodes are skipped
     mock_llm.assert_not_called()
+
+
+def test_conflict_edge_write_is_idempotent(engine):
+    """An edge another writer already created must not raise."""
+    from datetime import datetime, timezone
+    from ormah.models.node import CreateNodeRequest, NodeType
+
+    id_a, _ = engine.remember(
+        CreateNodeRequest(content="Coffee is good for you.", type=NodeType.fact), agent_id="t")
+    id_b, _ = engine.remember(
+        CreateNodeRequest(content="Coffee is bad for you.", type=NodeType.fact), agent_id="t")
+
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            "VALUES (?, ?, 'contradicts', 0.9, ?, 'someone else')",
+            (id_a, id_b, now),
+        )
+
+    # Writing the same contradiction again must be a no-op, not an IntegrityError,
+    # and must not overwrite the existing row.
+    with engine.db.transaction() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            "VALUES (?, ?, 'contradicts', 0.9, ?, ?)",
+            (id_a, id_b, now, "conflict detector"),
+        )
+        assert cur.rowcount == 0
+
+    rows = engine.db.conn.execute(
+        "SELECT reason FROM edges WHERE source_id = ? AND target_id = ?", (id_a, id_b)
+    ).fetchall()
+    assert len(rows) == 1 and rows[0]["reason"] == "someone else"
