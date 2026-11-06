@@ -16,6 +16,7 @@ from threading import Event, Lock, Thread, Timer
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from ormah import signal_strength
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.text.tokens import distinctive_tokens
 from ormah.transcript.parser import (
@@ -37,8 +38,8 @@ class IngestResult(Enum):
 
 _STATE_FILENAME = ".session_watcher_state"
 MAX_RECONCILE_RETRIES = 3
-_HEURISTIC_SOURCE = "transcript_watcher_heuristic"
-_LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
+_HEURISTIC_SOURCE = signal_strength.HEURISTIC_SOURCE
+_LLM_JUDGE_SOURCE = signal_strength.LLM_JUDGE_SOURCE
 _HEURISTIC_AFFINITY_SOURCE = "auto_heuristic"
 _LLM_JUDGE_AFFINITY_SOURCE = "auto_llm_judge"
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
@@ -116,13 +117,13 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     node_id = row["node_id"]
     short_id = node_id[:8] if node_id else ""
     if short_id and short_id.lower() in response_text.lower():
-        return True, 1.0, {"match": "node_id", "short_id": short_id}
+        return True, signal_strength.VERBATIM_NODE_ID, {"match": "node_id", "short_id": short_id}
 
     title = row["title"] or ""
     title_tokens = distinctive_tokens(title, extra_stop_words={"memory", "ormah"})
     title_norm = _normalise_text(title)
     if len(title_tokens) >= 2 and len(title_norm) >= 12 and title_norm in response_norm:
-        return True, 0.95, {"match": "title", "title": title}
+        return True, signal_strength.VERBATIM_TITLE, {"match": "title", "title": title}
 
     content = row["content"] or ""
     for sentence in re.split(r"[\n.!?]+", content):
@@ -132,7 +133,10 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
         sentence_tokens = distinctive_tokens(sentence, extra_stop_words={"memory", "ormah"})
         sentence_norm = _normalise_text(sentence)
         if len(sentence_tokens) >= 4 and sentence_norm in response_norm:
-            return True, 0.9, {"match": "sentence", "text": sentence[:160]}
+            return True, signal_strength.VERBATIM_SENTENCE, {
+                "match": "sentence",
+                "text": sentence[:160],
+            }
 
     node_tokens = distinctive_tokens(
         f"{title} {content}",
@@ -143,11 +147,17 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     overlap = sorted(candidate_tokens & response_tokens)
     denominator = min(len(candidate_tokens), 12)
     overlap_ratio = (len(overlap) / denominator) if denominator else 0.0
-    if len(overlap) >= 4 and overlap_ratio >= 0.5:
-        return True, min(0.85, 0.45 + overlap_ratio), {
+    if len(overlap) >= 4 and overlap_ratio >= signal_strength.OVERLAP_GATE:
+        # Round ONCE, then use that same value for both the strength and the evidence.
+        # The #218 backfill recomputes strength from evidence, so a strength derived
+        # from a more precise ratio than the one recorded makes the recompute perturb
+        # a correct row instead of confirming it. The gate above still reads the raw
+        # ratio, so which responses count as referenced is unchanged.
+        recorded_ratio = round(overlap_ratio, 3)
+        return True, signal_strength.token_overlap_strength(recorded_ratio), {
             "match": "token_overlap",
             "overlap": overlap[:12],
-            "overlap_ratio": round(overlap_ratio, 3),
+            "overlap_ratio": recorded_ratio,
         }
 
     return False, 0.0, {
@@ -546,7 +556,9 @@ def _record_whisper_usage_signals(
                 "row": row,
                 "signal_type": signal_type,
                 "polarity": polarity,
-                "strength": confidence,
+                "strength": signal_strength.judge_strength(
+                    confidence, min_confidence, polarity
+                ),
                 "evidence": {
                     "detector": _LLM_JUDGE_SOURCE,
                     "verdict": verdict,
