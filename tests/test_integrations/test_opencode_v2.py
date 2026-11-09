@@ -71,7 +71,8 @@ const event = {
 ''' + body)
     result = subprocess.run(
         ['node', str(script), plugin.as_uri(), str(project)],
-        env={**os.environ, 'ORMAH_URL': url, 'PYTHONPATH': str(source)},
+        # HOME=tmp_path keeps the developer's ~/.config/ormah/.env out of the helper.
+        env={**os.environ, 'HOME': str(tmp_path), 'ORMAH_URL': url, 'PYTHONPATH': str(source)},
         capture_output=True, text=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr
@@ -149,3 +150,17 @@ const before = structuredClone(event);
 await hook(event);
 assert.deepEqual(event, before);
 ''')
+
+
+def test_v2_ignores_the_developers_ormah_env(tmp_path, daemon, monkeypatch):
+    # A developer's ~/.config/ormah/.env must not reach the plugin's Python helper.
+    home = tmp_path / 'developer-home'
+    (home / '.config/ormah').mkdir(parents=True)
+    (home / '.config/ormah/.env').write_text('ORMAH_LLM_PROVIDER=not-a-provider\n')
+    monkeypatch.setenv('HOME', str(home))
+    url, requests, _ = daemon
+    run_plugin(tmp_path, url, '''
+await hook(event);
+assert.match(event.prompt.text, /fixture memory/);
+''')
+    assert len(requests) == 1
