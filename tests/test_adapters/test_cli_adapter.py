@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 import httpx
 
@@ -571,6 +572,28 @@ def test_whisper_inject_no_cwd(monkeypatch):
     assert code == 0
     parsed = json.loads(out)
     assert "additionalContext" in parsed["hookSpecificOutput"]
+
+
+def test_whisper_inject_survives_space_detect_oserror(monkeypatch):
+    """An OSError from the git probe falls back to the cwd basename, not a traceback."""
+    captured = []
+
+    def handler(request):
+        captured.append(json.loads(request.content))
+        return _mock_response({"text": "some context"})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "ormah.adapters.cli_adapter._whisper_client",
+        lambda: httpx.Client(transport=transport, base_url="http://test"),
+    )
+    monkeypatch.setattr("ormah.adapters.cli_adapter._load_cursors", lambda: {})
+    monkeypatch.setattr("ormah.adapters.cli_adapter._save_cursors", lambda c: None)
+    monkeypatch.setattr("subprocess.run", MagicMock(side_effect=PermissionError))
+    hook_input = json.dumps({"prompt": "hello", "cwd": "/tmp/locked-dir", "session_id": "test"})
+    code, out, err = _run_cli(["whisper", "inject"], monkeypatch, stdin_text=hook_input)
+    assert code == 0
+    assert captured[0]["space"] == "locked-dir"
 
 
 # --- whisper inject nudge ---

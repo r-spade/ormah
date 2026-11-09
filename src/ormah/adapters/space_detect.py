@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 
 
 def detect_space_from_dir(path: str) -> str | None:
     """Detect the project space from an explicit directory path.
 
     Tries git repo basename first, falls back to directory basename.
-    Returns None if the path is a home directory or root.
+    Returns None if the path is the home directory or one of its ancestors (root included).
     """
     path = os.path.realpath(path)
 
-    # Don't auto-detect space for home directory or root
+    # Don't auto-detect space for home directory or any folder above it
     home = os.path.realpath(os.path.expanduser("~"))
-    if path == home or path == "/":
+    if Path(home).is_relative_to(path):
         return None
 
     # Try git repo root basename
@@ -28,9 +29,11 @@ def detect_space_from_dir(path: str) -> str | None:
             timeout=5,
             cwd=path,
         )
-        if result.returncode == 0:
-            return os.path.basename(result.stdout.strip())
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        repo_root = result.stdout.strip()
+        # A dotfiles repo at home would claim every folder under it.
+        if result.returncode == 0 and os.path.realpath(repo_root) != home:
+            return os.path.basename(repo_root)
+    except (subprocess.TimeoutExpired, OSError):
         pass
 
     # Fall back to directory basename
@@ -41,7 +44,7 @@ def detect_space_from_cwd() -> str | None:
     """Detect the project space from the current working directory.
 
     Tries git repo basename first, falls back to cwd basename.
-    Returns None if running from a home directory or root.
+    Returns None if running from the home directory or one of its ancestors.
     """
     return detect_space_from_dir(os.getcwd())
 

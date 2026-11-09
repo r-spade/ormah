@@ -54,6 +54,23 @@ def test_detect_returns_none_for_symlinked_home(tmp_path):
         assert detect_space_from_dir(home) is None
 
 
+def test_detect_returns_none_for_parent_of_home(tmp_path):
+    (tmp_path / "Users" / "someone").mkdir(parents=True)
+    git_result = subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr="not a repo")
+    with patch.dict(os.environ, {"HOME": str(tmp_path / "Users" / "someone")}), \
+         patch("subprocess.run", return_value=git_result):
+        assert detect_space_from_dir(str(tmp_path / "Users")) is None
+
+
+def test_detect_keeps_sibling_that_shares_home_prefix(tmp_path):
+    (tmp_path / "someone").mkdir()
+    (tmp_path / "someone-else").mkdir()
+    git_result = subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr="not a repo")
+    with patch.dict(os.environ, {"HOME": str(tmp_path / "someone")}), \
+         patch("subprocess.run", return_value=git_result):
+        assert detect_space_from_dir(str(tmp_path / "someone-else")) == "someone-else"
+
+
 def test_detect_returns_none_for_root():
     with patch("os.getcwd", return_value="/"):
         assert detect_space_from_cwd() is None
@@ -69,6 +86,38 @@ def test_detect_handles_git_timeout():
     with patch("os.getcwd", return_value="/tmp/some-dir"), \
          patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=5)):
         assert detect_space_from_cwd() == "some-dir"
+
+
+def test_detect_handles_not_a_directory():
+    with patch("subprocess.run", side_effect=NotADirectoryError):
+        assert detect_space_from_dir("/tmp/some-file") == "some-file"
+
+
+def test_detect_handles_permission_error():
+    with patch("subprocess.run", side_effect=PermissionError):
+        assert detect_space_from_dir("/tmp/locked-dir") == "locked-dir"
+
+
+def test_detect_falls_back_when_git_toplevel_is_home(tmp_path):
+    home = tmp_path / "home"
+    downloads = home / "Downloads"
+    downloads.mkdir(parents=True)
+    git_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=str(home) + "\n")
+    with patch.dict(os.environ, {"HOME": str(home)}), \
+         patch("subprocess.run", return_value=git_result):
+        assert detect_space_from_dir(str(downloads)) == "Downloads"
+
+
+def test_detect_keeps_nested_repo_under_git_home(tmp_path):
+    home = tmp_path / "home"
+    sub = home / "code" / "my-project" / "src"
+    sub.mkdir(parents=True)
+    git_result = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=str(home / "code" / "my-project") + "\n"
+    )
+    with patch.dict(os.environ, {"HOME": str(home)}), \
+         patch("subprocess.run", return_value=git_result):
+        assert detect_space_from_dir(str(sub)) == "my-project"
 
 
 # --- resolve_space ---
