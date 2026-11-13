@@ -1971,17 +1971,29 @@ class MemoryEngine:
         return batches
 
     @_serialized_memory_operation
-    def apply_maintenance_results(self, results: dict) -> dict:
+    def apply_maintenance_results(self, results: dict, issued: dict | None = None) -> dict:
         """Apply Claude's maintenance decisions.
 
         Phase 2 of the ``run_maintenance`` two-call protocol.  Accepts
         ``results`` as returned by Claude (edges, merges, consolidations) and
         applies each decision, returning counts.
+
+        *issued* is the Phase 1 assignment (the batches of the job).  When it is
+        given, a merge whose pair is not one of its ``merge_candidates`` is
+        rejected.  A merge whose ``merged_content`` would erase a source is
+        rejected with or without it (see ``_merge_rejection``).  A rejected merge
+        changes nothing and is counted in ``rejected``.
         """
         from ormah.background.auto_linker import _apply_edge
         from ormah.background.consolidator import _apply_consolidation
 
-        counts: dict[str, int] = {"edges": 0, "merges": 0, "consolidations": 0, "skipped": 0}
+        counts: dict[str, int] = {
+            "edges": 0, "merges": 0, "consolidations": 0, "skipped": 0, "rejected": 0,
+        }
+        offered_merges = None if issued is None else {
+            frozenset((c["node_a"]["id"], c["node_b"]["id"]))
+            for c in issued.get("merge_candidates") or []
+        }
 
         for e in results.get("edges", []):
             try:
@@ -2002,6 +2014,14 @@ class MemoryEngine:
 
         for m in results.get("merges", []):
             try:
+                reason = self._merge_rejection(m, offered_merges)
+                if reason is not None:
+                    counts["rejected"] += 1
+                    logger.warning(
+                        "apply_maintenance_results: merge %s / %s rejected: %s",
+                        m.get("keep_id"), m.get("discard_id"), reason,
+                    )
+                    continue
                 self.execute_merge(
                     m["keep_id"],
                     m["discard_id"],
@@ -2037,6 +2057,35 @@ class MemoryEngine:
             logger.warning("apply_maintenance_results: failed to record timestamp: %s", exc)
 
         return counts
+
+    def _merge_rejection(
+        self, merge: dict, offered: set[frozenset[str]] | None
+    ) -> str | None:
+        """Return why a Phase 2 merge must not run, or None if it can run.
+
+        On 2026-10-18 one merge took a node from a consolidation cluster, outside
+        the offered pair, with ``merged_content="placeholder"``: the survivor's
+        body became that word and the other node was deleted.
+        """
+        content = merge.get("merged_content")
+        if offered is None and content is None:
+            return None  # no assignment to check, and the keeper keeps its own content
+        # Load first: the ids may be Short ids, and the issued pairs hold Full ids.
+        sources = [self.file_store.load(merge["keep_id"]), self.file_store.load(merge["discard_id"])]
+        if None in sources:
+            return "a source node does not exist"
+        if offered is not None and frozenset(n.id for n in sources) not in offered:
+            return "the pair is not an issued merge candidate"
+        if content is None:
+            return None  # the keeper keeps its own content
+        if not content.strip():
+            return "merged_content is empty"
+        if content.strip().lower() == "placeholder":
+            return 'merged_content is the literal "placeholder"'
+        shorter = min(len(n.content) for n in sources)
+        if len(content) < shorter:
+            return f"merged_content ({len(content)} chars) is shorter than a source ({shorter})"
+        return None
 
     @staticmethod
     def _pick_keeper(a: MemoryNode, b: MemoryNode) -> tuple[MemoryNode, MemoryNode]:
