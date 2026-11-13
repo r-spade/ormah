@@ -1,5 +1,10 @@
 """Tests for markdown parsing and serialization."""
 
+from datetime import datetime, timezone
+
+import frontmatter
+import pytest
+
 from ormah.models.node import Connection, EdgeType, MemoryNode, NodeType, Tier
 from ormah.store.markdown import parse_node, serialize_node
 
@@ -122,3 +127,38 @@ def test_a_file_with_no_stability_key_parses_to_one_not_the_new_default():
         "a node from before FSRS\n"
     )
     assert parse_node(text).stability == 1.0
+
+
+# quoted-naive is the case from r-spade/ormah#237: the only one that parsed naive before the fix.
+@pytest.mark.parametrize(
+    ("stamp", "raw_type", "raw_naive"),
+    [
+        ("2026-01-01T12:00:00", datetime, True),
+        ("2026-01-01T12:00:00Z", datetime, False),
+        ('"2026-01-01T12:00:00"', str, True),
+        ('"2026-01-01T12:00:00Z"', str, False),
+    ],
+    ids=["unquoted-naive", "unquoted-utc", "quoted-naive", "quoted-utc"],
+)
+def test_a_frontmatter_timestamp_parses_to_utc(stamp, raw_type, raw_naive):
+    text = f"""---
+id: test-id-123
+type: fact
+source: agent:test
+created: {stamp}
+updated: {stamp}
+---
+A fact."""
+
+    # The YAML loader decides which branch of _parse_dt runs: pin the raw value it hands over.
+    raw = frontmatter.loads(text).metadata["created"]
+    assert type(raw) is raw_type
+    raw_dt = raw if isinstance(raw, datetime) else datetime.fromisoformat(raw)
+    assert (raw_dt.tzinfo is None) is raw_naive
+
+    node = parse_node(text)
+
+    expected = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    assert node.created.tzinfo is not None
+    assert node.created == expected
+    assert node.updated == expected
