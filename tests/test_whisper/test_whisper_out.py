@@ -278,6 +278,37 @@ class TestWhisperStoreSpace:
         assert "default_space=" in url
 
 
+    def test_whisper_store_survives_space_detect_oserror(self, monkeypatch, tmp_path):
+        """An OSError from the git probe falls back to the cwd basename, not a traceback."""
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(_make_transcript(6))
+
+        captured_requests = []
+
+        def handler(request):
+            captured_requests.append(request)
+            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+        monkeypatch.setattr("subprocess.run", MagicMock(side_effect=NotADirectoryError))
+
+        hook_input = json.dumps({
+            "transcript_path": str(transcript),
+            "cwd": "/tmp/some-file",
+            "session_id": "abc",
+            "trigger": "auto",
+        })
+
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+        assert code == 0
+        assert len(captured_requests) == 1
+        assert "default_space=some-file" in str(captured_requests[0].url)
+
+
 class TestWhisperStoreExtraTags:
     def test_whisper_store_passes_extra_tags(self, monkeypatch, tmp_path):
         """Verify "whisper-out" tag in request."""
