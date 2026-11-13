@@ -143,7 +143,7 @@ class TestApplyMaintenanceResults:
                 {
                     "keep_id": a,
                     "discard_id": b,
-                    "merged_content": "Merged content",
+                    "merged_content": "Python uses indentation to define code block scope, merged",
                     "merged_title": "Merged title",
                 },
             ]
@@ -195,7 +195,9 @@ class TestApplyMaintenanceResults:
 
     def test_empty_results_ok(self, engine):
         counts = engine.apply_maintenance_results({})
-        assert counts == {"edges": 0, "merges": 0, "consolidations": 0, "skipped": 0}
+        assert counts == {
+            "edges": 0, "merges": 0, "consolidations": 0, "skipped": 0, "rejected": 0,
+        }
 
 
 class TestGetMaintenanceBatches:

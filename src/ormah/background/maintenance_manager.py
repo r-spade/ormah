@@ -200,7 +200,12 @@ class MaintenanceManager:
     def _run_phase2(self, job_id: str, results: dict[str, Any]) -> None:
         t0 = time.monotonic()
         try:
-            summary = self._engine.apply_maintenance_results(results)
+            # The assignment this job issued; the engine rejects a merge outside it.
+            # A job without batches issued nothing, so every merge is rejected.
+            with self._lock:
+                job = self._job
+                issued = (job.batches if job is not None and job.job_id == job_id else None) or {}
+            summary = self._engine.apply_maintenance_results(results, issued=issued)
             duration_ms = (time.monotonic() - t0) * 1000
             with self._lock:
                 if self._job is None or self._job.job_id != job_id:
