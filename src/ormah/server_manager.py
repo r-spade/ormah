@@ -421,6 +421,16 @@ def restart_with_autostart(
         )
         return False
 
+    # A server on another port can still own the memory directory. Say so now rather
+    # than installing a service that cannot start and waiting minutes for its health.
+    from ormah.server_lock import ServerLockHeld, check_available
+
+    try:
+        check_available(settings.memory_dir)
+    except ServerLockHeld as exc:
+        print(f"{exc} Auto-start was not installed.")
+        return False
+
     try:
         install_autostart(ormah_bin, wrapper_path=wrapper_path)
     except (OSError, subprocess.SubprocessError) as exc:

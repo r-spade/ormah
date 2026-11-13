@@ -151,6 +151,18 @@ def _cmd_server_start(args):
             )
             sys.exit(1)
 
+        # One server per memory directory. A different port is not enough to share one,
+        # so refuse here with a message instead of letting startup fail with a traceback.
+        # Exit non-zero (like a foreign listener) so launchd/systemd keeps retrying and
+        # takes over once the other server is gone.
+        from ormah.server_lock import ServerLockHeld, check_available
+
+        try:
+            check_available(settings.memory_dir)
+        except ServerLockHeld as exc:
+            warn(f"Ormah could not start: {exc}")
+            sys.exit(1)
+
         uvicorn.run(
             "ormah.main:app",
             host=settings.host,
@@ -467,6 +479,7 @@ def _cmd_backup_restore(args):
     from ormah.cloud.restore import CloudRestoreError, restore_cloud_snapshot
     from ormah.config import settings
     from ormah.console import info, ok, warn
+    from ormah.server_lock import ROLE_RESTORE, ServerLock, ServerLockHeld
     from ormah.server_manager import is_server_running
 
     if is_server_running():
@@ -491,6 +504,15 @@ def _cmd_backup_restore(args):
             info("Restore cancelled")
             return
 
+    # Hold the server lock for the whole restore: a server on another port (which the
+    # is_server_running check above cannot see) blocks it, and no server can start
+    # mid-restore. This is the CLI process; in-server restores already run inside the
+    # lock holder and do not come through here.
+    restore_lock = ServerLock(settings.memory_dir, role=ROLE_RESTORE)
+    try:
+        restore_lock.acquire()
+    except ServerLockHeld as exc:
+        _print_backup_error(f"Cannot restore: {exc}")
     try:
         if cloud_requested:
             cloud_result = restore_cloud_snapshot(
@@ -503,6 +525,8 @@ def _cmd_backup_restore(args):
             result = _backup_service().restore(args.backup, rebuild_index=not args.no_rebuild)
     except (BackupError, CloudRestoreError) as exc:
         _print_backup_error(str(exc))
+    finally:
+        restore_lock.release()
 
     ok(f"Restored backup: {result.restored.name}")
     if result.safety_backup is not None:

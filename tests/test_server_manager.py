@@ -250,3 +250,83 @@ def test_only_local_http_skips_env_proxy(url, expected):
     from ormah.config import uses_env_proxy
 
     assert uses_env_proxy(url) is expected
+
+
+# --- one server per memory directory ---------------------------------------------------
+
+
+def test_server_start_exits_nonzero_when_directory_locked_by_other_server(capsys):
+    """A server on another port still owns the directory; the start must refuse cleanly."""
+    from ormah import cli
+    from ormah.server_lock import ServerLock
+
+    args = mock.Mock(daemon=False, reload=False)
+    holder = ServerLock(server_manager.settings.memory_dir, port=9001)
+    holder.acquire()
+    try:
+        with mock.patch("ormah.server_manager.is_port_in_use", return_value=False), \
+             mock.patch("uvicorn.run") as run, \
+             pytest.raises(SystemExit) as exc_info:
+            cli._cmd_server_start(args)
+    finally:
+        holder.release()
+
+    assert exc_info.value.code == 1
+    run.assert_not_called()
+    out = capsys.readouterr().out
+    assert "another Ormah server" in out
+    assert "port 9001" in out
+    assert str(server_manager.settings.memory_dir.resolve()) in out
+    assert "Traceback" not in out
+
+
+def test_server_start_same_port_duplicate_is_still_a_clean_noop_with_lock_held():
+    """The existing duplicate-start no-op wins over the lock refusal."""
+    from ormah import cli
+    from ormah.server_lock import ServerLock
+
+    args = mock.Mock(daemon=False, reload=False)
+    holder = ServerLock(server_manager.settings.memory_dir, port=server_manager.settings.port)
+    holder.acquire()
+    try:
+        with mock.patch("ormah.server_manager.is_port_in_use", return_value=True), \
+             mock.patch("ormah.server_manager.is_server_running", return_value=True), \
+             mock.patch("uvicorn.run") as run:
+            cli._cmd_server_start(args)
+    finally:
+        holder.release()
+    run.assert_not_called()
+
+
+def test_server_start_does_not_leave_the_directory_locked_after_preflight():
+    from ormah import cli
+    from ormah.server_lock import check_available
+
+    args = mock.Mock(daemon=False, reload=False)
+    with mock.patch("ormah.server_manager.is_port_in_use", return_value=False), \
+         mock.patch("uvicorn.run"):
+        cli._cmd_server_start(args)
+    check_available(server_manager.settings.memory_dir)
+
+
+def test_restart_with_autostart_reports_directory_lock_without_installing(capsys):
+    from ormah.server_lock import ServerLock
+
+    stop_result = server_manager._StopServerResult(found=True, stopped=True)
+    holder = ServerLock(server_manager.settings.memory_dir, port=9002)
+    holder.acquire()
+    try:
+        with mock.patch("ormah.server_manager._stop_running_server", return_value=stop_result), \
+             mock.patch("ormah.server_manager.is_port_in_use", return_value=False), \
+             mock.patch("ormah.server_manager.install_autostart") as install, \
+             mock.patch("ormah.server_manager.wait_for_server") as wait:
+            result = server_manager.restart_with_autostart("/abs/path/ormah")
+    finally:
+        holder.release()
+
+    assert result is False
+    install.assert_not_called()
+    wait.assert_not_called()
+    out = capsys.readouterr().out
+    assert "port 9002" in out
+    assert "already using" in out
