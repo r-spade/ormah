@@ -118,6 +118,24 @@ class TestMergeGate:
         assert (counts["merges"], counts["rejected"]) == (0, 1)
         assert (_state(engine, keep), _state(engine, other)) == before
 
+    @pytest.mark.parametrize("content", ["    \n", "placeholder", "  Placeholder\n"])
+    def test_empty_or_placeholder_content_is_rejected_when_no_shorter_than_a_source(
+        self, engine, content
+    ):
+        # Four-character sources: the content above is not shorter than either, so
+        # only the empty/placeholder rule can reject it.
+        keep, other = _seed(engine, "Yes.", "Nope")
+        before = (_state(engine, keep), _state(engine, other))
+
+        counts = engine.apply_maintenance_results(
+            {"merges": [{"keep_id": keep, "discard_id": other,
+                         "merged_title": "t", "merged_content": content}]},
+            issued=_issued((keep, other)),
+        )
+
+        assert (counts["merges"], counts["rejected"]) == (0, 1)
+        assert (_state(engine, keep), _state(engine, other)) == before
+
     def test_content_shorter_than_the_shorter_source_is_rejected(self, engine, three):
         keep, other, _ = three
         shorter = min(len(engine.file_store.load(n).content) for n in (keep, other))
@@ -158,6 +176,18 @@ class TestMergeGate:
         assert len(survivors) == 1
         assert _state(engine, survivors[0]) == ("merged", GOOD_CONTENT)
 
+    def test_offered_pair_given_by_short_ids_is_applied(self, engine, three):
+        # A merge may name a node by a unique id prefix; Phase 1 issues Full ids.
+        keep, other, _ = three
+
+        counts = engine.apply_maintenance_results(
+            {"merges": [{"keep_id": keep[:8], "discard_id": other[:8],
+                         "merged_title": "merged", "merged_content": GOOD_CONTENT}]},
+            issued=_issued((keep, other)),
+        )
+
+        assert (counts["merges"], counts["rejected"]) == (1, 0)
+
     def test_a_rejected_merge_does_not_stop_the_rest_of_the_submission(self, engine):
         a, b, c, d = _seed(
             engine,
@@ -177,11 +207,16 @@ class TestMergeGate:
                     {"keep_id": a, "discard_id": b, "merged_title": "first topic",
                      "merged_content": GOOD_CONTENT},
                 ],
+                "consolidations": [{"node_ids": [c, d], "title": "second topic",
+                                    "content": "Gamma and Delta both cover the second topic.",
+                                    "type": "fact"}],
             },
             issued=_issued((a, b)),
         )
 
-        assert (counts["edges"], counts["merges"], counts["rejected"]) == (1, 1, 1)
+        assert (
+            counts["edges"], counts["merges"], counts["consolidations"], counts["rejected"]
+        ) == (1, 1, 1, 1)
         assert engine.file_store.load(c) is not None
 
     def test_without_an_assignment_the_content_checks_still_apply(self, engine, three):

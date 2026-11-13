@@ -2019,7 +2019,7 @@ class MemoryEngine:
                     counts["rejected"] += 1
                     logger.warning(
                         "apply_maintenance_results: merge %s / %s rejected: %s",
-                        str(m.get("keep_id"))[:8], str(m.get("discard_id"))[:8], reason,
+                        m.get("keep_id"), m.get("discard_id"), reason,
                     )
                     continue
                 self.execute_merge(
@@ -2067,19 +2067,21 @@ class MemoryEngine:
         the offered pair, with ``merged_content="placeholder"``: the survivor's
         body became that word and the other node was deleted.
         """
-        keep_id, discard_id = merge["keep_id"], merge["discard_id"]
-        if offered is not None and frozenset((keep_id, discard_id)) not in offered:
-            return "the pair is not an issued merge candidate"
         content = merge.get("merged_content")
+        if offered is None and content is None:
+            return None  # no assignment to check, and the keeper keeps its own content
+        # Load first: the ids may be Short ids, and the issued pairs hold Full ids.
+        sources = [self.file_store.load(merge["keep_id"]), self.file_store.load(merge["discard_id"])]
+        if None in sources:
+            return "a source node does not exist"
+        if offered is not None and frozenset(n.id for n in sources) not in offered:
+            return "the pair is not an issued merge candidate"
         if content is None:
             return None  # the keeper keeps its own content
         if not content.strip():
             return "merged_content is empty"
         if content.strip().lower() == "placeholder":
             return 'merged_content is the literal "placeholder"'
-        sources = [self.file_store.load(keep_id), self.file_store.load(discard_id)]
-        if None in sources:
-            return "a source node does not exist"
         shorter = min(len(n.content) for n in sources)
         if len(content) < shorter:
             return f"merged_content ({len(content)} chars) is shorter than a source ({shorter})"
