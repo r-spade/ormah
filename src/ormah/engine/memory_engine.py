@@ -1971,59 +1971,73 @@ class MemoryEngine:
         return batches
 
     @_serialized_memory_operation
-    def apply_maintenance_results(self, results: dict) -> dict:
+    def apply_maintenance_results(self, results: dict, issued: dict | None = None) -> dict:
         """Apply Claude's maintenance decisions.
 
         Phase 2 of the ``run_maintenance`` two-call protocol.  Accepts
         ``results`` as returned by Claude (edges, merges, consolidations) and
-        applies each decision, returning counts.
+        applies each decision, returning a summary of counts and errors.
+
+        *issued* is the Phase 1 assignment (the job's batches).  When it is given,
+        an item that names a node id outside it is rejected: the agent transcribes
+        ids by hand, and a typo must not reach an unrelated node.  An item that names
+        a node that does not exist is rejected with or without it.  A rejected item
+        changes nothing.  Each rejection and each apply-time exception is listed in
+        ``errors`` as ``{kind, ids, reason}``; the rest of the submission still applies.
         """
         from ormah.background.auto_linker import _apply_edge
         from ormah.background.consolidator import _apply_consolidation
 
-        counts: dict[str, int] = {"edges": 0, "merges": 0, "consolidations": 0, "skipped": 0}
+        summary: dict[str, Any] = {
+            "edges": 0, "merges": 0, "consolidations": 0, "skipped": 0, "errors": [],
+        }
+        issued_ids = None
+        if issued is not None:
+            issued_ids = {
+                n["id"] for cluster in issued.get("consolidation_clusters") or [] for n in cluster
+            }
+            for name in ("link_candidates", "conflict_candidates", "merge_candidates"):
+                for c in issued.get(name) or []:
+                    issued_ids.update((c["node_a"]["id"], c["node_b"]["id"]))
 
-        for e in results.get("edges", []):
-            try:
-                _apply_edge(
-                    self,
-                    e["node_a_id"],
-                    e["node_b_id"],
-                    e["edge_type"],
-                    e.get("reason", ""),
-                    similarity=0.0,
-                )
-                if e["edge_type"] != "none":
-                    counts["edges"] += 1
-                else:
-                    counts["skipped"] += 1
-            except Exception as exc:
-                logger.warning("apply_maintenance_results: edge failed: %s", exc)
+        def apply_edge(e: dict) -> str:
+            _apply_edge(
+                self, e["node_a_id"], e["node_b_id"], e["edge_type"], e.get("reason", ""),
+                similarity=0.0,
+            )
+            return "skipped" if e["edge_type"] == "none" else "edges"
 
-        for m in results.get("merges", []):
-            try:
-                self.execute_merge(
-                    m["keep_id"],
-                    m["discard_id"],
-                    merged_content=m.get("merged_content"),
-                    merged_title=m.get("merged_title"),
-                )
-                counts["merges"] += 1
-            except Exception as exc:
-                logger.warning("apply_maintenance_results: merge failed: %s", exc)
+        def apply_merge(m: dict) -> str:
+            self.execute_merge(
+                m["keep_id"],
+                m["discard_id"],
+                merged_content=m.get("merged_content"),
+                merged_title=m.get("merged_title"),
+            )
+            return "merges"
 
-        for c in results.get("consolidations", []):
-            try:
-                _apply_consolidation(
-                    self,
-                    c["node_ids"],
-                    c["title"],
-                    c["content"],
-                    c.get("type", "fact"),
-                )
-                counts["consolidations"] += 1
-            except Exception as exc:
-                logger.warning("apply_maintenance_results: consolidation failed: %s", exc)
+        def apply_consolidation(c: dict) -> str:
+            _apply_consolidation(self, c["node_ids"], c["title"], c["content"], c.get("type", "fact"))
+            return "consolidations"
+
+        kinds = (
+            ("edge", "edges", lambda e: [e["node_a_id"], e["node_b_id"]], apply_edge),
+            ("merge", "merges", lambda m: [m["keep_id"], m["discard_id"]], apply_merge),
+            ("consolidation", "consolidations", lambda c: list(c["node_ids"]), apply_consolidation),
+        )
+        for kind, key, ids_of, apply in kinds:
+            for item in results.get(key, []):
+                ids: list = []
+                try:
+                    ids = ids_of(item)
+                    reason = self._maintenance_item_rejection(ids, issued_ids)
+                    if reason is None:
+                        summary[apply(item)] += 1
+                        continue
+                except Exception as exc:
+                    reason = f"{type(exc).__name__}: {exc}"
+                summary["errors"].append({"kind": kind, "ids": ids, "reason": reason})
+                logger.warning("apply_maintenance_results: %s %s failed: %s", kind, ids, reason)
 
         # Record completion timestamp — silences maintenance_due signal for interval_hours.
         try:
@@ -2036,7 +2050,19 @@ class MemoryEngine:
         except Exception as exc:
             logger.warning("apply_maintenance_results: failed to record timestamp: %s", exc)
 
-        return counts
+        return summary
+
+    def _maintenance_item_rejection(self, ids: list, issued_ids: set[str] | None) -> str | None:
+        """Why a Phase 2 item naming *ids* must not apply, or None when it can."""
+        if issued_ids is not None:
+            outside = [str(i) for i in ids if i not in issued_ids]
+            if outside:
+                return f"not in the issued batch: {', '.join(outside)}"
+        # Checked per item, after earlier items applied: a merge may have removed a node.
+        missing = [i for i in ids if self.graph.get_node(i) is None]
+        if missing:
+            return f"node not found: {', '.join(map(str, missing))}"
+        return None
 
     @staticmethod
     def _pick_keeper(a: MemoryNode, b: MemoryNode) -> tuple[MemoryNode, MemoryNode]:

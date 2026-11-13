@@ -62,7 +62,7 @@ class WorkQueue:
             raise RuntimeError("synthetic preparation failure")
         return {"summary": f"batch {self.batch_count}", "link_candidates": []}
 
-    def apply_maintenance_results(self, results):
+    def apply_maintenance_results(self, results, issued=None):
         self.applied.append(copy.deepcopy(results))
         self.apply_started.set()
         assert self.release_apply.wait(5), "test did not release application"

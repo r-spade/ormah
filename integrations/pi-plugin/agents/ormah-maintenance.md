@@ -59,6 +59,10 @@ a server restart, discard stale analysis and stop; do not retry or acquire in a 
 Submit `{"job_id": "<receipt>", "results": {}}` even when there is nothing to change.
 If results are already applying, poll that job_id instead of resubmitting. Report
 completion only when the tool confirms successful application.
+Copy each node id exactly as Phase 1 shows it: an item naming an id outside the
+batches, or a node that no longer exists, is rejected and changes nothing. The
+summary lists each rejected or failed item in `errors` as `{kind, ids, reason}`;
+report every one of them.
 
 ## Decision rules
 
