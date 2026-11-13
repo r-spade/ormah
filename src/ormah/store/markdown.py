@@ -95,11 +95,11 @@ def serialize_node(node: MemoryNode) -> str:
 
 
 def _parse_dt(value: str | datetime) -> datetime:
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if not isinstance(value, datetime):
+        value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _format_dt(dt: datetime) -> str:
