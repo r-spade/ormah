@@ -10,8 +10,8 @@ The core entity. Every memory is a `MemoryNode` (`models/node.py`).
 
 ```yaml
 # Identity
-id: UUID                    # Unique identifier
-short_id: str               # First UUID segment (e.g., "97acbe8e") - property
+id: UUID                    # Unique identifier: the node's identity everywhere
+short_id: str               # First UUID segment (e.g., "97acbe8e") - property; filename suffix only, NOT unique
 
 # Classification
 type: NodeType              # What kind of memory (see below)
@@ -53,6 +53,32 @@ class Connection(BaseModel):
     edge: EdgeType       # Relationship type (default: related_to)
     weight: float        # Strength 0.0-1.0 (default: 0.5)
 ```
+
+### Node references (#280)
+
+The full id is the only identity. Everything Ormah writes (edges, markdown
+`connections`, `audit_log`, `auto_link_checked`, `merge_history`, feedback rows)
+names a full id, and everything an agent is expected to act on shows one.
+
+A short id is the first 8 characters of a full id. Two memories can share it: the
+chance that some pair in a store does is about 0.3% at 5,000 memories, 1.7% at
+12,000 and 25% at 50,000. It is still accepted as an input alias, because older
+transcripts contain it, but every entry point resolves it first through
+`MemoryEngine.resolve_node_reference` (`engine/node_reference.py`):
+
+- an exact id always wins;
+- otherwise a prefix of **at least 8 characters** is looked up; the index must
+  find at most one memory under it, and for exactly 8 characters the file store
+  must agree as well (a saved, not-yet-indexed file can share the short id);
+- anything shorter than 8 characters is refused, even when it happens to be unique.
+
+The outcome is one of three: resolved to one full id; absent ("not found"); or
+unresolved (ambiguous, too short, or a candidate file that will not parse). An
+unresolved reference is never treated as absence and never acted on: engine
+mutators raise `UnresolvedNodeReference` with nothing written, the HTTP routes
+answer 409 listing the candidate full ids, `remember`/`update` links that do not
+resolve are skipped and reported, and maintenance decisions naming one are not
+applied.
 
 ## Node Types (10 types)
 

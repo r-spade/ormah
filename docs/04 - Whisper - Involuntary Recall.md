@@ -146,7 +146,8 @@ Current output format:
 - heading: `# Ormah whispers`
 - ranked flat list of memories
 - top `2` results include content, capped at `whisper_injected_content_max_chars` (default `600`) at a word boundary — the full node stays one `recall_node` call away
-- remaining results include title, type, and short id only
+- remaining results include title, type, and the node's full id only
+- every entry carries the full 36-character node id, plus `whisper_log_id` when the whisper was logged for a session. Whispers used to show the 8-character short id; that prefix is not unique across a store (#280), so agents now get the id they should pass back to tools. A short id from an older transcript is still accepted as input, but only when it names exactly one memory.
 
 There is no current formatter that splits output into `About the User`, `Core Memories`, and `Project` sections.
 
@@ -158,15 +159,15 @@ The most relevant memories are shown in full. The rest are titles only. If any
 memory looks relevant or interesting, use recall with its node ID to get the
 full content and related memories.
 
-- **[decision]** Ormah uses FastAPI + SQLite with hybrid search (id: 97acbe8e)
+- **[decision]** Ormah uses FastAPI + SQLite with hybrid search (id: 97acbe8e-5b1c-4d2e-9f30-6a7b8c9d0e1f, whisper_log_id: 4211)
   Ormah serves FastAPI routes, persists markdown nodes locally, and derives a
   SQLite index with FTS5 and vector search.
 
-- **[fact]** Whisper eval runner seeds an isolated DB (id: a1b2c3d4)
+- **[fact]** Whisper eval runner seeds an isolated DB (id: a1b2c3d4-0e1f-4a2b-8c3d-4e5f6a7b8c9d, whisper_log_id: 4212)
   The eval pipeline builds an isolated engine, runs whisper, and records
   injected ids for scoring.
 
-- **[concept]** Session watcher ingests transcript files into memory (id: e5f6g7h8)
+- **[concept]** Session watcher ingests transcript files into memory (id: e5f6a7b8-1c2d-4e3f-a4b5-c6d7e8f9a0b1, whisper_log_id: 4213)
 
 maintenance_due
 ```
