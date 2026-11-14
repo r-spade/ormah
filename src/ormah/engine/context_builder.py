@@ -1014,15 +1014,16 @@ class ContextBuilder:
         for i, r in enumerate(search_results):
             node = r["node"]
             node_id = node.get("id", "")
-            short_id = node_id[:8] if node_id else ""
             content_preview = node.get("content", "")
             title = node.get("title") or (content_preview[:60].strip() + ("…" if len(content_preview) > 60 else ""))
             node_type = node.get("type", "fact")
             event_id = whisper_log_ids.get(node_id)
-            if short_id and event_id is not None:
-                id_suffix = f" (id: {short_id}, whisper_log_id: {event_id})"
+            # The Full id, never its 8-character prefix: agents pass this id back to
+            # tools, and a prefix is not unique across a store (#280).
+            if node_id and event_id is not None:
+                id_suffix = f" (id: {node_id}, whisper_log_id: {event_id})"
             else:
-                id_suffix = f" (id: {short_id})" if short_id else ""
+                id_suffix = f" (id: {node_id})" if node_id else ""
             marker = "[exploring]" if r.get("_exploration") else f"[{node_type}]"
 
             lines.append(f"- **{marker}** {title}{id_suffix}")

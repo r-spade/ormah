@@ -359,15 +359,18 @@ class TestRememberLinks:
 
 
 class TestMerge:
-    def test_unique_short_ids_record_full_ids(self, nodes):
+    def test_unique_short_ids_record_full_ids_and_report_them(self, nodes):
         result = nodes.execute_merge(UNIQUE, OTHER_ID[:8])
 
         assert result.startswith("Merged")
         row = nodes.db.conn.execute("SELECT * FROM merge_history").fetchone()
         assert {row["kept_node_id"], row["removed_node_id"]} == {UNIQUE_ID, OTHER_ID}
+        assert UNIQUE_ID in result and OTHER_ID in result
+        assert row["id"] in result
 
         undo = nodes.undo_merge(row["id"][:8])
-        assert undo.startswith("Undone merge")
+        assert row["id"] in undo
+        assert row["removed_node_id"] in undo
 
     @pytest.mark.parametrize("which", [0, 1])
     def test_ambiguous_short_id_merges_nothing(self, nodes, which):
@@ -536,6 +539,13 @@ class TestRecallNode:
     def test_absent_full_id_is_not_found(self, nodes):
         assert nodes.recall_node(ABSENT_ID) is None
 
+    def test_neighbors_are_listed_by_full_id(self, nodes):
+        nodes.connect(ConnectRequest(source_id=UNIQUE_ID, target_id=OTHER_ID))
+
+        text = nodes.recall_node(UNIQUE_ID)
+
+        assert f"(id: {OTHER_ID}" in text
+
 
 # --- submit_feedback ------------------------------------------------------
 
@@ -557,7 +567,7 @@ class TestSubmitFeedback:
 
         result = nodes.submit_feedback(UNIQUE, 1, "implicit")
 
-        assert result.startswith("Feedback recorded")
+        assert UNIQUE_ID in result
         rows = nodes.db.conn.execute("SELECT node_id FROM affinity").fetchall()
         assert [r["node_id"] for r in rows] == [UNIQUE_ID]
         signals = nodes.db.conn.execute("SELECT node_id FROM signals").fetchall()
@@ -577,10 +587,26 @@ class TestSubmitFeedback:
     def test_whisper_log_id_pins_the_event_even_for_a_colliding_short_id(self, nodes):
         log_id = _log_whisper(nodes, COLLIDER_A)
 
-        nodes.submit_feedback(AMBIGUOUS, 1, "implicit", whisper_log_id=log_id)
+        result = nodes.submit_feedback(AMBIGUOUS, 1, "implicit", whisper_log_id=log_id)
 
+        assert COLLIDER_A in result
         rows = nodes.db.conn.execute("SELECT node_id FROM affinity").fetchall()
         assert [r["node_id"] for r in rows] == [COLLIDER_A]
+
+    def test_ambiguity_message_lists_full_ids(self, nodes):
+        _log_whisper(nodes, COLLIDER_A)
+        _log_whisper(nodes, COLLIDER_B)
+
+        result = nodes.submit_feedback(AMBIGUOUS, 1, "implicit")
+
+        assert COLLIDER_A in result and COLLIDER_B in result
+
+    def test_mismatched_whisper_log_id_names_the_full_id(self, nodes):
+        log_id = _log_whisper(nodes, UNIQUE_ID)
+
+        result = nodes.submit_feedback(OTHER_ID, 1, "implicit", whisper_log_id=log_id)
+
+        assert UNIQUE_ID in result
 
     def test_absent_full_id_is_not_found(self, nodes):
         result = nodes.submit_feedback(ABSENT_ID, 1, "implicit")

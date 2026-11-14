@@ -422,7 +422,7 @@ def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, request: Re
                     target_id=node_ids[1],
                     edge_type=EdgeType.contradicts,
                 ))
-                conflict_result = f"Created contradicts edge between {node_ids[0][:8]} and {node_ids[1][:8]}"
+                conflict_result = f"Created contradicts edge between {node_ids[0]} and {node_ids[1]}"
         except Exception:
             logger.exception("Failed to create contradicts edge for proposal %s", proposal_id)
             conflict_result = "Failed to create contradicts edge"

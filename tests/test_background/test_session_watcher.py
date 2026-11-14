@@ -2590,3 +2590,49 @@ def test_one_failing_node_does_not_skip_the_rest_of_the_batch(engine, tmp_path):
     assert _lifecycle(engine, second_id) != before_second, (
         "the first node's failure skipped the second node's reinforcement"
     )
+
+
+# --- Usage detection by node id (#280) --------------------------------------
+
+_USAGE_ROW = {
+    "node_id": "97acbe8e-1234-4abc-8def-0123456789ab",
+    "title": "Qq",
+    "content": "",
+    "prompt_text": "",
+}
+
+
+def test_usage_detection_matches_the_full_id():
+    from ormah.background.session_watcher import _node_usage_evidence
+
+    response = "Per memory 97acbe8e-1234-4abc-8def-0123456789ab, the port is fixed."
+
+    referenced, strength, evidence = _node_usage_evidence(_USAGE_ROW, response)
+
+    assert referenced and strength == 1.0
+    assert evidence == {
+        "match": "node_id",
+        "node_id": _USAGE_ROW["node_id"],
+        "short_id": "97acbe8e",
+    }
+
+
+def test_usage_detection_still_matches_a_legacy_short_id():
+    """Transcripts from before the whisper showed Full ids cite the 8-character prefix."""
+    from ormah.background.session_watcher import _node_usage_evidence
+
+    referenced, strength, evidence = _node_usage_evidence(
+        _USAGE_ROW, "As memory 97ACBE8E says, the port is fixed."
+    )
+
+    assert referenced and strength == 1.0
+    assert evidence == {"match": "node_id", "short_id": "97acbe8e"}
+
+
+def test_usage_detection_ignores_an_unrelated_response():
+    from ormah.background.session_watcher import _node_usage_evidence
+
+    referenced, _, evidence = _node_usage_evidence(_USAGE_ROW, "Nothing relevant here.")
+
+    assert not referenced
+    assert evidence["match"] == "none"

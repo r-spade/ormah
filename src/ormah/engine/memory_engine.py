@@ -1913,9 +1913,9 @@ class MemoryEngine:
         kept_title = kept.title or kept.content[:60]
         removed_title = removed.title or removed.content[:60]
         return (
-            f"Merged: kept \"{kept_title}\" ({kept.id[:8]}), "
-            f"removed \"{removed_title}\" ({removed.id[:8]}). "
-            f"Merge ID: {merge_id[:8]}"
+            f"Merged: kept \"{kept_title}\" ({kept.id}), "
+            f"removed \"{removed_title}\" ({removed.id}). "
+            f"Merge ID: {merge_id}"
         )
 
     @_serialized_memory_operation
@@ -1944,7 +1944,7 @@ class MemoryEngine:
         if row is None:
             return f"Merge {merge_id} not found."
         if row["undone_at"] is not None:
-            return f"Merge {row['id'][:8]} was already undone at {row['undone_at']}."
+            return f"Merge {row['id']} was already undone at {row['undone_at']}."
 
         # Reconstruct removed node from snapshot
         snapshot = json.loads(row["removed_node_snapshot"])
@@ -1994,7 +1994,7 @@ class MemoryEngine:
             )
 
         title = node.title or node.content[:60]
-        return f"Undone merge {row['id'][:8]}: restored \"{title}\" ({node.id[:8]})"
+        return f"Undone merge {row['id']}: restored \"{title}\" ({node.id})"
 
     def list_merges(self, limit: int = 20) -> list[dict]:
         """List recent merge history."""
@@ -2724,7 +2724,7 @@ class MemoryEngine:
                     continue
 
                 other = self.graph.get_node(match["id"])
-                title = (other.get("title") or other.get("content", "")[:50]) if other else match["id"][:8]
+                title = (other.get("title") or other.get("content", "")[:50]) if other else match["id"]
                 links.append((match["id"], title, similarity))
 
             if links:
@@ -2933,7 +2933,7 @@ class MemoryEngine:
         if not matches:
             return None, f"No whisper_log entry found for node {node_id}"
         if len(matches) > 1:
-            matched = ", ".join(row["node_id"][:8] for row in matches)
+            matched = ", ".join(row["node_id"] for row in matches)
             return None, f"Ambiguous node ID prefix {node_id}; matched {matched}"
         return matches[0]["node_id"], None
 
@@ -2968,7 +2968,7 @@ class MemoryEngine:
                     None,
                     None,
                     f"whisper_log_id {whisper_log_id} belongs to node "
-                    f"{resolved_node_id[:8]}..., not {node_id}",
+                    f"{resolved_node_id}, not {node_id}",
                 )
             return resolved_node_id, row, None
 
@@ -3204,7 +3204,7 @@ class MemoryEngine:
         return (
             resolved_node_id,
             became_confirmed,
-            f"Feedback recorded for node {resolved_node_id[:8]}...",
+            f"Feedback recorded for node {resolved_node_id}",
         )
 
     def _is_duplicate_memory(self, content: str) -> bool:
