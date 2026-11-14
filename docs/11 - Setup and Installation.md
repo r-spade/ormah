@@ -231,6 +231,14 @@ ormah server status
 `ormah server stop` also removes the supervised service. Ormah remains stopped
 until `ormah setup` or `ormah server start -d` explicitly enables it again.
 
+Only one server can use a memory directory. If another Ormah server (on any port) already
+owns it, `ormah server start` prints `another Ormah server (pid N, port P) is already using
+<dir>` and exits with status 1, and `ormah server start -d` reports the same instead of
+waiting for health. To run a dev server alongside your real one, give it its own directory:
+`ORMAH_MEMORY_DIR=/tmp/ormah-dev ORMAH_PORT=8790 ormah server start`. A supervised service
+that loses this race keeps retrying and takes over once the other server exits. See
+[storage](<02 - Storage Layer.md>).
+
 Health checks:
 
 ```bash
@@ -275,4 +283,5 @@ Typical first-time setup:
 
 - `src/ormah/setup.py`
 - `src/ormah/server_manager.py`
+- `src/ormah/server_lock.py`
 - `src/ormah/cli.py`
