@@ -330,3 +330,19 @@ def test_restart_with_autostart_reports_directory_lock_without_installing(capsys
     out = capsys.readouterr().out
     assert "port 9002" in out
     assert "already using" in out
+
+
+def test_restart_with_autostart_raises_the_refusal_when_asked():
+    """`raise_on_refusal` lets the CLI tell a refusal from a server that timed out."""
+    stop_result = server_manager._StopServerResult(found=True, stopped=True)
+    with mock.patch("ormah.server_manager._stop_running_server", return_value=stop_result), \
+         mock.patch("ormah.server_manager.is_port_in_use", return_value=True), \
+         mock.patch("ormah.server_manager.install_autostart") as install, \
+         mock.patch("ormah.server_manager.wait_for_server") as wait:
+        with pytest.raises(server_manager.AutostartRefused, match="still in use"):
+            server_manager.restart_with_autostart(
+                "/abs/path/ormah", raise_on_refusal=True
+            )
+
+    install.assert_not_called()
+    wait.assert_not_called()

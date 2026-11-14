@@ -116,17 +116,29 @@ def _cmd_eval_recall_import(args):
 def _cmd_server_start(args):
     if args.daemon:
         from ormah.console import info, warn
-        from ormah.server_manager import get_ormah_bin_path, restart_with_autostart
+        from ormah.server_manager import (
+            AutostartRefused,
+            get_ormah_bin_path,
+            restart_with_autostart,
+        )
         from ormah.setup import WRAPPER_PATH, generate_server_wrapper
 
         ormah_bin = get_ormah_bin_path()
         if not WRAPPER_PATH.exists():
             generate_server_wrapper(ormah_bin)
-        if not restart_with_autostart(
-            ormah_bin,
-            wrapper_path=str(WRAPPER_PATH),
-            show_progress=True,
-        ):
+        try:
+            started = restart_with_autostart(
+                ormah_bin,
+                wrapper_path=str(WRAPPER_PATH),
+                show_progress=True,
+                raise_on_refusal=True,
+            )
+        except AutostartRefused as exc:
+            # Nothing was launched, so "did not start in time" would be wrong:
+            # say why it was refused and stop.
+            warn(f"Ormah could not start: {exc}")
+            sys.exit(1)
+        if not started:
             warn("Server did not start in time")
             info("Check ~/.local/share/ormah/logs/ormah.log")
             sys.exit(1)

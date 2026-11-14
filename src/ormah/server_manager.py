@@ -398,28 +398,43 @@ def _stop_running_server() -> _StopServerResult:
     return res
 
 
+class AutostartRefused(RuntimeError):
+    """`restart_with_autostart` gave up before launching a server; str() is the reason."""
+
+
 def restart_with_autostart(
     ormah_bin: str,
     wrapper_path: str | None = None,
     *,
     show_progress: bool = False,
+    raise_on_refusal: bool = False,
 ) -> bool:
     """Replace any running server with one owned by launchd/systemd.
 
     A reachable port does not prove that the process is supervised. Stop the
     existing process first and fail closed if ownership cannot be established.
+
+    Returns whether the supervised server became healthy. A refusal before any
+    server is launched prints its reason and returns False; with
+    ``raise_on_refusal`` it raises `AutostartRefused` instead, so a caller can
+    tell "refused, here is why" from "launched but did not become healthy".
     """
-    stop_result = _stop_running_server()
-    if stop_result.failed:
-        print("Could not stop the existing Ormah server; auto-start was not installed.")
+
+    def refuse(reason: str) -> bool:
+        if raise_on_refusal:
+            raise AutostartRefused(reason)
+        print(reason)
         return False
 
+    stop_result = _stop_running_server()
+    if stop_result.failed:
+        return refuse("Could not stop the existing Ormah server; auto-start was not installed.")
+
     if is_port_in_use(settings.host, settings.port):
-        print(
+        return refuse(
             f"Port {settings.port} is still in use after stopping Ormah; "
             "auto-start was not installed."
         )
-        return False
 
     # A server on another port can still own the memory directory. Say so now rather
     # than installing a service that cannot start and waiting minutes for its health.
@@ -428,14 +443,12 @@ def restart_with_autostart(
     try:
         check_available(settings.memory_dir)
     except ServerLockHeld as exc:
-        print(f"{exc} Auto-start was not installed.")
-        return False
+        return refuse(f"{exc} Auto-start was not installed.")
 
     try:
         install_autostart(ormah_bin, wrapper_path=wrapper_path)
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"Could not install Ormah auto-start: {exc}")
-        return False
+        return refuse(f"Could not install Ormah auto-start: {exc}")
 
     return wait_for_server(show_progress=show_progress)
 
