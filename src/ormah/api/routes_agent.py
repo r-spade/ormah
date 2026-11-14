@@ -39,6 +39,21 @@ class TextResponse(BaseModel):
     node_id: str | None = None
 
 
+def _canonical_node_id(engine, node_id: str) -> str:
+    """Resolve a path's node reference to its Full id, or answer for the engine.
+
+    409 when the reference does not name exactly one memory (the detail lists the Full
+    ids of an ambiguous Short id, for the agent to retry with); 404 when no memory has
+    it. The engine resolves again under its own lock, so this is never the only guard.
+    """
+    resolution = engine.resolve_node_reference(node_id)
+    if resolution.problem is not None:
+        raise HTTPException(status_code=409, detail=resolution.problem)
+    if resolution.full_id is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return resolution.full_id
+
+
 @router.post("/remember", response_model=TextResponse)
 def remember(
     req: CreateNodeRequest,
@@ -88,40 +103,52 @@ def recall_node(
 ):
     """Get a specific memory with its connections."""
     engine = request.app.state.engine
+    full_id = _canonical_node_id(engine, node_id)
     try:
-        text = engine.recall_node(node_id, session_id=session_id)
+        text = engine.recall_node(full_id, session_id=session_id)
     except UnresolvedNodeReference as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     if text is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    return TextResponse(text=text, node_id=node_id)
+    return TextResponse(text=text, node_id=full_id)
 
 
 @router.post("/update/{node_id}", response_model=TextResponse)
 def update_node(node_id: str, req: UpdateNodeRequest, request: Request):
     """Update an existing memory."""
     engine = request.app.state.engine
-    text = engine.update_node(node_id, req)
+    full_id = _canonical_node_id(engine, node_id)
+    try:
+        text = engine.update_node(full_id, req)
+    except UnresolvedNodeReference as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if text is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    return TextResponse(text=text, node_id=node_id)
+    return TextResponse(text=text, node_id=full_id)
 
 
 @router.delete("/recall/{node_id}", response_model=TextResponse)
 def delete_node(node_id: str, request: Request):
     """Delete a memory by ID."""
     engine = request.app.state.engine
-    text = engine.delete_node(node_id)
+    full_id = _canonical_node_id(engine, node_id)
+    try:
+        text = engine.delete_node(full_id)
+    except UnresolvedNodeReference as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if text is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    return TextResponse(text=text, node_id=node_id)
+    return TextResponse(text=text, node_id=full_id)
 
 
 @router.post("/connect", response_model=TextResponse)
 def connect(req: ConnectRequest, request: Request):
     """Create a connection between two memories."""
     engine = request.app.state.engine
-    text = engine.connect(req)
+    try:
+        text = engine.connect(req)
+    except UnresolvedNodeReference as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return TextResponse(text=text)
 
 
@@ -215,10 +242,14 @@ def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody | None 
     """Mark a memory as outdated."""
     engine = request.app.state.engine
     reason = body.reason if body else None
-    text = engine.mark_outdated(node_id, reason=reason)
+    full_id = _canonical_node_id(engine, node_id)
+    try:
+        text = engine.mark_outdated(full_id, reason=reason)
+    except UnresolvedNodeReference as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if text is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    return TextResponse(text=text, node_id=node_id)
+    return TextResponse(text=text, node_id=full_id)
 
 
 @router.get("/clients")

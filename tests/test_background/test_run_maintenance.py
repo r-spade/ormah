@@ -195,7 +195,9 @@ class TestApplyMaintenanceResults:
 
     def test_empty_results_ok(self, engine):
         counts = engine.apply_maintenance_results({})
-        assert counts == {"edges": 0, "merges": 0, "consolidations": 0, "skipped": 0}
+        assert counts == {
+            "edges": 0, "merges": 0, "consolidations": 0, "skipped": 0, "unresolved": 0,
+        }
 
 
 class TestGetMaintenanceBatches:

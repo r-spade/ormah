@@ -20,6 +20,7 @@ from ormah.embeddings.runtime import inference_request
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
+from ormah.engine.node_reference import NodeResolution, resolve_node_reference
 from ormah.engine.maintenance_signal import (
     is_maintenance_due_signal,
     maintenance_due_signal,
@@ -554,6 +555,66 @@ class MemoryEngine:
 
     # --- Core operations ---
 
+    def resolve_node_reference(self, reference: str) -> NodeResolution:
+        """Resolve a caller's node reference (Full id or Short id alias) to one Full id.
+
+        Every entry point that writes or reinforces calls this before any side effect,
+        and acts only on `full_id`. See `ormah.engine.node_reference` for the rules.
+        """
+        return resolve_node_reference(self.graph, self.file_store, reference)
+
+    def _load_referenced_node(self, reference: str, action: str) -> MemoryNode | None:
+        """Resolve *reference* and load that memory's file, for an entry point that writes.
+
+        Returns None only for a confirmed absence. Raises `UnresolvedNodeReference`
+        when Ormah cannot tell which memory the reference names, or cannot read the
+        file of the one it names: a refusal is an exception, never a return value a
+        caller could take for success.
+        """
+        resolution = self.resolve_node_reference(reference)
+        if resolution.problem is not None:
+            raise UnresolvedNodeReference(
+                f"Cannot {action} {reference}: {resolution.problem} Nothing was changed."
+            )
+        if resolution.full_id is None:
+            return None
+        try:
+            return self.file_store.resolve(resolution.full_id)
+        except UnresolvedNodeReference as exc:
+            raise UnresolvedNodeReference(
+                f"Cannot {action} {reference}: {exc} Nothing was changed."
+            ) from exc
+
+    def _canonical_connections(
+        self, connections: list[Connection]
+    ) -> tuple[list[Connection], list[str]]:
+        """Resolve each connection target to a Full id; drop and describe the rest.
+
+        A link is an annotation on a memory, not the memory itself, so an alias that
+        does not name exactly one memory is skipped rather than failing the write it
+        rides on. The caller reports each skip back to the agent.
+        """
+        kept: list[Connection] = []
+        skipped: list[str] = []
+        for connection in connections:
+            resolution = self.resolve_node_reference(connection.target)
+            if resolution.full_id is None:
+                skipped.append(
+                    resolution.problem
+                    or f"No memory has the id {connection.target}."
+                )
+                continue
+            kept.append(connection.model_copy(update={"target": resolution.full_id}))
+        return kept, skipped
+
+    @staticmethod
+    def _skipped_links_note(skipped: list[str]) -> str:
+        if not skipped:
+            return ""
+        lines = [f"\nSkipped {len(skipped)} link(s) that did not name exactly one memory:"]
+        lines.extend(f"  - {reason}" for reason in skipped)
+        return "\n".join(lines)
+
     @contextmanager
     def memory_operation(self):
         """Exclude a live graph mutation while a full restore is swapping files."""
@@ -568,13 +629,18 @@ class MemoryEngine:
         if not title and req.content.strip():
             title = _generate_title(req.content)
 
+        # Links arrive as whatever the agent holds, often a Short id from a whisper.
+        # Stored raw, a Short id never became an edge (the index matches Full ids)
+        # and stayed in the markdown as a dangling alias.
+        connections, skipped_links = self._canonical_connections(req.connections)
+
         node = MemoryNode(
             type=req.type,
             tier=req.tier,
             source=req.source or f"agent:{agent_id or 'unknown'}",
             space=req.space,
             tags=req.tags,
-            connections=req.connections,
+            connections=connections,
             title=title,
             content=req.content,
             confidence=req.confidence,
@@ -617,6 +683,7 @@ class MemoryEngine:
             formatted += f"\nAuto-linked to {len(auto_links)} related memories:"
             for link_id, link_title, sim in auto_links:
                 formatted += f"\n  → {link_title} ({sim:.0%} similar)"
+        formatted += self._skipped_links_note(skipped_links)
         return node.id, formatted
 
     def _encode_feedback_prompt_vec(self, prompt_text: str) -> bytes:
@@ -711,10 +778,16 @@ class MemoryEngine:
     def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
         """Get a specific node with its neighbors, formatted as text.
 
-        Raises `UnresolvedNodeReference` when `node_id` is a prefix shared by several
-        nodes; its message lists their Full ids.
+        Raises `UnresolvedNodeReference` when `node_id` does not name exactly one
+        memory (see `resolve_node_reference`); for an ambiguous Short id its message
+        lists the Full ids. Nothing is logged or reinforced in that case.
         """
-        node = self.graph.resolve_node(node_id)
+        resolution = self.resolve_node_reference(node_id)
+        if resolution.problem is not None:
+            raise UnresolvedNodeReference(resolution.problem)
+        if resolution.full_id is None:
+            return None
+        node = self.graph.get_node(resolution.full_id)
         if node is None:
             return None
 
@@ -1075,10 +1148,20 @@ class MemoryEngine:
 
     @_serialized_memory_operation
     def update_node(self, node_id: str, req: UpdateNodeRequest) -> str | None:
-        """Update a memory node. Returns formatted confirmation or None."""
-        node = self.file_store.load(node_id)
+        """Update a memory node. Returns formatted confirmation or None.
+
+        None means confirmed absence. Raises `UnresolvedNodeReference`, having changed
+        nothing, when `node_id` does not name exactly one memory.
+        """
+        node = self._load_referenced_node(node_id, "update")
         if node is None:
             return None
+        node_id = node.id
+
+        skipped_links: list[str] = []
+        add_connections = req.add_connections
+        if add_connections:
+            add_connections, skipped_links = self._canonical_connections(add_connections)
 
         # Snapshot old state and track changed fields for audit
         old_snapshot = node.model_dump(mode="json")
@@ -1103,14 +1186,18 @@ class MemoryEngine:
             node.confidence = req.confidence
         if req.valid_until is not None:
             node.valid_until = req.valid_until
-        if req.add_connections:
-            node.connections.extend(req.add_connections)
+        if add_connections:
+            node.connections.extend(add_connections)
             changed_fields.append("connections")
+        skipped_note = self._skipped_links_note(skipped_links)
 
         # No-op guard: a request that changed nothing must not advance
         # `updated`, or it could beat a real remote edit under LWW sync.
         if node.model_dump(mode="json") == old_snapshot:
-            return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
+            return (
+                f"Updated [{node.type.value}]: {node.title or node.content[:80]}\n"
+                f"ID: {node.id}{skipped_note}"
+            )
 
         node.touch_updated()
         path = self.file_store.save(node)
@@ -1133,22 +1220,40 @@ class MemoryEngine:
             detail=json.dumps({"changed_fields": changed_fields}),
         )
 
-        return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
+        return (
+            f"Updated [{node.type.value}]: {node.title or node.content[:80]}\n"
+            f"ID: {node.id}{skipped_note}"
+        )
 
     @_serialized_memory_operation
     def delete_node(self, node_id: str) -> str | None:
-        """Delete a memory node from disk and index. Returns confirmation or None."""
+        """Delete a memory node from disk and index. Returns confirmation or None.
+
+        None means confirmed absence. Raises `UnresolvedNodeReference`, having deleted
+        nothing, when `node_id` does not name exactly one memory or its file will not
+        parse.
+        """
+        resolution = self.resolve_node_reference(node_id)
+        if resolution.problem is not None:
+            raise UnresolvedNodeReference(
+                f"Cannot delete {node_id}: {resolution.problem} Nothing was deleted."
+            )
+        if resolution.full_id is None:
+            return None
+        reference, node_id = node_id, resolution.full_id
+
         # Load full node from disk for audit snapshot. Only a confirmed absence may
-        # fall back to the index: an ambiguous Short id or an unparseable file is not
-        # one, and the index lookup would pick a row the store could not vouch for.
+        # fall back to the index: an unparseable file is not one, and the index
+        # lookup would remove a row the store could not vouch for.
         try:
             full_node = self.file_store.resolve(node_id)
         except UnresolvedNodeReference as exc:
-            return f"Cannot delete {node_id}: {exc} Nothing was deleted."
+            raise UnresolvedNodeReference(
+                f"Cannot delete {reference}: {exc} Nothing was deleted."
+            ) from exc
         if full_node is None:
-            # Fall back to graph index to check existence. Exact Full id only:
-            # `get_node` still answers a unique prefix, and the store has just
-            # confirmed that no file holds this reference.
+            # Fall back to graph index to check existence. Exact Full id only: the
+            # store has just confirmed that no file holds it.
             node = self.graph.get_node(node_id)
             if node is None or node["id"] != node_id:
                 return None
@@ -1188,12 +1293,27 @@ class MemoryEngine:
 
     @_serialized_memory_operation
     def connect(self, req: ConnectRequest) -> str:
-        """Create an edge between two nodes."""
-        # Verify both nodes exist
-        if self.graph.get_node(req.source_id) is None:
-            return f"Source node {req.source_id} not found."
-        if self.graph.get_node(req.target_id) is None:
-            return f"Target node {req.target_id} not found."
+        """Create an edge between two nodes.
+
+        Both ends are resolved to Full ids before anything is written; the edge row and
+        the source's markdown connection name those, never the caller's alias. An end
+        that does not name exactly one memory raises `UnresolvedNodeReference`, having
+        written nothing; an absent end returns "<Source|Target> node X not found.".
+        """
+        resolved: list[str] = []
+        for label, reference in (("Source", req.source_id), ("Target", req.target_id)):
+            resolution = self.resolve_node_reference(reference)
+            if resolution.problem is not None:
+                raise UnresolvedNodeReference(
+                    f"Cannot connect: {label.lower()} {resolution.problem} "
+                    "Nothing was connected."
+                )
+            # The edge row needs both ends in the index (foreign keys), so a file that
+            # is not indexed yet is as good as absent here.
+            if resolution.full_id is None or self.graph.get_node(resolution.full_id) is None:
+                return f"{label} node {reference} not found."
+            resolved.append(resolution.full_id)
+        source_id, target_id = resolved
 
         with self.db.transaction() as conn:
             conn.execute(
@@ -1202,8 +1322,8 @@ class MemoryEngine:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    req.source_id,
-                    req.target_id,
+                    source_id,
+                    target_id,
                     req.edge.value,
                     req.weight,
                     datetime.now(timezone.utc).isoformat(),
@@ -1211,17 +1331,15 @@ class MemoryEngine:
             )
 
         # Also update the source node's markdown file
-        source_node = self.file_store.load(req.source_id)
+        source_node = self.file_store.load(source_id)
         if source_node:
-            from ormah.models.node import Connection
-
             source_node.connections.append(
-                Connection(target=req.target_id, edge=req.edge, weight=req.weight)
+                Connection(target=target_id, edge=req.edge, weight=req.weight)
             )
             source_node.touch_updated()
             self.file_store.save(source_node)
 
-        return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
+        return f"Connected {source_id} →[{req.edge.value}]→ {target_id}"
 
     @inference_request("general")
     def get_whisper_context(
@@ -1309,10 +1427,15 @@ class MemoryEngine:
 
     @_serialized_memory_operation
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:
-        """Mark a memory as outdated: set valid_until to now, optionally append reason."""
-        node = self.file_store.load(node_id)
+        """Mark a memory as outdated: set valid_until to now, optionally append reason.
+
+        None means confirmed absence. Raises `UnresolvedNodeReference`, having changed
+        nothing, when `node_id` does not name exactly one memory.
+        """
+        node = self._load_referenced_node(node_id, "mark outdated")
         if node is None:
             return None
+        node_id = node.id
 
         # Snapshot for audit
         old_valid_until = node.valid_until.isoformat() if node.valid_until else None
@@ -1539,13 +1662,26 @@ class MemoryEngine:
         When *merged_content* or *merged_title* are provided (typically from an
         LLM-based merge), the kept node's content/title are overwritten so that
         details from both nodes are preserved.
+
+        Both references are resolved to Full ids first. One that does not name exactly
+        one memory raises `UnresolvedNodeReference`; two that name the same memory raise
+        `ValueError`. Either way nothing is merged. An absent memory still returns
+        "Node X not found.".
         """
-        node_a = self.file_store.load(node_id_a)
-        node_b = self.file_store.load(node_id_b)
-        if node_a is None:
-            return f"Node {node_id_a} not found."
-        if node_b is None:
-            return f"Node {node_id_b} not found."
+        loaded: list[MemoryNode] = []
+        for reference in (node_id_a, node_id_b):
+            node = self._load_referenced_node(reference, "merge")
+            if node is None:
+                return f"Node {reference} not found."
+            loaded.append(node)
+        node_a, node_b = loaded
+        if node_a.id == node_b.id:
+            # A Short id and the Full id of one memory now resolve to the same node.
+            # Merging it into itself would soft-delete the only copy.
+            raise ValueError(
+                f"Cannot merge {node_id_a} with {node_id_b}: both name the memory "
+                f"{node_a.id}. Nothing was merged."
+            )
 
         kept, removed = self._pick_keeper(node_a, node_b)
 
@@ -1784,15 +1920,27 @@ class MemoryEngine:
 
     @_serialized_memory_operation
     def undo_merge(self, merge_id: str) -> str:
-        """Rollback a merge by ID (supports prefix match). Returns confirmation."""
-        # Support prefix match
+        """Rollback a merge by ID (supports prefix match). Returns confirmation.
+
+        A prefix must name exactly one merge: an ambiguous one undoes nothing and lists
+        the full merge IDs to retry with.
+        """
         row = self.db.conn.execute(
             "SELECT * FROM merge_history WHERE id = ?", (merge_id,)
         ).fetchone()
-        if row is None:
-            row = self.db.conn.execute(
-                "SELECT * FROM merge_history WHERE id LIKE ?", (merge_id + "%",)
-            ).fetchone()
+        if row is None and merge_id and not any(ch in merge_id for ch in "%_\\"):
+            rows = self.db.conn.execute(
+                "SELECT * FROM merge_history WHERE id LIKE ? ORDER BY id LIMIT 6",
+                (merge_id + "%",),
+            ).fetchall()
+            if len(rows) > 1:
+                shown = ", ".join(r["id"] for r in rows[:5])
+                more = ", ..." if len(rows) > 5 else ""
+                return (
+                    f"Merge reference {merge_id} is ambiguous: it matches {shown}{more}. "
+                    "Retry with one of these full merge IDs. Nothing was undone."
+                )
+            row = rows[0] if rows else None
         if row is None:
             return f"Merge {merge_id} not found."
         if row["undone_at"] is not None:
@@ -1977,18 +2125,42 @@ class MemoryEngine:
         Phase 2 of the ``run_maintenance`` two-call protocol.  Accepts
         ``results`` as returned by Claude (edges, merges, consolidations) and
         applies each decision, returning counts.
+
+        The ids come back from an agent, so each decision's ids are resolved to Full
+        ids first. A decision naming any id that does not resolve to exactly one memory
+        is not applied at all and is counted under ``unresolved``.
         """
         from ormah.background.auto_linker import _apply_edge
         from ormah.background.consolidator import _apply_consolidation
 
-        counts: dict[str, int] = {"edges": 0, "merges": 0, "consolidations": 0, "skipped": 0}
+        counts: dict[str, int] = {
+            "edges": 0, "merges": 0, "consolidations": 0, "skipped": 0, "unresolved": 0,
+        }
+
+        def canonical(kind: str, references: list[str]) -> list[str] | None:
+            full_ids: list[str] = []
+            for reference in references:
+                resolution = self.resolve_node_reference(reference)
+                if resolution.full_id is None:
+                    logger.warning(
+                        "apply_maintenance_results: %s not applied: %s",
+                        kind,
+                        resolution.problem or f"no memory has the id {reference}",
+                    )
+                    counts["unresolved"] += 1
+                    return None
+                full_ids.append(resolution.full_id)
+            return full_ids
 
         for e in results.get("edges", []):
             try:
+                ids = canonical("edge", [e["node_a_id"], e["node_b_id"]])
+                if ids is None:
+                    continue
                 _apply_edge(
                     self,
-                    e["node_a_id"],
-                    e["node_b_id"],
+                    ids[0],
+                    ids[1],
                     e["edge_type"],
                     e.get("reason", ""),
                     similarity=0.0,
@@ -2002,9 +2174,12 @@ class MemoryEngine:
 
         for m in results.get("merges", []):
             try:
+                ids = canonical("merge", [m["keep_id"], m["discard_id"]])
+                if ids is None:
+                    continue
                 self.execute_merge(
-                    m["keep_id"],
-                    m["discard_id"],
+                    ids[0],
+                    ids[1],
                     merged_content=m.get("merged_content"),
                     merged_title=m.get("merged_title"),
                 )
@@ -2014,9 +2189,12 @@ class MemoryEngine:
 
         for c in results.get("consolidations", []):
             try:
+                ids = canonical("consolidation", list(c["node_ids"]))
+                if ids is None:
+                    continue
                 _apply_consolidation(
                     self,
-                    c["node_ids"],
+                    ids,
                     c["title"],
                     c["content"],
                     c.get("type", "fact"),
@@ -2797,6 +2975,15 @@ class MemoryEngine:
         resolved_node_id, error = self._resolve_feedback_node_id(node_id)
         if error is not None:
             return None, None, error
+        if resolved_node_id != node_id:
+            # Matched by prefix. whisper_log only knows the memories that were surfaced,
+            # so a prefix unique there can still be shared by a memory that was not —
+            # and the agent may mean that one. Feedback reinforces, so it waits for an
+            # alias that names one memory.
+            try:
+                self.graph.resolve_node(node_id)
+            except UnresolvedNodeReference as exc:
+                return None, None, f"{exc} No feedback was recorded."
 
         row = self.db.conn.execute(
             """
