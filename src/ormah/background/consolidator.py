@@ -6,6 +6,7 @@ import json
 import logging
 
 from ormah.background.memory_lock import serialized_memory_job
+from ormah.store.file_store import UnresolvedNodeReference
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,12 @@ def _apply_consolidation(
         except Exception:
             pass
         engine._mark_superseded(node_id, new_id)
-        engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+        try:
+            engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+        except UnresolvedNodeReference as exc:
+            # The source's file will not parse. Skip its demotion, as the nullable
+            # load this replaced did, and keep demoting the rest of the cluster.
+            logger.warning("Consolidation could not demote %s: %s", node_id, exc)
 
     return new_id
 

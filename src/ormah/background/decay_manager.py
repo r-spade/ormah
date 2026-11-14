@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from ormah import lifecycle
 from ormah.background.memory_lock import serialized_memory_job
 from ormah.models.node import Tier, UpdateNodeRequest
+from ormah.store.file_store import UnresolvedNodeReference
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,13 @@ def run_decay(engine) -> None:
             if retrievability >= r_threshold:
                 continue
 
-            result = engine.update_node(row["id"], UpdateNodeRequest(tier=Tier.archival))
+            try:
+                result = engine.update_node(row["id"], UpdateNodeRequest(tier=Tier.archival))
+            except UnresolvedNodeReference as exc:
+                # Its file will not parse: not demoted, and not counted as demoted.
+                # One unreadable file must not end the run for every other node.
+                logger.warning("Decay manager could not demote %s: %s", row["id"], exc)
+                continue
             if result:
                 demoted += 1
 

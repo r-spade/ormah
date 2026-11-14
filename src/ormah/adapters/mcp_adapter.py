@@ -330,7 +330,7 @@ async def _dispatch(
             merge_result = data.get("merge_result")
             if merge_result:
                 return str(merge_result)
-            return f"Proposal {pid[:8]} {status}."
+            return f"Proposal {pid} {status}."
 
         elif name == "list_merges":
             params = {}
@@ -346,7 +346,7 @@ async def _dispatch(
             for m in merges:
                 status = "UNDONE" if m["undone_at"] else "active"
                 lines.append(
-                    f"[{status}] Kept: {m['kept_node_id'][:8]}  Removed: {m['removed_node_id'][:8]}\n"
+                    f"[{status}] Kept: {m['kept_node_id']}  Removed: {m['removed_node_id']}\n"
                     f"  Merge ID: {m['id']}\n"
                     f"  Merged at: {m['merged_at']}"
                 )
@@ -369,7 +369,7 @@ async def _dispatch(
             lines = []
             for e in entries:
                 lines.append(
-                    f"[{e['operation']}] Node: {e['node_id'][:8]}...\n"
+                    f"[{e['operation']}] Node: {e['node_id']}\n"
                     f"  ID: {e['id']}\n"
                     f"  Detail: {e.get('detail') or 'N/A'}\n"
                     f"  Performed at: {e['performed_at']}"

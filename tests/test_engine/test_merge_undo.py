@@ -28,7 +28,7 @@ def test_merge_keeps_higher_tier_node(engine):
 
     result = engine.execute_merge(id_a, id_b)
 
-    assert id_a[:8] in result
+    assert id_a in result
     assert "kept" in result
     assert engine.file_store.load(id_a) is not None
     assert engine.file_store.load(id_b) is None

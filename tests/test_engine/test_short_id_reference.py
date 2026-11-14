@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ormah.models.node import CreateNodeRequest, MemoryNode, NodeType, Tier, UpdateNodeRequest
+from ormah.store.file_store import UnresolvedNodeReference
 
 COLLIDING_SHORT_ID = "deadbeef"
 
@@ -62,9 +65,9 @@ def test_delete_by_ambiguous_short_id_mutates_nothing(engine):
     second = _index_collider(engine, "b", "Collider B")
     files_before = _live_files(engine)
 
-    result = engine.delete_node(COLLIDING_SHORT_ID)
+    with pytest.raises(UnresolvedNodeReference, match="ambiguous"):
+        engine.delete_node(COLLIDING_SHORT_ID)
 
-    assert result is not None and not result.startswith("Deleted")
     assert _live_files(engine) == files_before
     assert engine.graph.get_node(first.id) is not None
     assert engine.graph.get_node(second.id) is not None
@@ -81,9 +84,9 @@ def test_delete_of_a_node_whose_file_is_malformed_leaves_the_index_alone(engine)
     engine.file_store._id_cache.clear()  # cold, as after a restart
     engine.file_store._cache_built = False
 
-    result = engine.delete_node(target.id)
+    with pytest.raises(UnresolvedNodeReference):
+        engine.delete_node(target.id)
 
-    assert result is None or not result.startswith("Deleted")
     assert engine.graph.get_node(target.id) is not None
     assert path.exists()
     assert engine.list_audit_log(operation="delete") == []
@@ -97,9 +100,9 @@ def test_delete_by_a_prefix_the_store_does_not_resolve_mutates_nothing(engine):
     second = _index_collider(engine, "b", "Collider B")
     files_before = _live_files(engine)
 
-    result = engine.delete_node(COLLIDING_SHORT_ID[:4])
+    with pytest.raises(UnresolvedNodeReference, match="too short"):
+        engine.delete_node(COLLIDING_SHORT_ID[:4])
 
-    assert result is None or not result.startswith("Deleted")
     assert _live_files(engine) == files_before
     assert engine.graph.get_node(first.id) is not None
     assert engine.graph.get_node(second.id) is not None
