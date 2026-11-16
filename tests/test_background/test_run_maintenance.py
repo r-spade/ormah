@@ -368,7 +368,7 @@ class TestApplyMaintenanceResultsRejects:
         a, b = _seed_similar_nodes(engine, 2)
 
         counts = engine.apply_maintenance_results(
-            {"merges": [{"keep_id": a[:8], "discard_id": b[:8], "merged_content": "both"}]},
+            {"merges": [{"keep_id": a[:8], "discard_id": b[:8]}]},
             issued=_issued(pairs=((a, b),)),
         )
 
