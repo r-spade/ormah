@@ -363,6 +363,17 @@ class TestApplyMaintenanceResultsRejects:
             "SELECT 1 FROM auto_link_checked WHERE node_a = ? OR node_b = ?", (typo, typo)
         ).fetchone() is None
 
+    def test_short_ids_of_issued_nodes_are_in_the_batch(self, engine):
+        # Phase 1 issues Full ids; a submitted id may be a unique id prefix.
+        a, b = _seed_similar_nodes(engine, 2)
+
+        counts = engine.apply_maintenance_results(
+            {"merges": [{"keep_id": a[:8], "discard_id": b[:8], "merged_content": "both"}]},
+            issued=_issued(pairs=((a, b),)),
+        )
+
+        assert (counts["merges"], counts["errors"]) == (1, [])
+
     def test_items_inside_the_issued_batch_still_apply(self, engine):
         a, b, c = _seed_similar_nodes(engine, 3)
 

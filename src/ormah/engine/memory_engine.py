@@ -2055,7 +2055,9 @@ class MemoryEngine:
     def _maintenance_item_rejection(self, ids: list, issued_ids: set[str] | None) -> str | None:
         """Why a Phase 2 item naming *ids* must not apply, or None when it can."""
         if issued_ids is not None:
-            outside = [str(i) for i in ids if i not in issued_ids]
+            # Phase 1 issues Full ids; a submitted id may be a unique id prefix.
+            full = [(self.graph.get_node(i) or {}).get("id", i) for i in ids]
+            outside = [str(i) for i, f in zip(ids, full) if f not in issued_ids]
             if outside:
                 return f"not in the issued batch: {', '.join(outside)}"
         # Checked per item, after earlier items applied: a merge may have removed a node.
