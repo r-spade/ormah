@@ -274,7 +274,7 @@ def test_maintenance_phase2_apply_completes_via_routes(client):
             "summary": "nothing to process",
         }
 
-    def apply_results(results):
+    def apply_results(results, issued=None):
         assert results == {"edges": []}
         return {"edges": 1, "merges": 0, "consolidations": 0, "skipped": 0}
 
