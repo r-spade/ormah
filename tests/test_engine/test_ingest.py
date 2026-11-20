@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import patch
 
 
@@ -173,3 +175,34 @@ class TestIngestTruncation:
         prompt = captured_prompt["prompt"]
         marker_count = prompt.count(marker)
         assert marker_count == 500
+
+
+def test_normal_ingest_keeps_extraction_inside_memory_operation(engine):
+    """Making dry runs concurrent must not let ingestion interleave with restore."""
+    entered = Event()
+    release = Event()
+    attempted = Event()
+    acquired = Event()
+
+    def extract(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return '{"memories": []}'
+
+    def memory_operation():
+        attempted.set()
+        with engine.memory_operation():
+            acquired.set()
+
+    with patch(_LLM_PATCH, side_effect=extract), ThreadPoolExecutor(max_workers=2) as pool:
+        ingestion = pool.submit(engine.ingest_conversation, "A conversation about memory." * 5)
+        try:
+            assert entered.wait(timeout=5)
+            operation = pool.submit(memory_operation)
+            assert attempted.wait(timeout=5)
+            assert not acquired.wait(timeout=0.1)
+        finally:
+            release.set()
+        assert ingestion.result(timeout=5) == []
+        operation.result(timeout=5)
+    assert acquired.is_set()
