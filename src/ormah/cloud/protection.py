@@ -103,7 +103,7 @@ def safe_error_message(value: object, *sensitive_values: str | None) -> str:
     message = str(value)
     message = _URL_RE.sub("<redacted-url>", message)
     message = _QUERY_SECRET_RE.sub(r"\1<redacted>", message)
-    message = _BEARER_RE.sub("Bearer <redacted>", message)
+    message = _BEARER_RE.sub("<redacted-credential>", message)
     message = _AGE_SECRET_RE.sub("<redacted-age-key>", message)
     message = _NODE_PATH_RE.sub(r"\1/<redacted>.md", message)
     for sensitive in sensitive_values:
