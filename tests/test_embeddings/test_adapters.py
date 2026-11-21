@@ -195,20 +195,17 @@ class TestGetEncoderCaching:
 
 
 class TestDimensionMismatch:
-    def test_mismatch_drops_and_recreates(self, tmp_path):
-        """Changing dim should drop and recreate the vec table."""
+    def test_mismatch_on_populated_refuses_then_drops_with_allow(self, tmp_path):
+        """A populated store refuses a dim change; allow_drop authorizes it."""
         from ormah.index.db import Database
 
         db = Database(tmp_path / "index.db")
         db.init_schema()
-
-        # Create with dim=4
         try:
             db.init_vec_table(dim=4)
         except Exception:
             pytest.skip("sqlite-vec not available")
 
-        # Insert a vector
         import struct
 
         vec_bytes = struct.pack("4f", 1.0, 0.0, 0.0, 0.0)
@@ -218,10 +215,10 @@ class TestDimensionMismatch:
         )
         db.conn.commit()
 
-        # Now init with dim=8 — should drop and recreate
-        db.init_vec_table(dim=8)
+        with pytest.raises(RuntimeError, match="dimension mismatch"):
+            db.init_vec_table(dim=8)  # populated + no authorization → refuse
 
-        # Old data should be gone
+        db.init_vec_table(dim=8, allow_drop=True)  # authorized → drop + recreate
         row = db.conn.execute(
             "SELECT id FROM node_vectors WHERE id = 'test-node'"
         ).fetchone()
