@@ -131,6 +131,34 @@ It does **not** start `store.watcher.start_watcher()`.
 - manual node-file edits can be picked up by rebuild or incremental index operations
 - there is currently no app-started live node-file watcher for the node store itself
 
+## One Server Per Memory Directory
+
+Only one Ormah process may own a memory directory at a time. The server keeps an
+in-memory id-to-path cache and an in-process lock that no other process can see, so a
+second server on the same directory (for example a dev server started with a different
+`ORMAH_PORT`) could overwrite or lose writes.
+
+On startup, before the engine is created, the server takes an exclusive, non-blocking OS
+lock on `<memory_dir>/.ormah/server.lock` and holds it until it shuts down. The kernel drops
+the lock if the process dies, so a crash never leaves a stale lock. A second server fails
+immediately with a message like:
+
+```text
+another Ormah server (pid 4242, port 8787, started 2026-11-13T09:00:00+00:00) is already
+using /Users/you/.local/share/ormah/memory. Only one Ormah server can use a memory
+directory at a time. Stop it, or give this one its own directory with ORMAH_MEMORY_DIR.
+```
+
+`.ormah/server.json` records the holder's pid, port and start time so the message can name
+it. It is informational only; the lock is the truth. To run a dev server, give it its own
+directory: `ORMAH_MEMORY_DIR=/tmp/ormah-dev ORMAH_PORT=8790 ormah server start`.
+
+`ormah backup restore` takes the same lock for the duration of the restore, so it refuses
+while any server (on any port) uses the directory, and no server can start mid-restore.
+The lock is separate from `.ormah/store.lock`, which cloud protection takes briefly while
+the server runs. It does not protect against non-Ormah writers such as folder sync or hand
+edits.
+
 ## Walkthrough Example
 
 If you manually edit a node markdown file on disk:
@@ -146,6 +174,7 @@ This is different from hippocampus, which is a separate watcher for external con
 - `src/ormah/store/file_store.py`
 - `src/ormah/store/markdown.py`
 - `src/ormah/store/watcher.py`
+- `src/ormah/server_lock.py`
 - `src/ormah/index/schema.sql`
 - `src/ormah/index/builder.py`
 - `src/ormah/index/graph.py`

@@ -461,3 +461,94 @@ def test_newest_cloud_snapshot_requires_sign_in(tmp_path):
         restore.newest_cloud_snapshot(settings)
 
     assert excinfo.value.reason_code == "sign_in_required"
+
+
+def test_cli_restore_refuses_while_another_server_holds_the_directory(capsys):
+    """A server on a different port is invisible to is_server_running; the lock catches it."""
+    from ormah.cli import main
+    from ormah.config import settings as global_settings
+    from ormah.server_lock import ServerLock
+
+    holder = ServerLock(global_settings.memory_dir, port=9003)
+    holder.acquire()
+    try:
+        with (
+            patch("sys.argv", ["ormah", "backup", "restore", "some-backup", "--yes"]),
+            patch("ormah.server_manager.is_server_running", return_value=False),
+            patch("ormah.cli._backup_service") as service,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+    finally:
+        holder.release()
+
+    assert exc_info.value.code == 1
+    service.return_value.restore.assert_not_called()
+    err = capsys.readouterr().err
+    assert "port 9003" in err
+    assert "already using" in err
+
+
+def test_cli_cloud_restore_refuses_while_another_server_holds_the_directory(capsys):
+    from ormah.cli import main
+    from ormah.config import settings as global_settings
+    from ormah.server_lock import ServerLock
+
+    holder = ServerLock(global_settings.memory_dir, port=9004)
+    holder.acquire()
+    try:
+        with (
+            patch("sys.argv", ["ormah", "backup", "restore", "--cloud", "--yes"]),
+            patch("ormah.server_manager.is_server_running", return_value=False),
+            patch("ormah.cloud.restore.restore_cloud_snapshot") as restore_call,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+    finally:
+        holder.release()
+
+    assert exc_info.value.code == 1
+    restore_call.assert_not_called()
+    assert "port 9004" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", [None, "backup-error"])
+def test_cli_restore_holds_the_lock_during_restore_and_releases_after(tmp_path, failure):
+    from ormah.backup import BackupError
+    from ormah.cli import main
+    from ormah.config import settings as global_settings
+    from ormah.server_lock import ServerLockHeld, check_available
+
+    backup = BackupInfo(
+        name="memory_2026-07-13_12-00-00",
+        path=tmp_path / "backups" / "memory_2026-07-13_12-00-00",
+        created_at=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        node_count=3,
+        deleted_count=1,
+        size_bytes=100,
+    )
+    observed: dict = {}
+
+    def fake_restore(name, rebuild_index=True):
+        try:
+            check_available(global_settings.memory_dir)
+        except ServerLockHeld as exc:
+            observed["during"] = exc
+        if failure:
+            raise BackupError("boom")
+        return RestoreResult(restored=backup, safety_backup=None, rebuilt_nodes=3)
+
+    with (
+        patch("sys.argv", ["ormah", "backup", "restore", "some-backup", "--yes"]),
+        patch("ormah.server_manager.is_server_running", return_value=False),
+        patch("ormah.cli._backup_service") as service,
+    ):
+        service.return_value.restore.side_effect = fake_restore
+        if failure:
+            with pytest.raises(SystemExit):
+                main()
+        else:
+            main()
+
+    assert "restore" in str(observed["during"])
+    check_available(global_settings.memory_dir)

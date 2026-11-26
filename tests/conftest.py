@@ -73,6 +73,21 @@ def prevent_tests_mutating_real_ormah_install(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def keep_global_settings_off_real_memory_dir(monkeypatch, tmp_path_factory):
+    """Point the module-level ``settings`` at a scratch directory.
+
+    CLI and lifespan code lock ``settings.memory_dir`` (one server per directory). A test that
+    reaches that code through the global settings must never lock, or write beside, the
+    developer's real memory directory, where a real server may be running.
+    """
+    from ormah.config import settings as global_settings
+
+    monkeypatch.setattr(
+        global_settings, "memory_dir", tmp_path_factory.mktemp("global_memory")
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolate_settings_from_developer_env(monkeypatch):
     """Keep a checkout ``.env`` and exported ``ORMAH_*`` variables out of every ``Settings()``."""
     monkeypatch.setitem(Settings.model_config, "env_file", None)

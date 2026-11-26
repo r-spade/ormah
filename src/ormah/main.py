@@ -25,6 +25,7 @@ from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.config import settings
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.logging_setup import setup_logging
+from ormah.server_lock import ServerLock, ServerLockHeld
 from ormah.server_manager import LOG_DIR
 
 setup_logging(
@@ -62,6 +63,27 @@ def _initialize_local_admin(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Own the memory directory for the life of the server, then run the app.
+
+    The lock is taken before ``MemoryEngine`` is constructed so a second server pointed at
+    the same directory refuses to start instead of racing the first on the same files. It
+    is released in ``finally`` so a failed startup does not keep the directory locked.
+    """
+    server_lock = ServerLock(settings.memory_dir, port=settings.port)
+    try:
+        server_lock.acquire()
+    except ServerLockHeld as exc:
+        logger.error("%s", exc)
+        raise
+    try:
+        async with _run_server(app):
+            yield
+    finally:
+        server_lock.release()
+
+
+@asynccontextmanager
+async def _run_server(app: FastAPI):
     # Startup
     logger.info("Starting ormah server on port %d...", settings.port)
     _initialize_local_admin(app)

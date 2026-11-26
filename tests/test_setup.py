@@ -1427,7 +1427,34 @@ class TestCliEntryPoint:
             "/abs/path/ormah",
             wrapper_path=str(wrapper),
             show_progress=True,
+            raise_on_refusal=True,
         )
+
+    def test_server_start_daemon_reports_a_refusal_without_the_timeout_message(
+        self, tmp_path, capsys
+    ):
+        from ormah.cli import main
+        from ormah.server_manager import AutostartRefused
+
+        wrapper = tmp_path / "ormah-server"
+        refusal = AutostartRefused(
+            "another Ormah server (pid 1, port 9005) is already using /tmp/m. "
+            "Auto-start was not installed."
+        )
+        with (
+            patch("sys.argv", ["ormah", "server", "start", "-d"]),
+            patch("ormah.setup.WRAPPER_PATH", wrapper),
+            patch("ormah.setup.generate_server_wrapper", return_value=wrapper),
+            patch("ormah.server_manager.get_ormah_bin_path", return_value="/abs/path/ormah"),
+            patch("ormah.server_manager.restart_with_autostart", side_effect=refusal),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "port 9005" in out
+        assert "did not start in time" not in out
 
     def test_claude_md_install_defaults_to_auto_scope(self):
         from ormah.cli import main
