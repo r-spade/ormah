@@ -108,6 +108,10 @@ def _assistant_response_after_prompt(
     return None
 
 
+# What follows the Short id in a Full id: the remaining four groups of the UUID.
+_FULL_ID_TAIL = r"(-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?"
+
+
 def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     """Detect whether an assistant response clearly referenced an injected memory."""
     response_norm = _normalise_text(response_text)
@@ -121,7 +125,15 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     short_id = node_id[:8]
     if node_id and node_id.lower() in response_lower:
         return True, 1.0, {"match": "node_id", "node_id": node_id, "short_id": short_id}
-    if short_id and short_id.lower() in response_lower:
+    # A Short id that opens some other memory's Full id is that memory's citation, not
+    # this one's: two memories can share the Short id, and crediting both would
+    # reinforce the one the response never mentioned.
+    if short_id and any(
+        match.group(1) is None
+        for match in re.finditer(
+            re.escape(short_id.lower()) + _FULL_ID_TAIL, response_lower
+        )
+    ):
         return True, 1.0, {"match": "node_id", "short_id": short_id}
 
     title = row["title"] or ""

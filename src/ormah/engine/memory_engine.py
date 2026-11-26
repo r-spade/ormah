@@ -20,7 +20,13 @@ from ormah.embeddings.runtime import inference_request
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
-from ormah.engine.node_reference import NodeResolution, resolve_node_reference
+from ormah.engine.node_reference import (
+    FULL_ID_LENGTH,
+    PATTERN_CHARACTERS,
+    SHORT_ID_LENGTH,
+    NodeResolution,
+    resolve_node_reference,
+)
 from ormah.engine.maintenance_signal import (
     is_maintenance_due_signal,
     maintenance_due_signal,
@@ -48,6 +54,10 @@ from ormah.store.file_store import FileStore, UnresolvedNodeReference
 from ormah.text.tokens import STOP_WORDS
 
 logger = logging.getLogger(__name__)
+
+# What a maintenance edge decision may carry: a real edge type, or "none" for a pair
+# the agent looked at and chose not to link.
+_MAINTENANCE_EDGE_TYPES = frozenset({"none", *(edge.value for edge in EdgeType)})
 
 # Edge type factors for spreading activation scoring.
 # Higher factor = tighter structural link = more activation propagated.
@@ -596,6 +606,7 @@ class MemoryEngine:
         """
         kept: list[Connection] = []
         skipped: list[str] = []
+        seen: set[tuple[str, EdgeType]] = set()
         for connection in connections:
             resolution = self.resolve_node_reference(connection.target)
             if resolution.full_id is None:
@@ -604,6 +615,10 @@ class MemoryEngine:
                     or f"No memory has the id {connection.target}."
                 )
                 continue
+            # A Short id and the Full id of one memory are the same link.
+            if (resolution.full_id, connection.edge) in seen:
+                continue
+            seen.add((resolution.full_id, connection.edge))
             kept.append(connection.model_copy(update={"target": resolution.full_id}))
         return kept, skipped
 
@@ -1162,6 +1177,13 @@ class MemoryEngine:
         add_connections = req.add_connections
         if add_connections:
             add_connections, skipped_links = self._canonical_connections(add_connections)
+            existing = {(c.target, c.edge) for c in node.connections}
+            if any(c.target == node_id for c in add_connections):
+                skipped_links.append(f"{node_id} is this memory itself.")
+            add_connections = [
+                c for c in add_connections
+                if c.target != node_id and (c.target, c.edge) not in existing
+            ]
 
         # Snapshot old state and track changed fields for audit
         old_snapshot = node.model_dump(mode="json")
@@ -1298,7 +1320,8 @@ class MemoryEngine:
         Both ends are resolved to Full ids before anything is written; the edge row and
         the source's markdown connection name those, never the caller's alias. An end
         that does not name exactly one memory raises `UnresolvedNodeReference`, having
-        written nothing; an absent end returns "<Source|Target> node X not found.".
+        written nothing; an absent end returns "<Source|Target> node X not found.", and
+        two references to the same memory are refused the same way.
         """
         resolved: list[str] = []
         for label, reference in (("Source", req.source_id), ("Target", req.target_id)):
@@ -1314,6 +1337,18 @@ class MemoryEngine:
                 return f"{label} node {reference} not found."
             resolved.append(resolution.full_id)
         source_id, target_id = resolved
+        if source_id == target_id:
+            # Two references to one memory, typically its Short id and its Full id.
+            return f"Cannot connect {source_id} to itself. Nothing was connected."
+
+        # The source's file is read before the edge row is written. Read afterwards, a
+        # file that will not parse left the row in the index with no markdown behind it.
+        try:
+            source_node = self.file_store.resolve(source_id)
+        except UnresolvedNodeReference as exc:
+            raise UnresolvedNodeReference(
+                f"Cannot connect: source {exc} Nothing was connected."
+            ) from exc
 
         with self.db.transaction() as conn:
             conn.execute(
@@ -1330,9 +1365,14 @@ class MemoryEngine:
                 ),
             )
 
-        # Also update the source node's markdown file
-        source_node = self.file_store.load(source_id)
+        # Also update the source node's markdown file. The edge row is keyed by both
+        # ends and the type, so repeating a connection replaces it; the markdown keeps
+        # one entry to match.
         if source_node:
+            source_node.connections = [
+                c for c in source_node.connections
+                if (c.target, c.edge) != (target_id, req.edge)
+            ]
             source_node.connections.append(
                 Connection(target=target_id, edge=req.edge, weight=req.weight)
             )
@@ -1925,10 +1965,16 @@ class MemoryEngine:
         A prefix must name exactly one merge: an ambiguous one undoes nothing and lists
         the full merge IDs to retry with.
         """
+        merge_id = merge_id.strip() if isinstance(merge_id, str) else ""
         row = self.db.conn.execute(
             "SELECT * FROM merge_history WHERE id = ?", (merge_id,)
         ).fetchone()
-        if row is None and merge_id and not any(ch in merge_id for ch in "%_\\"):
+        if row is None and 0 < len(merge_id) < SHORT_ID_LENGTH:
+            return (
+                f"Merge reference {merge_id} is too short to name one merge: "
+                "use the full merge ID. Nothing was undone."
+            )
+        if row is None and merge_id and not any(ch in merge_id for ch in PATTERN_CHARACTERS):
             rows = self.db.conn.execute(
                 "SELECT * FROM merge_history WHERE id LIKE ? ORDER BY id LIMIT 6",
                 (merge_id + "%",),
@@ -2152,10 +2198,48 @@ class MemoryEngine:
                 full_ids.append(resolution.full_id)
             return full_ids
 
-        for e in results.get("edges", []):
+        # Every alias in the batch is pinned to a Full id before any decision is
+        # applied. Resolved one decision at a time, an alias that two memories shared
+        # when the agent wrote it becomes unique once an earlier decision removes one
+        # of them, and the batch would then act on the survivor.
+        def pinned(kind: str, key: str, references) -> list[tuple[dict, list[str]]]:
+            decisions: list[tuple[dict, list[str]]] = []
+            for decision in results.get(key, []):
+                try:
+                    ids = canonical(kind, list(references(decision)))
+                except Exception as exc:
+                    logger.warning("apply_maintenance_results: %s failed: %s", kind, exc)
+                    continue
+                if ids is not None:
+                    decisions.append((decision, ids))
+            return decisions
+
+        edges = pinned("edge", "edges", lambda e: (e["node_a_id"], e["node_b_id"]))
+        merges = pinned("merge", "merges", lambda m: (m["keep_id"], m["discard_id"]))
+        consolidations = pinned("consolidation", "consolidations", lambda c: c["node_ids"])
+
+        # At apply time the pinned Full ids are resolved once more: a memory removed by
+        # an earlier decision in this batch is now absent, and its decision is dropped.
+        for e, pinned_ids in edges:
             try:
-                ids = canonical("edge", [e["node_a_id"], e["node_b_id"]])
+                ids = canonical("edge", pinned_ids)
                 if ids is None:
+                    continue
+                if ids[0] == ids[1]:
+                    logger.warning(
+                        "apply_maintenance_results: edge not applied: "
+                        "both ends name %s", ids[0],
+                    )
+                    counts["skipped"] += 1
+                    continue
+                if e["edge_type"] not in _MAINTENANCE_EDGE_TYPES:
+                    # `_apply_edge` writes the index row before it builds the markdown
+                    # connection, so an unknown type would leave a row nothing backs.
+                    logger.warning(
+                        "apply_maintenance_results: edge not applied: "
+                        "unknown edge type %r", e["edge_type"],
+                    )
+                    counts["skipped"] += 1
                     continue
                 _apply_edge(
                     self,
@@ -2172,9 +2256,9 @@ class MemoryEngine:
             except Exception as exc:
                 logger.warning("apply_maintenance_results: edge failed: %s", exc)
 
-        for m in results.get("merges", []):
+        for m, pinned_ids in merges:
             try:
-                ids = canonical("merge", [m["keep_id"], m["discard_id"]])
+                ids = canonical("merge", pinned_ids)
                 if ids is None:
                     continue
                 self.execute_merge(
@@ -2187,10 +2271,19 @@ class MemoryEngine:
             except Exception as exc:
                 logger.warning("apply_maintenance_results: merge failed: %s", exc)
 
-        for c in results.get("consolidations", []):
+        for c, pinned_ids in consolidations:
             try:
-                ids = canonical("consolidation", list(c["node_ids"]))
+                ids = canonical("consolidation", pinned_ids)
                 if ids is None:
+                    continue
+                # A Short id and the Full id of one memory are one source, not two.
+                ids = list(dict.fromkeys(ids))
+                if len(ids) < 2:
+                    logger.warning(
+                        "apply_maintenance_results: consolidation not applied: "
+                        "it names fewer than two distinct memories",
+                    )
+                    counts["skipped"] += 1
                     continue
                 _apply_consolidation(
                     self,
@@ -2896,6 +2989,44 @@ class MemoryEngine:
                 "Pass pre-extracted memories via the 'memories' parameter instead."
             )
 
+    def _canonical_feedback_reference(
+        self, node_id: str, whisper_log_id: int | None
+    ) -> tuple[str, str | None]:
+        """Apply the node-reference rules to feedback. Returns (reference, refusal).
+
+        Feedback reinforces a memory, so its reference follows the same rules as every
+        other entry point: at least 8 characters, no pattern syntax, and never a guess
+        between two memories. This runs before the feedback transaction opens because
+        the resolver reads the file store, and taking the store's lock inside a
+        database transaction would invert the order every writer uses.
+
+        With a *whisper_log_id* the event itself names the memory, so the reference
+        only has to be that id or a prefix of it at least 8 characters long; that check
+        stays where the event is loaded. Without one, a prefix that names exactly one live memory is replaced by
+        its Full id, so `whisper_log` is then matched exactly and feedback can never
+        land on a different memory that merely shares the prefix. A prefix no live
+        memory has is passed through for the legacy `whisper_log` lookup.
+        """
+        if not isinstance(node_id, str):
+            return "", "The node reference must be a string. No feedback was recorded."
+        reference = node_id.strip().lower()
+        if not reference:
+            return "", "The node reference is empty. No feedback was recorded."
+        if whisper_log_id is None and len(reference) < SHORT_ID_LENGTH:
+            return reference, (
+                f"Node reference {reference} is too short to name one memory: "
+                "use its Full id. No feedback was recorded."
+            )
+        if any(ch in PATTERN_CHARACTERS for ch in reference):
+            return reference, f"No whisper_log entry found for node {reference}"
+        if whisper_log_id is None and len(reference) < FULL_ID_LENGTH:
+            resolution = self.resolve_node_reference(reference)
+            if resolution.problem is not None:
+                return reference, f"{resolution.problem} No feedback was recorded."
+            if resolution.full_id is not None:
+                reference = resolution.full_id
+        return reference, None
+
     def _resolve_feedback_node_id(self, node_id: str) -> tuple[str | None, str | None]:
         """Resolve a feedback node ID against whisper_log.
 
@@ -2961,8 +3092,14 @@ class MemoryEngine:
             if row is None:
                 return None, None, f"No whisper_log entry found for whisper_log_id {whisper_log_id}"
             resolved_node_id = row["node_id"]
+            # The event names the memory; the reference has to be that id or a prefix
+            # of it long enough to be an alias.
             if not node_id or (
-                node_id != resolved_node_id and not resolved_node_id.startswith(node_id)
+                node_id != resolved_node_id
+                and not (
+                    len(node_id) >= SHORT_ID_LENGTH
+                    and resolved_node_id.startswith(node_id)
+                )
             ):
                 return (
                     None,
@@ -3070,6 +3207,9 @@ class MemoryEngine:
         whisper_log_id: int | None = None,
     ) -> str:
         """Record feedback while preventing retention from deleting its event."""
+        node_id, refusal = self._canonical_feedback_reference(node_id, whisper_log_id)
+        if refusal is not None:
+            return refusal
         with self.db.transaction():
             resolved_node_id, became_confirmed, message = self._submit_feedback_locked(
                 node_id=node_id,

@@ -118,7 +118,52 @@ class FileStore:
         path = self._locate(node_id)
         if path is None:
             return None
-        return self._load_path(path)
+        try:
+            return self._load_path(path)
+        except OSError:
+            raise
+        except Exception as exc:
+            # A cached path is trusted on existence alone, so a file that stopped
+            # parsing is first noticed here. It is the same "could not tell" as an
+            # unparseable candidate in `_locate`, and gets the same exception rather
+            # than whatever the parser happened to raise.
+            raise UnresolvedNodeReference(
+                f"Node reference {node_id} names a file that will not parse: {path.name}."
+            ) from exc
+
+    @_serialized_store_operation
+    def ids_with_prefix(self, prefix: str) -> list[str]:
+        """Full ids of every stored node whose id starts with *prefix*, sorted.
+
+        *prefix* is 8 to 35 characters, already lower-cased by the caller. The index
+        answers the same question, but a file saved and not yet indexed is invisible
+        to it, and a prefix is unique only if the store agrees. Filenames end in the
+        Short id, so the glob on its first 8 characters sees every candidate.
+
+        Raises `UnresolvedNodeReference` when a file sharing the Short id will not
+        parse, because that file may be a second match. An OSError propagates.
+        """
+        short_id = prefix[:8]
+        if len(short_id) < 8 or not short_id.isalnum():
+            return []
+        found: set[str] = set()
+        unparseable = False
+        for path in sorted(self.nodes_dir.glob(f"*_{short_id}.md")):
+            try:
+                candidate = self._load_path(path)
+            except OSError:
+                raise
+            except Exception:
+                unparseable = True
+                continue
+            if candidate.id.lower().startswith(prefix):
+                found.add(candidate.id)
+        if unparseable:
+            raise UnresolvedNodeReference(
+                f"Node reference {prefix} shares its Short id with a file that "
+                "will not parse."
+            )
+        return sorted(found)
 
     @_serialized_store_operation
     def delete(self, node_id: str) -> bool:
@@ -391,7 +436,9 @@ class FileStore:
         #    width would force a full directory scan to serve a caller that does not exist.
         short_id = node_id.split("-")[0]
         unparseable = False
-        if len(short_id) == 8:
+        # `isalnum` keeps glob syntax out of the pattern below: a reference such as
+        # `a**bcdef` is not an id, and `**` inside a component makes `glob` raise.
+        if len(short_id) == 8 and short_id.isalnum():
             confirmed: list[tuple[str, Path]] = []
             for path in sorted(self.nodes_dir.glob(f"*_{short_id}.md")):
                 try:

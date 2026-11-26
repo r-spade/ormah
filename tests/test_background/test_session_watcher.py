@@ -2636,3 +2636,30 @@ def test_usage_detection_ignores_an_unrelated_response():
 
     assert not referenced
     assert evidence["match"] == "none"
+
+
+def test_usage_detection_does_not_credit_a_memory_for_another_ones_full_id():
+    """Two memories can share a Short id. A response citing one of them by Full id
+    contains the other's Short id too, and must not count as a citation of it."""
+    from ormah.background.session_watcher import _node_usage_evidence
+
+    response = "Per memory 97acbe8e-9999-4abc-8def-0123456789ff, the port is fixed."
+
+    referenced, _, evidence = _node_usage_evidence(_USAGE_ROW, response)
+
+    assert not referenced
+    assert evidence["match"] == "none"
+
+
+def test_usage_detection_credits_a_bare_short_id_next_to_another_full_id():
+    from ormah.background.session_watcher import _node_usage_evidence
+
+    response = (
+        "Memory 97acbe8e-9999-4abc-8def-0123456789ff is unrelated; "
+        "memory 97acbe8e says the port is fixed."
+    )
+
+    referenced, _, evidence = _node_usage_evidence(_USAGE_ROW, response)
+
+    assert referenced
+    assert evidence == {"match": "node_id", "short_id": "97acbe8e"}

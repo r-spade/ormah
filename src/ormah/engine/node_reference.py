@@ -17,11 +17,14 @@ Resolution has three outcomes, and callers must keep them apart:
 
 Accepted references, and why:
 
-- A Full id, or any id the index holds verbatim (exact match always wins).
-- A prefix of at least 8 characters. The index must find at most one node under it.
-  For exactly the 8-character Short id the file store must agree as well, because a
-  file that is saved but not yet indexed can share it; `FileStore.resolve` reads
-  only that width, since the Short id is what filenames carry.
+- A Full id, or any id the index holds verbatim (exact match always wins). Case is
+  ignored: ids are stored lower-case, and the index's prefix match ignores case
+  anyway, so an upper-case Full id must not be the one form that fails.
+- A prefix of at least 8 characters. The index and the file store must together
+  find exactly one node under it, at every width: a file that is saved but not yet
+  indexed can share any prefix, not only the 8-character Short id.
+- Nothing that is not an id. A reference carrying SQL LIKE or glob syntax is
+  reported absent without being looked up.
 - Nothing shorter. `GraphIndex.resolve_node` would answer any unique prefix, but a
   4-character prefix that happens to be unique today is a guess, the file store
   cannot vouch for it, and Ormah has never shown an agent one.
@@ -41,9 +44,10 @@ if TYPE_CHECKING:
 SHORT_ID_LENGTH = 8
 FULL_ID_LENGTH = 36
 
-# SQLite LIKE metacharacters. No node id contains them, and the index answers a prefix
-# with LIKE, so letting one through would turn a reference into a pattern.
-_LIKE_METACHARACTERS = frozenset("%_\\")
+# SQLite LIKE and glob syntax. No node id contains these, the index answers a prefix
+# with LIKE and the store with a glob, so letting one through would turn a reference
+# into a pattern.
+PATTERN_CHARACTERS = frozenset("%_\\*?[]")
 
 
 @dataclass(frozen=True)
@@ -73,9 +77,16 @@ def resolve_node_reference(
     if not ref:
         return NodeResolution(reference, problem="The node reference is empty.")
 
-    exact = graph.conn.execute("SELECT id FROM nodes WHERE id = ?", (ref,)).fetchone()
-    if exact is not None:
-        return NodeResolution(reference, full_id=exact["id"])
+    for exact_form in dict.fromkeys((ref, ref.lower())):
+        exact = graph.conn.execute(
+            "SELECT id FROM nodes WHERE id = ?", (exact_form,)
+        ).fetchone()
+        if exact is not None:
+            return NodeResolution(reference, full_id=exact["id"])
+    ref = ref.lower()
+
+    if any(ch in PATTERN_CHARACTERS for ch in ref):
+        return NodeResolution(reference)
 
     if len(ref) >= FULL_ID_LENGTH:
         # A Full id the index does not hold. Only the store can still know it: a file
@@ -94,23 +105,17 @@ def resolve_node_reference(
                 "use its Full id."
             ),
         )
-    if any(ch in _LIKE_METACHARACTERS for ch in ref):
-        return NodeResolution(reference)
 
     candidates: set[str] = set()
     try:
         indexed = graph.resolve_node(ref)
+        if indexed is not None:
+            candidates.add(indexed["id"])
+        # The store is asked at every width, not only for the bare Short id: a file
+        # saved but not yet indexed can share a longer prefix just as well.
+        candidates.update(file_store.ids_with_prefix(ref))
     except UnresolvedNodeReference as exc:
         return NodeResolution(reference, problem=str(exc))
-    if indexed is not None:
-        candidates.add(indexed["id"])
-    if len(ref) == SHORT_ID_LENGTH:
-        try:
-            stored = file_store.resolve(ref)
-        except UnresolvedNodeReference as exc:
-            return NodeResolution(reference, problem=str(exc))
-        if stored is not None:
-            candidates.add(stored.id)
 
     if len(candidates) > 1:
         return NodeResolution(

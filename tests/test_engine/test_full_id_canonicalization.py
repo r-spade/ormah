@@ -640,3 +640,249 @@ def test_audit_detail_survives_canonicalization(nodes):
     nodes.update_node(UNIQUE, UpdateNodeRequest(title="Renamed"))
     detail = nodes.db.conn.execute("SELECT detail FROM audit_log").fetchone()["detail"]
     assert json.loads(detail) == {"changed_fields": ["title"]}
+
+
+# --- found by independent review of the change ----------------------------
+#
+# Each of these was a way the rules above did not hold: a reference shape the resolver
+# let past the file store, a pattern that reached a glob, or an entry point that did
+# not go through the resolver at all.
+
+
+def _save_unindexed(engine, node_id: str, title: str = "Not yet indexed") -> None:
+    engine.file_store.save(
+        MemoryNode(
+            id=node_id, type=NodeType.fact, title=title, content="On disk only.",
+            source="test",
+        )
+    )
+
+
+class TestResolverReviewFindings:
+    @pytest.mark.parametrize(
+        "reference",
+        [AMBIGUOUS, f"{AMBIGUOUS}-", COLLIDER_A[:20], COLLIDER_A[:35], AMBIGUOUS.upper()],
+    )
+    def test_any_prefix_shared_with_an_unindexed_file_is_ambiguous(self, engine, reference):
+        """The store is asked at every prefix width and in either case, not only for the
+        lower-case 8-character Short id, and the refusal names both Full ids."""
+        _index(engine, COLLIDER_A, "Indexed")
+        _save_unindexed(engine, COLLIDER_B)
+
+        resolution = engine.resolve_node_reference(reference)
+
+        assert resolution.full_id is None
+        assert COLLIDER_A in resolution.problem and COLLIDER_B in resolution.problem
+
+    @pytest.mark.parametrize("call", ["update", "outdated", "delete"])
+    def test_mutators_refuse_a_wider_prefix_shared_with_an_unindexed_file(self, engine, call):
+        _index(engine, COLLIDER_A, "Indexed")
+        _save_unindexed(engine, COLLIDER_B)
+        before = _snapshot(engine)
+        reference = f"{AMBIGUOUS}-0000"
+
+        _refusal({
+            "update": lambda: engine.update_node(reference, UpdateNodeRequest(content="x")),
+            "outdated": lambda: engine.mark_outdated(reference, "stale"),
+            "delete": lambda: engine.delete_node(reference),
+        }[call])
+
+        assert _snapshot(engine) == before
+
+    def test_prefix_of_a_memory_that_is_only_on_disk_resolves(self, engine):
+        _save_unindexed(engine, UNIQUE_ID)
+
+        assert engine.resolve_node_reference(UNIQUE_ID[:20]).full_id == UNIQUE_ID
+
+    def test_upper_case_full_id_resolves(self, nodes):
+        assert nodes.resolve_node_reference(UNIQUE_ID.upper()).full_id == UNIQUE_ID
+
+    @pytest.mark.parametrize(
+        "reference",
+        ["a**bcdef", "********", "cafef00?", "[afef00d", "a**bcdef-0000-4000-8000-000000000001"],
+    )
+    def test_glob_syntax_is_absent_not_a_crash(self, nodes, reference):
+        """`**` inside a filename pattern makes `Path.glob` raise ValueError."""
+        assert nodes.resolve_node_reference(reference).absent
+        assert nodes.file_store.load(reference) is None
+
+    def test_remember_with_a_glob_link_still_saves_the_memory(self, nodes):
+        node_id, text = nodes.remember(
+            CreateNodeRequest(
+                content="Has one good and one nonsense link.",
+                type=NodeType.fact,
+                connections=[Connection(target=UNIQUE), Connection(target="a**bcdef")],
+            )
+        )
+
+        saved = nodes.file_store.load(node_id)
+        assert [c.target for c in saved.connections] == [UNIQUE_ID]
+        assert "Skipped 1 link" in text
+
+    def test_file_that_stopped_parsing_is_a_refusal_with_a_warm_cache(self, nodes):
+        """A cached path is trusted on existence, so the parse error surfaces at load.
+        It must be the documented refusal, not the parser's own exception."""
+        assert nodes.file_store.load(COLLIDER_A) is not None  # warm the cache
+        nodes.file_store._find_file(COLLIDER_A).write_text("not a node", encoding="utf-8")
+        before = (_edges(nodes), _audit(nodes))
+
+        _refusal(lambda: nodes.update_node(COLLIDER_A, UpdateNodeRequest(content="x")))
+        _refusal(lambda: nodes.connect(ConnectRequest(source_id=COLLIDER_A, target_id=OTHER_ID)))
+
+        assert (_edges(nodes), _audit(nodes)) == before
+
+    def test_decay_survives_an_unreadable_node_with_a_warm_cache(self, nodes, monkeypatch, caplog):
+        from ormah.background import decay_manager
+
+        assert nodes.file_store.load(COLLIDER_A) is not None  # warm the cache
+        nodes.file_store._find_file(COLLIDER_A).write_text("not a node", encoding="utf-8")
+        monkeypatch.setattr(decay_manager.lifecycle, "retrievability", lambda *a, **k: 0.0)
+
+        with caplog.at_level("INFO", logger=decay_manager.logger.name):
+            decay_manager.run_decay(nodes)
+
+        tiers = {
+            r["id"]: r["tier"] for r in nodes.db.conn.execute("SELECT id, tier FROM nodes")
+        }
+        assert tiers[UNIQUE_ID] == "archival"
+        assert "Decay manager failed" not in caplog.text
+
+
+class TestSelfReferenceReviewFindings:
+    def test_connect_by_short_and_full_id_of_one_memory_writes_no_self_edge(self, nodes):
+        before = _snapshot(nodes)
+
+        result = nodes.connect(ConnectRequest(source_id=UNIQUE, target_id=UNIQUE_ID))
+
+        assert "itself" in result
+        assert _snapshot(nodes) == before
+
+    def test_connecting_the_same_pair_twice_keeps_one_markdown_link(self, nodes):
+        for source in (UNIQUE, UNIQUE_ID):
+            nodes.connect(ConnectRequest(source_id=source, target_id=OTHER_ID))
+
+        targets = [c.target for c in nodes.file_store.load(UNIQUE_ID).connections]
+        assert targets == [OTHER_ID]
+
+    def test_remember_stores_one_link_for_a_short_and_full_id_of_one_memory(self, nodes):
+        node_id, _ = nodes.remember(
+            CreateNodeRequest(
+                content="Links twice to one memory.",
+                type=NodeType.fact,
+                connections=[Connection(target=UNIQUE_ID), Connection(target=UNIQUE)],
+            )
+        )
+
+        assert [c.target for c in nodes.file_store.load(node_id).connections] == [UNIQUE_ID]
+
+    def test_update_does_not_link_a_memory_to_itself(self, nodes):
+        text = nodes.update_node(
+            OTHER_ID,
+            UpdateNodeRequest(
+                add_connections=[Connection(target=OTHER_ID[:8]), Connection(target=UNIQUE)]
+            ),
+        )
+
+        assert [c.target for c in nodes.file_store.load(OTHER_ID).connections] == [UNIQUE_ID]
+        assert "Skipped 1 link" in text
+
+    def test_maintenance_edge_between_two_names_of_one_memory_is_skipped(self, nodes):
+        counts = nodes.apply_maintenance_results(
+            {"edges": [{"node_a_id": UNIQUE, "node_b_id": UNIQUE_ID, "edge_type": "related_to"}]}
+        )
+
+        assert counts["edges"] == 0 and counts["skipped"] == 1
+        assert _edges(nodes) == []
+
+    def test_maintenance_consolidation_of_one_memory_under_two_names_is_skipped(self, nodes):
+        before = _files(nodes)
+
+        counts = nodes.apply_maintenance_results(
+            {"consolidations": [
+                {"node_ids": [UNIQUE, UNIQUE_ID], "title": "Copy", "content": "Copy."}
+            ]}
+        )
+
+        assert counts["consolidations"] == 0 and counts["skipped"] == 1
+        assert _files(nodes) == before
+
+
+class TestMaintenanceBatchReviewFindings:
+    def test_alias_ambiguous_at_submission_is_not_applied_once_a_collider_is_gone(self, nodes):
+        """The first decision removes one collider. Resolved only then, the second
+        decision's `deadbeef` would have named the survivor and merged it away."""
+        counts = nodes.apply_maintenance_results(
+            {"merges": [
+                {"keep_id": OTHER_ID, "discard_id": COLLIDER_A},
+                {"keep_id": UNIQUE_ID, "discard_id": AMBIGUOUS},
+            ]}
+        )
+
+        assert counts["merges"] == 1 and counts["unresolved"] == 1
+        assert nodes.file_store.load(COLLIDER_B) is not None
+
+    def test_edge_of_an_unknown_type_is_not_written(self, nodes):
+        counts = nodes.apply_maintenance_results(
+            {"edges": [
+                {"node_a_id": UNIQUE_ID, "node_b_id": OTHER_ID, "edge_type": "not_an_edge_type"}
+            ]}
+        )
+
+        assert counts["edges"] == 0 and counts["skipped"] == 1
+        assert _edges(nodes) == []
+
+    def test_short_merge_id_prefix_undoes_nothing(self, nodes):
+        nodes.execute_merge(UNIQUE_ID, OTHER_ID)
+        merge_id = nodes.db.conn.execute("SELECT id FROM merge_history").fetchone()["id"]
+
+        result = nodes.undo_merge(merge_id[:1])
+
+        assert "too short" in result
+        assert nodes.db.conn.execute(
+            "SELECT undone_at FROM merge_history"
+        ).fetchone()["undone_at"] is None
+
+
+class TestSubmitFeedbackReviewFindings:
+    def _rows(self, engine) -> int:
+        return sum(
+            engine.db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("affinity", "signals")
+        )
+
+    def test_prefix_does_not_credit_a_removed_memory_when_a_live_one_shares_it(self, engine):
+        """Collider A was whispered and is gone; collider B is live and never surfaced.
+        `deadbeef` names B. Matched against whisper_log alone it credited A."""
+        _index(engine, COLLIDER_B, "Live, never whispered")
+        _log_whisper(engine, COLLIDER_A)
+
+        result = engine.submit_feedback(AMBIGUOUS, 1, "explicit")
+
+        assert "Feedback recorded" not in result
+        assert self._rows(engine) == 0
+
+    @pytest.mark.parametrize("reference", ["c", "cafef00", "cafef00_", "cafef00d%", "", 7, None])
+    def test_short_pattern_or_non_string_reference_is_refused(self, nodes, reference):
+        _log_whisper(nodes, UNIQUE_ID)
+
+        result = nodes.submit_feedback(reference, 1, "explicit")
+
+        assert "Feedback recorded" not in result
+        assert self._rows(nodes) == 0
+
+    def test_whisper_log_id_does_not_make_a_one_character_prefix_an_alias(self, nodes):
+        log_id = _log_whisper(nodes, UNIQUE_ID)
+
+        result = nodes.submit_feedback(UNIQUE[:1], 1, "explicit", whisper_log_id=log_id)
+
+        assert "Feedback recorded" not in result
+        assert self._rows(nodes) == 0
+
+    def test_padded_upper_case_full_id_is_accepted(self, nodes):
+        _log_whisper(nodes, UNIQUE_ID)
+
+        result = nodes.submit_feedback(f"  {UNIQUE_ID.upper()} ", 1, "explicit")
+
+        assert UNIQUE_ID in result
+        rows = nodes.db.conn.execute("SELECT node_id FROM affinity").fetchall()
+        assert [r["node_id"] for r in rows] == [UNIQUE_ID]

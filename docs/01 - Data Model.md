@@ -66,11 +66,17 @@ chance that some pair in a store does is about 0.3% at 5,000 memories, 1.7% at
 transcripts contain it, but every entry point resolves it first through
 `MemoryEngine.resolve_node_reference` (`engine/node_reference.py`):
 
-- an exact id always wins;
-- otherwise a prefix of **at least 8 characters** is looked up; the index must
-  find at most one memory under it, and for exactly 8 characters the file store
-  must agree as well (a saved, not-yet-indexed file can share the short id);
+- an exact id always wins, in either letter case;
+- otherwise a prefix of **at least 8 characters** is looked up; the index and the
+  file store must together find exactly one memory under it, at every prefix width
+  (a saved, not-yet-indexed file can share any prefix);
+- a reference containing SQL `LIKE` or glob syntax (`% _ \ * ? [ ]`) is not an id
+  and is reported as not found without being looked up;
 - anything shorter than 8 characters is refused, even when it happens to be unique.
+
+Feedback and merge undo follow the same rules. Two references that resolve to the
+same memory are never treated as two memories: a merge, edge or consolidation that
+would join a memory to itself is not applied, and a repeated link is stored once.
 
 The outcome is one of three: resolved to one full id; absent ("not found"); or
 unresolved (ambiguous, too short, or a candidate file that will not parse). An
