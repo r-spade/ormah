@@ -91,6 +91,95 @@ def test_recall_by_an_ambiguous_short_id_names_every_candidate(client):
     assert all(node_id in detail for node_id in ids)
 
 
+_UNIQUE_ID = "cafef00d-0000-4000-8000-000000000001"
+_OTHER_ID = "0ddba11a-0000-4000-8000-000000000002"
+_ABSENT_ID = "abad1dea-0000-4000-8000-000000000003"
+_COLLIDERS = [f"deadbeef-0000-4000-8000-00000000000{s}" for s in "ab"]
+
+
+@pytest.fixture
+def seeded(client):
+    from ormah.models.node import MemoryNode, NodeType, Tier
+
+    engine = client.app.state.engine
+    for node_id in [_UNIQUE_ID, _OTHER_ID, *_COLLIDERS]:
+        node = MemoryNode(
+            id=node_id, type=NodeType.fact, tier=Tier.working,
+            title=f"Node {node_id[:4]}", content=f"content {node_id}", source="test",
+        )
+        engine.builder.index_single(engine.file_store.save(node))
+    return client
+
+
+def _audit_ids(client) -> list[str]:
+    rows = client.app.state.engine.db.conn.execute("SELECT node_id FROM audit_log").fetchall()
+    return [r["node_id"] for r in rows]
+
+
+@pytest.mark.parametrize(
+    "method, path, body",
+    [
+        ("get", "/agent/recall/{ref}", None),
+        ("post", "/agent/update/{ref}", {"title": "Renamed"}),
+        ("post", "/agent/outdated/{ref}", {"reason": "old"}),
+        ("delete", "/agent/recall/{ref}", None),
+    ],
+)
+class TestRoutesCanonicalizeNodeReferences:
+    def _call(self, client, method, path, body, ref):
+        url = path.format(ref=ref)
+        if method == "get":
+            return client.get(url)
+        if method == "delete":
+            return client.delete(url)
+        return client.post(url, json=body)
+
+    def test_unique_short_id_answers_with_the_full_id(self, seeded, method, path, body):
+        resp = self._call(seeded, method, path, body, _UNIQUE_ID[:8])
+
+        assert resp.status_code == 200
+        assert resp.json()["node_id"] == _UNIQUE_ID
+        if method != "get":
+            assert _audit_ids(seeded) == [_UNIQUE_ID]
+
+    def test_ambiguous_short_id_is_409_and_changes_nothing(self, seeded, method, path, body):
+        resp = self._call(seeded, method, path, body, "deadbeef")
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert all(node_id in detail for node_id in _COLLIDERS)
+        assert _audit_ids(seeded) == []
+
+    def test_absent_full_id_is_404(self, seeded, method, path, body):
+        resp = self._call(seeded, method, path, body, _ABSENT_ID)
+
+        assert resp.status_code == 404
+        assert _audit_ids(seeded) == []
+
+
+def test_connect_route_records_full_ids_for_short_aliases(seeded):
+    resp = seeded.post(
+        "/agent/connect", json={"source_id": _UNIQUE_ID[:8], "target_id": _OTHER_ID[:8]},
+    )
+
+    assert resp.status_code == 200
+    rows = seeded.app.state.engine.db.conn.execute(
+        "SELECT source_id, target_id FROM edges"
+    ).fetchall()
+    assert [(r["source_id"], r["target_id"]) for r in rows] == [(_UNIQUE_ID, _OTHER_ID)]
+
+
+def test_connect_route_refuses_an_ambiguous_alias_with_409(seeded):
+    resp = seeded.post(
+        "/agent/connect", json={"source_id": _UNIQUE_ID, "target_id": "deadbeef"},
+    )
+
+    assert resp.status_code == 409
+    assert seeded.app.state.engine.db.conn.execute(
+        "SELECT COUNT(*) FROM edges"
+    ).fetchone()[0] == 0
+
+
 def test_stats(client):
     resp = client.get("/stats")
     assert resp.status_code == 200

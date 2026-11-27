@@ -105,7 +105,7 @@ def cmd_ingest(args):
             else:
                 lines = [f"Extracted {count} memories:"]
                 for mem in data.get("memories", []):
-                    lines.append(f"  - {mem['title']} (ID: {mem['node_id'][:8]}...)")
+                    lines.append(f"  - {mem['title']} (ID: {mem['node_id']})")
                 print("\n".join(lines))
 
     _api(call)
@@ -169,7 +169,7 @@ def cmd_ingest_session(args):
                     title = mem.get("title", "untitled")
                     node_id = mem.get("node_id")
                     if node_id:
-                        lines.append(f"  - {title} (ID: {node_id[:8]}...)")
+                        lines.append(f"  - {title} (ID: {node_id})")
                     else:
                         mem_type = mem.get("type", "fact")
                         lines.append(f"  - [{mem_type}] {title}")

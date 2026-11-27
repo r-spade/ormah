@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 
-def _feedback_id_suffix(node: dict[str, Any], *, short: bool = False) -> str:
+def _feedback_id_suffix(node: dict[str, Any], *, inline: bool = False) -> str:
+    """The node's Full id (never a prefix: agents pass it back to tools, #280)."""
     node_id = node.get("id", "")
-    if short:
-        label = f"id: {node_id[:8]}..." if node_id else "id: unknown"
+    if inline:
+        label = f"id: {node_id}" if node_id else "id: unknown"
     else:
         label = f"ID: {node_id}"
     whisper_log_id = node.get("_whisper_log_id")
@@ -55,7 +56,7 @@ def format_node_with_neighbors(
         lines.append("### Nearby Memories")
         for n in neighbors[:10]:
             title = n.get("title") or _excerpt(n.get("content", ""))
-            lines.append(f"- [{n['type']}] {title} ({_feedback_id_suffix(n, short=True)})")
+            lines.append(f"- [{n['type']}] {title} ({_feedback_id_suffix(n, inline=True)})")
 
     return "\n".join(lines)
 
@@ -114,7 +115,7 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
                 node = {**node, "_whisper_log_id": r["_whisper_log_id"]}
             parts.append(
                 f"   {_feedback_id_suffix(node)} | Score: {score:.3f} | "
-                f"via {edge_type} from {seed_id[:8]}..."
+                f"via {edge_type} from {seed_id}"
             )
             content = node.get("content", "").strip()
             if content:
@@ -134,7 +135,7 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
                 node = {**node, "_whisper_log_id": r["_whisper_log_id"]}
             parts.append(
                 f"   {_feedback_id_suffix(node)} | Score: {score:.3f} | "
-                f"contradicts {seed_id[:8]}..."
+                f"contradicts {seed_id}"
             )
             content = node.get("content", "").strip()
             if content:

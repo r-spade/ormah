@@ -7,6 +7,13 @@ ALL_TOOLS: Combined list for adapters that want the full set.
 
 from __future__ import annotations
 
+# Memory ids are 36-character UUIDs. Ormah shows them in full, and an agent should pass
+# them back the same way: an 8-character prefix is not unique across a store (#280).
+_FULL_ID_HINT = (
+    "The full 36-character ID of the {what}, copied exactly as Ormah showed it "
+    "(do not shorten it)."
+)
+
 _RECALL_NODE_TOOL = {
     "name": "recall_node",
     "description": (
@@ -18,7 +25,7 @@ _RECALL_NODE_TOOL = {
         "properties": {
             "node_id": {
                 "type": "string",
-                "description": "The UUID of the memory to retrieve.",
+                "description": _FULL_ID_HINT.format(what="memory to retrieve"),
             },
         },
         "required": ["node_id"],
@@ -31,8 +38,9 @@ TOOLS = [
         "description": (
             "Store a new memory. Use this to save facts, decisions, "
             "preferences, observations, or any information worth remembering across sessions. "
-            "Memories are automatically indexed and embedded. If you have node IDs from a recent "
-            "recall, pass them via `links` to connect related memories at creation time — "
+            "Memories are automatically indexed and embedded. If you have full node IDs from a "
+            "recent recall or whisper, pass them via `links` to connect related memories at "
+            "creation time — "
             "background jobs will also discover relationships automatically."
         ),
         "parameters": {
@@ -97,7 +105,9 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Node IDs of related memories to link at creation time. "
+                        "Full node IDs (36 characters, exactly as shown) of related memories to "
+                        "link at creation time. A link that does not name exactly one memory is "
+                        "skipped and reported. "
                         "Use when you have IDs from a recent recall and know these memories belong together. "
                         "Creates 'related_to' edges. Background jobs will classify the relationship type further."
                     ),
@@ -162,7 +172,7 @@ TOOLS = [
             "properties": {
                 "node_id": {
                     "type": "string",
-                    "description": "The UUID of the memory to mark as outdated.",
+                    "description": _FULL_ID_HINT.format(what="memory to mark as outdated"),
                 },
                 "reason": {
                     "type": "string",
@@ -188,7 +198,7 @@ TOOLS = [
             "properties": {
                 "node_id": {
                     "type": "string",
-                    "description": "The ID of the memory node the feedback is about.",
+                    "description": _FULL_ID_HINT.format(what="memory the feedback is about"),
                 },
                 "signal": {
                     "type": "integer",
@@ -228,7 +238,9 @@ TOOLS = [
             "**Phase 2** — analyze all four batches in-context, then call again with that exact 'job_id' and 'results':\n"
             "  - edges: list of {node_a_id, node_b_id, edge_type, reason} — use 'none' to skip\n"
             "  - merges: list of {keep_id, discard_id, merged_content, merged_title}\n"
-            "  - consolidations: list of {node_ids, title, content, type}\n\n"
+            "  - consolidations: list of {node_ids, title, content, type}\n"
+            "Use the full node IDs exactly as Phase 1 listed them; a decision naming an ID that "
+            "does not resolve to exactly one memory is not applied.\n\n"
             "The reservation expires 30 minutes after preparation by default. "
             "A job_id-only call polls that assignment without renewing it. "
             "On busy, stop; another run is underway. On expired/replaced/failed/lost, "
@@ -320,7 +332,7 @@ ADMIN_TOOLS = [
             "properties": {
                 "node_id": {
                     "type": "string",
-                    "description": "The UUID of the memory to update.",
+                    "description": _FULL_ID_HINT.format(what="memory to update"),
                 },
                 "content": {"type": "string", "description": "New content."},
                 "type": {"type": "string", "description": "New type."},
@@ -345,8 +357,14 @@ ADMIN_TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "source_id": {"type": "string", "description": "Source memory UUID."},
-                "target_id": {"type": "string", "description": "Target memory UUID."},
+                "source_id": {
+                    "type": "string",
+                    "description": _FULL_ID_HINT.format(what="source memory"),
+                },
+                "target_id": {
+                    "type": "string",
+                    "description": _FULL_ID_HINT.format(what="target memory"),
+                },
                 "edge": {
                     "type": "string",
                     "enum": [
@@ -419,7 +437,7 @@ ADMIN_TOOLS = [
     {
         "name": "undo_merge",
         "description": (
-            "Rollback a merge by its ID (supports prefix match). "
+            "Rollback a merge by its full merge ID. "
             "Restores the removed node with its original edges."
         ),
         "parameters": {
@@ -427,7 +445,7 @@ ADMIN_TOOLS = [
             "properties": {
                 "merge_id": {
                     "type": "string",
-                    "description": "The UUID (or prefix) of the merge to undo.",
+                    "description": "The full merge ID, exactly as shown by list_merges or the merge result.",
                 },
             },
             "required": ["merge_id"],
@@ -450,7 +468,7 @@ ADMIN_TOOLS = [
                 },
                 "node_id": {
                     "type": "string",
-                    "description": "Filter entries for a specific node ID.",
+                    "description": "Filter entries for one memory by its full node ID.",
                 },
                 "operation": {
                     "type": "string",

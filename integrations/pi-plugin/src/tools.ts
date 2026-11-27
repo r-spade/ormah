@@ -121,7 +121,8 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 			),
 			links: Type.Optional(
 				Type.Array(Type.String(), {
-					description: "Node IDs of related memories to link at creation time.",
+					description:
+						"Full node IDs (36 characters, exactly as shown) of related memories to link at creation time.",
 				}),
 			),
 		}),
@@ -192,7 +193,8 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 		promptSnippet: "Fetch one Ormah memory by ID with its connections",
 		parameters: Type.Object({
 			node_id: Type.String({
-				description: "The UUID of the memory to retrieve.",
+				description:
+					"The full 36-character ID of the memory to retrieve, copied exactly as Ormah showed it.",
 			}),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -217,7 +219,8 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 		promptSnippet: "Mark an Ormah memory outdated (demote in search)",
 		parameters: Type.Object({
 			node_id: Type.String({
-				description: "The UUID of the memory to mark outdated.",
+				description:
+					"The full 36-character ID of the memory to mark outdated, copied exactly as Ormah showed it.",
 			}),
 			reason: Type.Optional(
 				Type.String({
@@ -244,7 +247,8 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 		promptSnippet: "Record relevance feedback on an Ormah memory",
 		parameters: Type.Object({
 			node_id: Type.String({
-				description: "The memory node ID the feedback is about.",
+				description:
+					"The full 36-character ID of the memory the feedback is about, copied exactly as Ormah showed it.",
 			}),
 			signal: Type.Union([Type.Literal(1), Type.Literal(-1)], {
 				description: "1 = useful, -1 = not relevant.",

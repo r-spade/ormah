@@ -39,7 +39,7 @@ When feedback is submitted:
 4. it records a corresponding `signals` ledger row
 5. explicit feedback also marks relevant `review_log` entries as answered
 
-Whispered short ids work here too: the resolver accepts full ids first, then falls back to a unique prefix match against `whisper_log`.
+Whispers and recall results show the full node id, and agents should send that back. Short ids from older transcripts still work: the resolver accepts a full id first, then falls back to a unique prefix match against `whisper_log`. A prefix is refused, with nothing recorded, when it matches more than one `whisper_log` node or more than one memory in the index — a memory that was never surfaced can still share it (#280). A `whisper_log_id` pins the event, so with one the node reference only has to be consistent with that event's node.
 
 ## How Candidates Get Populated
 
