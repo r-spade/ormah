@@ -273,15 +273,22 @@ def _apply_edge(
     edge_type: str,
     reason: str,
     similarity: float = 0.0,
-) -> None:
+) -> bool:
     """Record a link decision: write to auto_link_checked and optionally create an edge.
 
     ``edge_type="none"`` records the pair as checked without creating an edge.
+
+    Returns True only when this call actually inserted a NEW edge row. An
+    ``INSERT OR IGNORE`` that hit an existing edge inserted nothing — counting that as
+    a creation would burn the run's edge budget on a link a concurrent writer had
+    already made, and log an edge that was never created.
     """
     from ormah.models.node import Connection, EdgeType
 
     pair = tuple(sorted([node_a_id, node_b_id]))
     now = datetime.now(timezone.utc).isoformat()
+
+    edge_created = False
 
     with engine.db.transaction() as conn:
         conn.execute(
@@ -291,26 +298,73 @@ def _apply_edge(
         )
 
         if edge_type not in ("none", "error"):
-            conn.execute(
-                "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            # OR IGNORE, not a raw INSERT: the "edge exists?" guard ran at collection
+            # time, before the LLM call. Any concurrent writer (ingest auto-link,
+            # conflict_detector, a reindex) may have created this same
+            # (source, target, type) in the meantime. Losing that race means the link
+            # already exists — the outcome we wanted. A raw INSERT turned it into an
+            # IntegrityError that rolled back the auto_link_checked row above and
+            # aborted the entire run (#117).
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created, reason) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (node_a_id, node_b_id, edge_type, round(similarity, 3), now, reason),
             )
+            edge_created = cur.rowcount > 0
 
     if edge_type not in ("none", "error"):
         try:
             mem_node = engine.file_store.load(node_a_id)
-            if mem_node is not None:
-                md_conn = Connection(
-                    target=node_b_id,
-                    edge=EdgeType(edge_type),
-                    weight=round(similarity, 2),
+            # Ensure the connection is in the file, whether or not WE won the insert.
+            # The markdown is the source of truth (a reindex rebuilds edges from it) and
+            # the winner's own save is best-effort. If the winner committed the row but
+            # failed to save its file, skipping this append would let the next reindex
+            # delete the edge, while the auto_link_checked row committed above would stop
+            # the pair from ever being reconsidered — the link would be lost for good.
+            # Idempotent: adds nothing when the connection is already there.
+            if mem_node is not None and not any(
+                c.target == node_b_id and c.edge.value == edge_type
+                for c in mem_node.connections
+            ):
+                mem_node.connections.append(
+                    Connection(
+                        target=node_b_id,
+                        edge=EdgeType(edge_type),
+                        weight=round(similarity, 2),
+                    )
                 )
-                mem_node.connections.append(md_conn)
                 mem_node.touch_updated()
                 engine.file_store.save(mem_node)
         except Exception as e:
-            logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
+            # Compensate. The markdown is the source of truth — a rebuild recreates the
+            # edge table from it. Swallowing this (as the code used to) left the pair
+            # marked as checked with the connection missing from the file: the rebuild
+            # then dropped the DB-only edge, and the checked row stopped the pair from
+            # ever being judged again. The link was lost for good.
+            #
+            # Undo the marker, and undo the edge only if WE inserted it — a row a
+            # concurrent writer created is not ours to delete, and its own markdown is
+            # its own responsibility. Then propagate: the caller leaves the node
+            # unresolved, so the watermark fails closed and the pair is retried.
+            logger.warning(
+                "auto_linker: markdown persist failed for %s -> %s; undoing the checked "
+                "mark%s so the pair is retried: %s",
+                node_a_id[:8], node_b_id[:8],
+                " and the edge we inserted" if edge_created else "", e,
+            )
+            with engine.db.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                )
+                if edge_created:
+                    conn.execute(
+                        "DELETE FROM edges WHERE source_id = ? AND target_id = ? "
+                        "AND edge_type = ?",
+                        (node_a_id, node_b_id, edge_type),
+                    )
+            raise
+
+    return edge_created
 
 
 @serialized_memory_job
@@ -400,13 +454,30 @@ def run_auto_linker(engine) -> None:
                         node_resolved = False
                         continue
                     relationship = llm_result["relationship"]  # may be 'error' (invalid output)
-                    _apply_edge(
-                        engine, node["id"], match["id"], relationship,
-                        llm_result.get("reason", ""), similarity,
-                    )
+                    try:
+                        edge_created = _apply_edge(
+                            engine, node["id"], match["id"], relationship,
+                            llm_result.get("reason", ""), similarity,
+                        )
+                    except Exception as e:
+                        # A single unwritable pair must never abort the run. It used to:
+                        # the exception reached the top-level handler, killed the run and
+                        # froze the watermark for the whole store (#117). Log the pair —
+                        # the old failure logged nothing, so the colliding edge was
+                        # unknowable after the fact.
+                        logger.warning(
+                            "auto_linker: edge apply failed for %s -> %s (%s): %s",
+                            node["id"][:8], match["id"][:8], relationship, e,
+                        )
+                        node_resolved = False   # fail closed: watermark stays behind this node
+                        continue
                     # 'error' (poison content) is recorded in auto_link_checked by _apply_edge
                     # and the node still counts as resolved → watermark advances (council v2 crit#2).
-                    if relationship not in ("none", "error"):
+                    # Only a real insert counts: an INSERT OR IGNORE that hit an edge a
+                    # concurrent writer had already created inserted nothing, and charging it
+                    # to max_edges would spend the run's budget on work it did not do, cutting
+                    # the run short for unrelated candidates.
+                    if edge_created:
                         created += 1
 
             if not node_resolved:
