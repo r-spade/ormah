@@ -1,0 +1,49 @@
+{
+  "publication_status": "smoke_planning_estimates_not_measured_llm_usage",
+  "method": "ceil(prompt characters / 4); output allowances are not CLI hard caps; excludes CLI system overhead and generated answer text in judge baselines",
+  "datasets": {
+    "locomo": {
+      "questions": 1986,
+      "scored_questions": 1540,
+      "types": {
+        "2": 321,
+        "3": 96,
+        "1": 282,
+        "4": 841,
+        "5": 446
+      },
+      "unique_sessions": 272,
+      "unique_turns": 5882,
+      "extraction_input_tokens_char_estimate": 592265,
+      "extraction_output_token_allowance": 1114112,
+      "truncated_sessions": 0,
+      "raw_answer_input_tokens_char_estimate": 4113595,
+      "judge_base_input_tokens_char_estimate_excluding_answers": 1227848,
+      "answer_output_allowance": 2033664,
+      "judge_output_allowance": 508416
+    },
+    "longmemeval": {
+      "questions": 500,
+      "scored_questions": 500,
+      "types": {
+        "single-session-user": 70,
+        "multi-session": 133,
+        "single-session-preference": 30,
+        "temporal-reasoning": 133,
+        "knowledge-update": 78,
+        "single-session-assistant": 56
+      },
+      "unique_sessions": 19829,
+      "unique_turns": 199641,
+      "extraction_input_tokens_char_estimate": 79016259,
+      "extraction_output_token_allowance": 81219584,
+      "truncated_sessions": 0,
+      "judge_base_input_tokens_char_estimate_excluding_answers": 86342,
+      "answer_output_allowance": 512000,
+      "judge_output_allowance": 128000,
+      "raw_answer_input_tokens_char_estimate_sample50": 123874,
+      "raw_answer_input_tokens_char_estimate_projected500": 1238740,
+      "answer_projection_caveat": "50 single-session-user questions only; other question types may have different context lengths"
+    }
+  }
+}
