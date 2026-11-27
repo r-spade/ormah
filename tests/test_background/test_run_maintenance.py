@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.models.node import CreateNodeRequest, NodeType
 
@@ -195,7 +198,9 @@ class TestApplyMaintenanceResults:
 
     def test_empty_results_ok(self, engine):
         counts = engine.apply_maintenance_results({})
-        assert counts == {"edges": 0, "merges": 0, "consolidations": 0, "skipped": 0}
+        assert counts == {
+            "edges": 0, "merges": 0, "consolidations": 0, "skipped": 0, "errors": [],
+        }
 
 
 class TestGetMaintenanceBatches:
@@ -273,3 +278,199 @@ class TestWhisperSignal:
         text = engine.get_whisper_context(prompt="how does Python indexing work")
         assert MAINTENANCE_DUE_SIGNAL in text
         assert "continue the conversation without blocking the user" in text
+
+
+def _issued(*clusters: list[str], pairs: tuple[tuple[str, str], ...] = ()) -> dict:
+    """Phase 1 batches that issued these node ids, shaped like get_maintenance_batches."""
+    def node(nid: str) -> dict:
+        return {"id": nid, "title": "", "type": "fact", "space": "", "content": ""}
+
+    def candidates() -> list[dict]:
+        return [{"node_a": node(a), "node_b": node(b), "similarity": 0.9} for a, b in pairs]
+
+    return {
+        "link_candidates": candidates(),
+        "conflict_candidates": [],
+        "merge_candidates": candidates(),
+        "consolidation_clusters": [[node(n) for n in c] for c in clusters],
+        "summary": "",
+    }
+
+
+def _mistype(node_id: str) -> str:
+    """One-character transcription error in the last hex digit, as in the 2026-07-09 incident."""
+    return node_id[:-1] + ("1" if node_id[-1] != "1" else "2")
+
+
+def _tier(engine, node_id: str) -> str:
+    return engine.db.conn.execute("SELECT tier FROM nodes WHERE id = ?", (node_id,)).fetchone()[0]
+
+
+class TestApplyMaintenanceResultsRejects:
+
+    def test_consolidation_with_an_id_outside_the_issued_batch_applies_nothing(self, engine):
+        ids = _seed_similar_nodes(engine, 3)
+        submitted = [ids[0], ids[1], _mistype(ids[2])]
+
+        counts = engine.apply_maintenance_results(
+            {"consolidations": [
+                {"node_ids": submitted, "title": "Typo cluster", "content": "x", "type": "fact"},
+            ]},
+            issued=_issued(ids),
+        )
+
+        assert counts["consolidations"] == 0
+        assert counts["errors"] == [{
+            "kind": "consolidation",
+            "ids": submitted,
+            "reason": f"not in the issued batch: {submitted[2]}",
+        }]
+        assert engine.db.conn.execute(
+            "SELECT 1 FROM nodes WHERE title = 'Typo cluster'"
+        ).fetchone() is None
+        assert "archival" not in [_tier(engine, i) for i in ids]
+
+    def test_merge_naming_an_existing_node_outside_the_issued_batch_deletes_nothing(self, engine):
+        a, b, stranger = _seed_similar_nodes(engine, 3)
+
+        counts = engine.apply_maintenance_results(
+            {"merges": [{"keep_id": a, "discard_id": stranger, "merged_content": "both"}]},
+            issued=_issued(pairs=((a, b),)),
+        )
+
+        assert counts["merges"] == 0
+        assert counts["errors"] == [{
+            "kind": "merge", "ids": [a, stranger], "reason": f"not in the issued batch: {stranger}",
+        }]
+        assert engine.db.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE id IN (?, ?)", (a, stranger)
+        ).fetchone()[0] == 2
+
+    def test_edge_with_an_id_outside_the_issued_batch_records_nothing(self, engine):
+        a, b = _seed_similar_nodes(engine, 2)
+        typo = _mistype(b)
+
+        counts = engine.apply_maintenance_results(
+            {"edges": [{"node_a_id": a, "node_b_id": typo, "edge_type": "none", "reason": ""}]},
+            issued=_issued(pairs=((a, b),)),
+        )
+
+        assert counts["skipped"] == 0
+        assert counts["errors"] == [{
+            "kind": "edge", "ids": [a, typo], "reason": f"not in the issued batch: {typo}",
+        }]
+        assert engine.db.conn.execute(
+            "SELECT 1 FROM auto_link_checked WHERE node_a = ? OR node_b = ?", (typo, typo)
+        ).fetchone() is None
+
+    def test_short_ids_of_issued_nodes_are_in_the_batch(self, engine):
+        # Phase 1 issues Full ids; a submitted id may be a unique id prefix.
+        a, b = _seed_similar_nodes(engine, 2)
+
+        counts = engine.apply_maintenance_results(
+            {"merges": [{"keep_id": a[:8], "discard_id": b[:8]}]},
+            issued=_issued(pairs=((a, b),)),
+        )
+
+        assert (counts["merges"], counts["errors"]) == (1, [])
+
+    def test_items_inside_the_issued_batch_still_apply(self, engine):
+        a, b, c = _seed_similar_nodes(engine, 3)
+
+        counts = engine.apply_maintenance_results(
+            {
+                "edges": [{"node_a_id": a, "node_b_id": b, "edge_type": "supports", "reason": ""}],
+                "consolidations": [
+                    {"node_ids": [a, _mistype(c)], "title": "T", "content": "x", "type": "fact"},
+                ],
+            },
+            issued=_issued([a, c], pairs=((a, b),)),
+        )
+
+        assert counts["edges"] == 1
+        assert [e["kind"] for e in counts["errors"]] == ["consolidation"]
+
+    def test_consolidation_naming_a_missing_node_applies_nothing(self, engine):
+        # Without an issued batch, the 2026-07-09 typo created the node with 4 of 5 sources.
+        ids = _seed_similar_nodes(engine, 2)
+        submitted = [*ids, _mistype(ids[1])]
+
+        counts = engine.apply_maintenance_results({"consolidations": [
+            {"node_ids": submitted, "title": "Partial cluster", "content": "x", "type": "fact"},
+        ]})
+
+        assert counts["consolidations"] == 0
+        assert counts["errors"] == [{
+            "kind": "consolidation", "ids": submitted, "reason": f"node not found: {submitted[2]}",
+        }]
+        assert engine.db.conn.execute(
+            "SELECT 1 FROM nodes WHERE title = 'Partial cluster'"
+        ).fetchone() is None
+        assert "archival" not in [_tier(engine, i) for i in ids]
+
+    def test_merge_whose_node_an_earlier_merge_removed_is_an_error(self, engine):
+        a, b = _seed_similar_nodes(engine, 2)
+        merge = {"keep_id": a, "discard_id": b}
+
+        counts = engine.apply_maintenance_results({"merges": [merge, dict(merge)]})
+
+        gone = a if engine.graph.get_node(a) is None else b  # _pick_keeper chose the other
+        assert counts["merges"] == 1
+        assert counts["errors"] == [
+            {"kind": "merge", "ids": [a, b], "reason": f"node not found: {gone}"},
+        ]
+
+    def test_apply_time_exception_is_reported(self, engine):
+        a, b = _seed_similar_nodes(engine, 2)
+
+        counts = engine.apply_maintenance_results(
+            {"edges": [{"node_a_id": a, "node_b_id": b, "reason": "no edge_type"}]},
+        )
+
+        assert counts["edges"] == counts["skipped"] == 0
+        assert counts["errors"] == [
+            {"kind": "edge", "ids": [a, b], "reason": "KeyError: 'edge_type'"},
+        ]
+
+
+def test_maintenance_manager_checks_phase2_against_the_job_batches(engine):
+    from ormah.background.maintenance_manager import MaintenanceManager
+
+    a, b, stranger = _seed_similar_nodes(engine, 3)
+    engine.get_maintenance_batches = lambda: _issued(pairs=((a, b),))
+    manager = MaintenanceManager(engine)
+
+    def wait_for(job_id: str, status: str) -> dict:
+        deadline = time.monotonic() + 5
+        while (state := manager.get_status(job_id))["status"] != status:
+            assert time.monotonic() < deadline, state
+            threading.Event().wait(0.01)
+        return state
+
+    job_id = manager.start_phase1()["job_id"]
+    wait_for(job_id, "awaiting_results")
+    manager.submit_results(
+        {"edges": [{"node_a_id": a, "node_b_id": stranger, "edge_type": "supports"}]},
+        job_id=job_id,
+    )
+
+    summary = wait_for(job_id, "completed")["apply_summary"]
+    assert summary["edges"] == 0
+    assert summary["errors"] == [{
+        "kind": "edge", "ids": [a, stranger], "reason": f"not in the issued batch: {stranger}",
+    }]
+
+
+def test_maintenance_manager_rejects_every_item_when_the_job_issued_nothing(engine):
+    # _run_phase2 for a job it no longer holds: no batches to check against, so nothing applies.
+    from ormah.background.maintenance_manager import MaintenanceManager
+
+    a, b = _seed_similar_nodes(engine, 2)
+    MaintenanceManager(engine)._run_phase2(
+        "no-such-job",
+        {"edges": [{"node_a_id": a, "node_b_id": b, "edge_type": "supports"}]},
+    )
+
+    assert engine.db.conn.execute(
+        "SELECT 1 FROM edges WHERE source_id = ? AND target_id = ?", (a, b)
+    ).fetchone() is None

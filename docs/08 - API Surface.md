@@ -114,6 +114,12 @@ successful application records `last_maintenance_run` and releases the reservati
 The MCP adapter presents completion as `{"status": "applied", "job_id": "...",
 "summary": {...}}`; the HTTP route returns the job state.
 
+The summary counts `edges`, `merges`, `consolidations` and `skipped`, and lists
+each item that did not apply in `errors` as `{kind, ids, reason}`. An item naming a
+node id outside the job's batches, or a node that does not exist, is rejected and
+changes nothing; an exception while applying an item is listed the same way. The
+rest of the submission still applies.
+
 Missing/wrong/expired receipts and duplicate submissions return HTTP 409; a lost
 assignment after restart returns HTTP 404. No rejected submission applies results.
 A duplicate while applying must poll its receipt instead of submitting again.
